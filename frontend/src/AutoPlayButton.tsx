@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useTranslation } from "./i18n";
 
 import type { JSX } from "react";
 
@@ -24,6 +25,7 @@ const AutoPlayButton = (props: IProps): JSX.Element => {
     currentWinner,
     unsetAutoPlayWhenWinnerChanges,
   } = props;
+  const { t } = useTranslation();
 
   const [autoplay, setAutoplay] = React.useState<AutoPlay | null>(null);
 
@@ -59,14 +61,20 @@ const AutoPlayButton = (props: IProps): JSX.Element => {
     }
   };
   return (
-    <button className="big" onClick={handleClick} disabled={!canSubmit}>
+    <button
+      className={
+        "sj-btn " + (isCurrentPlayerTurn && canSubmit ? "sj-btn-primary" : "")
+      }
+      onClick={handleClick}
+      disabled={!canSubmit}
+    >
       {isCurrentPlayerTurn
-        ? `Play selected cards${
+        ? `${t("play.playSelected")}${
             playDescription !== null ? " (" + playDescription + ")" : ""
           }`
         : autoplay !== null
-          ? "Don't autoplay selected cards"
-          : "Autoplay selected cards"}
+          ? t("play.cancelAutoplay")
+          : t("play.autoplay")}
     </button>
   );
 };

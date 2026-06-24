@@ -1,0 +1,111 @@
+# syntax=docker/dockerfile:1
+#
+# Self-contained, single-arch (linux/amd64) deploy image for the Shengji game.
+#
+# This is the image the user's fork deploys to Koyeb (and which the optional
+# docker-publish workflow pushes to GHCR). Unlike the legacy root `Dockerfile`,
+# it depends on NOTHING outside official base images — no rbtying build image,
+# no cargo-chef, no multi-arch musl cross-compilers.
+#
+# Architecture: a single `shengji` binary serves BOTH the embedded static
+# frontend and the WebSocket `/api`. The frontend is built first (Stage A),
+# then embedded into the binary at compile time via `include_dir!` (Stage B),
+# which resolves "frontend/dist" and "favicon" relative to the build CWD
+# (the workspace root). Stage C is a slim runtime that just runs the binary.
+#
+# Build:  docker build -f Dockerfile.deploy -t shengji-deploy .
+# Run:    docker run --rm -p 3030:3030 -e CORS_ALLOWED_ORIGINS='*' shengji-deploy
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage A: build the frontend (React + WASM) -> /app/frontend/dist
+#
+# The webpack build compiles the `shengji-wasm` crate via WasmPackPlugin, so
+# this stage needs the full Rust toolchain + the wasm32 target + wasm-pack in
+# addition to Node/yarn.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM --platform=linux/amd64 rust:1-bookworm AS frontend-builder
+
+# Node 20 (NodeSource) + yarn (classic, via npm).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+       > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g yarn \
+    && rm -rf /var/lib/apt/lists/*
+
+# wasm toolchain for the shengji-wasm crate compiled during `yarn build`.
+RUN rustup target add wasm32-unknown-unknown \
+    && curl -fsSL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+
+WORKDIR /app
+
+# Copy the whole workspace: the frontend build needs the Rust crates
+# (shengji-wasm + its path deps: core, mechanics, wasm-rpc-impl, storage,
+# backend-types) plus the frontend sources.
+COPY . .
+
+# Optional: bake a default WebSocket host into the bundle at build time. For the
+# single-service Koyeb deploy this stays unset (the frontend falls back to
+# same-origin). Only needed for a standalone (e.g. Vercel) frontend build.
+ARG WEBSOCKET_HOST=""
+ENV WEBSOCKET_HOST=${WEBSOCKET_HOST}
+
+WORKDIR /app/frontend
+RUN yarn install --frozen-lockfile \
+    && yarn build
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage B: build the backend binary with the frontend embedded.
+#
+# `cargo build --release --bin shengji` only compiles the bin's dependency
+# graph (NOT the shengji-wasm crate), and `include_dir!("frontend/dist")` /
+# `include_dir!("favicon")` are resolved relative to the build CWD, so we run
+# cargo from the workspace root with frontend/dist present.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM --platform=linux/amd64 rust:1-bookworm AS backend-builder
+
+WORKDIR /app
+
+# Copy the source tree, then drop in the freshly built frontend/dist so the
+# embed picks up the real bundle (the .dockerignore excludes dist/ from the
+# context, so this COPY --from is the only source of it).
+COPY . .
+COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
+
+# LTO (enabled in Cargo.toml's [profile.release]) is very slow and unnecessary
+# for a hobby game; disabling it keeps cloud build time reasonable.
+ENV CARGO_PROFILE_RELEASE_LTO=false
+
+RUN cargo build --release --bin shengji \
+    && cp target/release/shengji /shengji
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage C: slim runtime.
+# ─────────────────────────────────────────────────────────────────────────────
+FROM --platform=linux/amd64 debian:bookworm-slim AS runtime
+
+# ca-certificates for any outbound TLS (e.g. optional Sentry/Upstash);
+# the server itself listens on plain HTTP behind the platform's TLS terminator.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Run as a non-root user.
+RUN useradd --system --user-group --home-dir /app --create-home shengji
+WORKDIR /app
+
+COPY --from=backend-builder /shengji /usr/local/bin/shengji
+
+# The server hard-binds 0.0.0.0:3030. Koyeb's service port must be set to 3030
+# (it does NOT have to match $PORT). PORT is exported for documentation/parity
+# only — the binary does not read it.
+ENV PORT=3030
+EXPOSE 3030
+
+USER shengji
+ENTRYPOINT ["/usr/local/bin/shengji"]

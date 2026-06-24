@@ -3,8 +3,11 @@ import * as React from "react";
 import ReactModal from "react-modal";
 import * as Sentry from "@sentry/react";
 
+import "./theme.css";
 import "./style.css";
 
+import { I18nProvider } from "./i18n";
+import { ThemeProvider } from "./ThemeProvider";
 import AppStateProvider from "./AppStateProvider";
 import WebsocketProvider from "./WebsocketProvider";
 import TimerProvider from "./TimerProvider";
@@ -44,17 +47,21 @@ const bootstrap = (): void => {
   root_.render(
     <Sentry.ErrorBoundary fallback={fallback}>
       <React.Suspense fallback={"loading..."}>
-        <WasmProvider>
-          <TimerProvider>
-            <AppStateProvider>
-              <WebsocketProvider>
-                <Sentry.ErrorBoundary fallback={fallback}>
-                  <Root />
-                </Sentry.ErrorBoundary>
-              </WebsocketProvider>
-            </AppStateProvider>
-          </TimerProvider>
-        </WasmProvider>
+        <I18nProvider>
+          <ThemeProvider>
+            <WasmProvider>
+              <TimerProvider>
+                <AppStateProvider>
+                  <WebsocketProvider>
+                    <Sentry.ErrorBoundary fallback={fallback}>
+                      <Root />
+                    </Sentry.ErrorBoundary>
+                  </WebsocketProvider>
+                </AppStateProvider>
+              </TimerProvider>
+            </WasmProvider>
+          </ThemeProvider>
+        </I18nProvider>
       </React.Suspense>
     </Sentry.ErrorBoundary>,
   );

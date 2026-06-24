@@ -174,3 +174,53 @@ describe("WebsocketProvider URL construction", () => {
     expect(uri).toBe("");
   });
 });
+
+// Resolution order including the build-time baked process.env.WEBSOCKET_HOST
+// fallback used by a standalone (e.g. Vercel) frontend deploy. Mirrors the
+// logic in WebsocketProvider.tsx exactly:
+//   window._WEBSOCKET_HOST -> process.env.WEBSOCKET_HOST -> same-origin.
+describe("WebsocketProvider host resolution with baked fallback", () => {
+  const resolve = (
+    runtimeWebsocketHost: string | null | undefined,
+    bakedWebsocketHost: string | null | undefined,
+    loc: { protocol: string; host: string; pathname: string },
+  ): string =>
+    runtimeWebsocketHost !== undefined && runtimeWebsocketHost !== null
+      ? runtimeWebsocketHost
+      : bakedWebsocketHost !== undefined &&
+          bakedWebsocketHost !== null &&
+          bakedWebsocketHost !== ""
+        ? bakedWebsocketHost
+        : (loc.protocol === "https:" ? "wss://" : "ws://") +
+          loc.host +
+          loc.pathname +
+          (loc.pathname.endsWith("/") ? "api" : "/api");
+
+  const loc = { protocol: "https:", host: "example.com", pathname: "/game/" };
+
+  it("prefers window._WEBSOCKET_HOST over the baked value", () => {
+    expect(resolve("wss://runtime.example/api", "wss://baked.example/api", loc)).toBe(
+      "wss://runtime.example/api",
+    );
+  });
+
+  it("falls back to the baked value when runtime host is undefined", () => {
+    expect(resolve(undefined, "wss://baked.example/api", loc)).toBe(
+      "wss://baked.example/api",
+    );
+  });
+
+  it("falls back to the baked value when runtime host is null", () => {
+    expect(resolve(null, "wss://baked.example/api", loc)).toBe(
+      "wss://baked.example/api",
+    );
+  });
+
+  it("falls back to same-origin when neither runtime nor baked is set", () => {
+    expect(resolve(undefined, undefined, loc)).toBe("wss://example.com/game/api");
+  });
+
+  it("treats an empty baked value as unset (same-origin)", () => {
+    expect(resolve(undefined, "", loc)).toBe("wss://example.com/game/api");
+  });
+});

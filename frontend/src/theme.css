@@ -1,0 +1,258 @@
+@import "tailwindcss";
+
+/*
+ * Milestone 3 design system — "casino-meets-product-UI".
+ *
+ * Tailwind v4 design tokens live in the @theme block below and are exposed as
+ * CSS custom properties (e.g. --color-felt-700). Light/dark themes are driven
+ * by the [data-theme] attribute on <html> (see ThemeProvider). We toggle that
+ * attribute manually rather than relying on prefers-color-scheme so users can
+ * persist their choice in localStorage.
+ */
+
+@theme {
+  /* Fonts: Inter/Geist-style Latin + Noto Sans SC for Chinese. We fall back to
+     system fonts so we don't block on a webfont download in this first pass. */
+  --font-sans:
+    "Inter", "Noto Sans SC", system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+
+  /* Deep desaturated teal/slate "felt" table palette. */
+  --color-felt-950: #08201f;
+  --color-felt-900: #0c2a28;
+  --color-felt-800: #123733;
+  --color-felt-700: #18443f;
+  --color-felt-600: #1f544d;
+  --color-felt-500: #2a6a61;
+
+  /* Slate neutrals for chrome / cards / text. */
+  --color-slate-25: #fafbfc;
+  --color-slate-50: #f3f5f7;
+  --color-slate-100: #e6eaee;
+  --color-slate-200: #cfd6dd;
+  --color-slate-300: #aeb8c2;
+  --color-slate-400: #7f8b97;
+  --color-slate-500: #5a6671;
+  --color-slate-600: #404a54;
+  --color-slate-700: #2c343c;
+  --color-slate-800: #1c232a;
+  --color-slate-900: #121821;
+  --color-slate-950: #0a0e14;
+
+  /* One saturated accent — amber — for "your turn" / selected / primary. */
+  --color-accent-300: #fcd34d;
+  --color-accent-400: #fbbf24;
+  --color-accent-500: #f59e0b;
+  --color-accent-600: #d97706;
+  --color-accent-700: #b45309;
+
+  /* Secondary jade accent for positive / declarer-team affordances. */
+  --color-jade-400: #34d399;
+  --color-jade-500: #10b981;
+  --color-jade-600: #059669;
+
+  /* Four-color suit palette (used by the toggleable four-color mode). */
+  --color-suit-spade: #1c232a;
+  --color-suit-heart: #bb0313;
+  --color-suit-diamond: #1933f9;
+  --color-suit-club: #2f7d22;
+
+  --radius-xl: 0.875rem;
+  --radius-2xl: 1.125rem;
+
+  --shadow-card:
+    0 1px 2px rgba(8, 32, 31, 0.18), 0 6px 16px rgba(8, 32, 31, 0.16);
+  --shadow-card-hover:
+    0 4px 10px rgba(8, 32, 31, 0.22), 0 16px 32px rgba(8, 32, 31, 0.24);
+  --shadow-panel:
+    0 1px 3px rgba(8, 32, 31, 0.12), 0 12px 32px rgba(8, 32, 31, 0.18);
+}
+
+/*
+ * Semantic surface tokens. These flip between light and dark and are what the
+ * components actually consume (bg-[var(--surface)] etc.). Defaults are light.
+ */
+:root,
+[data-theme="light"] {
+  --surface-app: var(--color-felt-700);
+  --surface-panel: #ffffff;
+  --surface-panel-soft: var(--color-slate-50);
+  --surface-card: #ffffff;
+  --surface-rail: rgba(255, 255, 255, 0.92);
+  --surface-inset: var(--color-slate-100);
+  --border-subtle: var(--color-slate-200);
+  --border-strong: var(--color-slate-300);
+  --text-primary: var(--color-slate-900);
+  --text-secondary: var(--color-slate-500);
+  --text-on-felt: #eef6f3;
+  --text-on-felt-soft: #b9d4cd;
+  --accent: var(--color-accent-500);
+  --accent-contrast: #2a1a02;
+  --ring: var(--color-accent-500);
+}
+
+[data-theme="dark"] {
+  --surface-app: var(--color-felt-950);
+  --surface-panel: var(--color-slate-800);
+  --surface-panel-soft: var(--color-slate-900);
+  --surface-card: #f7f9fb;
+  --surface-rail: rgba(18, 24, 33, 0.92);
+  --surface-inset: var(--color-slate-900);
+  --border-subtle: var(--color-slate-700);
+  --border-strong: var(--color-slate-600);
+  --text-primary: var(--color-slate-50);
+  --text-secondary: var(--color-slate-300);
+  --text-on-felt: #eef6f3;
+  --text-on-felt-soft: #9fc0b9;
+  --accent: var(--color-accent-400);
+  --accent-contrast: #2a1a02;
+  --ring: var(--color-accent-400);
+}
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background:
+      radial-gradient(
+        1200px 800px at 50% -10%,
+        var(--color-felt-600),
+        var(--surface-app) 60%
+      ),
+      var(--surface-app);
+    color: var(--text-on-felt);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+/* Reusable component classes built on the tokens. */
+@layer components {
+  .sj-panel {
+    background: var(--surface-panel);
+    color: var(--text-primary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-2xl);
+    box-shadow: var(--shadow-panel);
+  }
+
+  .sj-rail {
+    background: var(--surface-rail);
+    color: var(--text-primary);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-panel);
+    backdrop-filter: blur(6px);
+  }
+
+  .sj-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    min-height: 44px;
+    padding: 0.5rem 1rem;
+    border-radius: var(--radius-xl);
+    border: 1px solid var(--border-strong);
+    background: var(--surface-panel);
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 0.95rem;
+    line-height: 1;
+    cursor: pointer;
+    transition:
+      transform 120ms ease,
+      box-shadow 120ms ease,
+      background 120ms ease,
+      border-color 120ms ease,
+      opacity 120ms ease;
+  }
+
+  .sj-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-card);
+  }
+
+  .sj-btn:active:not(:disabled) {
+    transform: translateY(0);
+  }
+
+  .sj-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .sj-btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-contrast);
+  }
+
+  .sj-btn-primary:hover:not(:disabled) {
+    background: var(--color-accent-400);
+  }
+
+  .sj-btn-ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--text-on-felt);
+  }
+
+  .sj-btn-ghost:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .sj-input {
+    min-height: 44px;
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--radius-xl);
+    border: 1px solid var(--border-strong);
+    background: var(--surface-panel);
+    color: var(--text-primary);
+    font-size: 1rem;
+  }
+
+  .sj-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+
+  .sj-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.15rem 0.6rem;
+    border-radius: 999px;
+    background: var(--surface-inset);
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+
+  .sj-chip-accent {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    color: var(--accent-contrast);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

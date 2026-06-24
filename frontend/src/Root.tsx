@@ -13,14 +13,25 @@ import Play from "./Play";
 import DebugInfo from "./DebugInfo";
 import TitleHandler from "./TitleHandler";
 import ResetButton from "./ResetButton";
+import Toolbar from "./Toolbar";
+import { useTranslation } from "./i18n";
 
 import type { JSX } from "react";
 
 const Confetti = React.lazy(async () => await import("./Confetti"));
 
+const Brand = (): JSX.Element => (
+  <h1 className="m-0 text-2xl font-bold tracking-tight text-[var(--text-on-felt)] sm:text-3xl">
+    升级 <span className="text-[var(--accent)]">Tractor</span>
+    <span className="mx-2 text-[var(--text-on-felt-soft)]">·</span>
+    找朋友 <span className="text-[var(--accent)]">Finding Friends</span>
+  </h1>
+);
+
 const Root = (): JSX.Element => {
   const { state, updateState } = React.useContext(AppStateContext);
   const timerContext = React.useContext(TimerContext);
+  const { t } = useTranslation();
 
   const [previousHeaderMessages, setPreviousHeaderMessages] = React.useState<
     string[]
@@ -41,18 +52,6 @@ const Root = (): JSX.Element => {
     setPreviousHeaderMessages(state.headerMessages);
   }, [state.headerMessages]);
 
-  React.useEffect(() => {
-    if (state.settings.darkMode) {
-      document.body.classList.add("dark-mode");
-    } else {
-      document.body.classList.remove("dark-mode");
-    }
-
-    return () => {
-      document.body.classList.remove("dark-mode");
-    };
-  }, [state.settings.darkMode]);
-
   const headerMessages = showHeaderMessages ? (
     <div
       className="header-message"
@@ -63,29 +62,31 @@ const Root = (): JSX.Element => {
       ))}
     </div>
   ) : null;
+
   if (state.connected) {
     if (state.gameState === null || state.roomName.length !== 16) {
       return (
-        <div>
+        <div className="min-h-[100dvh]">
+          <Toolbar />
           {headerMessages}
           <Errors errors={state.errors} />
-          <div className="game">
-            <h1>
-              升级 / <span className="red">Tractor</span> / 找朋友 /{" "}
-              <span className="red">Finding Friends</span>
-            </h1>
-            <JoinRoom
-              name={state.name}
-              room_name={state.roomName}
-              setName={(name: string) => updateState({ name })}
-              setRoomName={(roomName: string) => {
-                updateState({ roomName });
-                window.location.hash = roomName;
-              }}
-            />
+          <div className="mx-auto w-full max-w-3xl px-4 py-8 sm:py-12">
+            <Brand />
+            <div className="sj-panel mt-6 p-5 sm:p-7">
+              <JoinRoom
+                name={state.name}
+                room_name={state.roomName}
+                setName={(name: string) => updateState({ name })}
+                setRoomName={(roomName: string) => {
+                  updateState({ roomName });
+                  window.location.hash = roomName;
+                }}
+              />
+            </div>
+            <div className="mt-8 text-sm text-[var(--text-on-felt-soft)]">
+              <Credits />
+            </div>
           </div>
-          <hr />
-          <Credits />
           <TitleHandler playerName={state.name} />
         </div>
       );
@@ -93,11 +94,13 @@ const Root = (): JSX.Element => {
       return (
         <div
           className={classNames(
+            "min-h-[100dvh]",
             state.settings.fourColor ? "four-color" : null,
             state.settings.showCardLabels ? "always-show-labels" : null,
             state.settings.hideChatBox ? "hide-chat-box" : null,
           )}
         >
+          <Toolbar />
           {headerMessages}
           <Errors errors={state.errors} />
           {state.confetti !== null ? (
@@ -108,80 +111,76 @@ const Root = (): JSX.Element => {
               />
             </React.Suspense>
           ) : null}
-          <div className="game">
-            {"Initialize" in state.gameState ? null : (
-              <ResetButton state={state.gameState} name={state.name} />
-            )}
-            {"Initialize" in state.gameState ? (
-              <Initialize
-                state={state.gameState.Initialize}
-                name={state.name}
-              />
-            ) : null}
-            {"Draw" in state.gameState ? (
-              <Draw
-                state={state.gameState.Draw}
-                playDrawCardSound={state.settings.playDrawCardSound}
-                autodrawSpeedMs={state.settings.autodrawSpeedMs}
-                name={state.name}
-                setTimeout={timerContext.setTimeout}
-                clearTimeout={timerContext.clearTimeout}
-              />
-            ) : null}
-            {"Exchange" in state.gameState ? (
-              <Exchange state={state.gameState.Exchange} name={state.name} />
-            ) : null}
-            {"Play" in state.gameState ? (
-              <Play
-                playPhase={state.gameState.Play}
-                name={state.name}
-                showLastTrick={state.settings.showLastTrick}
-                unsetAutoPlayWhenWinnerChanges={
-                  state.settings.unsetAutoPlayWhenWinnerChanges
-                }
-                showTrickInPlayerOrder={state.settings.showTrickInPlayerOrder}
-                beepOnTurn={state.settings.beepOnTurn}
-              />
-            ) : null}
-            {state.settings.showDebugInfo ? <DebugInfo /> : null}
+          <div className="sj-table-shell mx-auto w-full max-w-[1200px] px-3 pb-24 pt-3 sm:px-5">
+            <div className="game">
+              {"Initialize" in state.gameState ? null : (
+                <ResetButton state={state.gameState} name={state.name} />
+              )}
+              {"Initialize" in state.gameState ? (
+                <Initialize
+                  state={state.gameState.Initialize}
+                  name={state.name}
+                />
+              ) : null}
+              {"Draw" in state.gameState ? (
+                <Draw
+                  state={state.gameState.Draw}
+                  playDrawCardSound={state.settings.playDrawCardSound}
+                  autodrawSpeedMs={state.settings.autodrawSpeedMs}
+                  name={state.name}
+                  setTimeout={timerContext.setTimeout}
+                  clearTimeout={timerContext.clearTimeout}
+                />
+              ) : null}
+              {"Exchange" in state.gameState ? (
+                <Exchange state={state.gameState.Exchange} name={state.name} />
+              ) : null}
+              {"Play" in state.gameState ? (
+                <Play
+                  playPhase={state.gameState.Play}
+                  name={state.name}
+                  showLastTrick={state.settings.showLastTrick}
+                  unsetAutoPlayWhenWinnerChanges={
+                    state.settings.unsetAutoPlayWhenWinnerChanges
+                  }
+                  showTrickInPlayerOrder={state.settings.showTrickInPlayerOrder}
+                  beepOnTurn={state.settings.beepOnTurn}
+                />
+              ) : null}
+              {state.settings.showDebugInfo ? <DebugInfo /> : null}
+            </div>
+            <Chat messages={state.messages} />
+            <div className="clear-both pt-6 text-sm text-[var(--text-on-felt-soft)]">
+              <Credits />
+            </div>
           </div>
-          <Chat messages={state.messages} />
-          <hr />
-          <Credits />
           <TitleHandler playerName={state.name} />
         </div>
       );
     }
   } else if (state.everConnected) {
     return (
-      <>
-        <p>
-          It looks like you got disconnected from the server, please refresh! If
-          the game is still ongoing, you should be able to re-join with the same
-          name and pick up where you left off.
-        </p>
-      </>
+      <div className="mx-auto max-w-2xl px-4 py-16">
+        <Toolbar />
+        <div className="sj-panel p-6 text-[var(--text-primary)]">
+          <p>{t("app.disconnected")}</p>
+        </div>
+      </div>
     );
   } else {
     return (
-      <div>
-        <div className="game">
-          <h1>
-            升级 / <span className="red">Tractor</span> / 找朋友 /{" "}
-            <span className="red">Finding Friends</span>
-          </h1>
-          <p>
-            Welcome! This website helps you play 升级 / Tractor / 找朋友 /
-            Finding Friends with other people online.
-          </p>
-          <p>
-            If you&apos;re not familiar with the rules, check them out{" "}
-            <a href="rules.html">here</a>!
-          </p>
-          <p>Connecting to the server...</p>
+      <div className="min-h-[100dvh]">
+        <Toolbar />
+        <div className="mx-auto w-full max-w-3xl px-4 py-12">
+          <Brand />
+          <div className="sj-panel mt-6 p-6 text-[var(--text-primary)]">
+            <p>{t("app.welcome")}</p>
+            <p>{t("app.connecting")}</p>
+          </div>
+          <div className="mt-8 text-sm text-[var(--text-on-felt-soft)]">
+            <Credits />
+          </div>
         </div>
-        <hr />
-        <Credits />
         <TitleHandler playerName={state.name} />
       </div>
     );

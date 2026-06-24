@@ -18,9 +18,12 @@ import Cards from "./Cards";
 import Points, { calculatePoints, ProgressBarDisplay } from "./Points";
 import LabeledPlay from "./LabeledPlay";
 import Players from "./Players";
+import Table from "./Table";
 import ArrayUtils from "./util/array";
 import AutoPlayButton from "./AutoPlayButton";
 import BeepButton from "./BeepButton";
+import StatusRail from "./StatusRail";
+import { useTranslation } from "./i18n";
 import { WebsocketContext } from "./WebsocketProvider";
 import { SettingsContext } from "./AppStateProvider";
 import { useEngine } from "./useEngine";
@@ -51,6 +54,7 @@ interface IProps {
 const Play = (props: IProps): JSX.Element => {
   const { send } = React.useContext(WebsocketContext);
   const settings = React.useContext(SettingsContext);
+  const { t } = useTranslation();
   const [selected, setSelected] = React.useState<string[]>([]);
   const [grouping, setGrouping] = React.useState<FoundViablePlay[]>([]);
   const engine = useEngine();
@@ -332,20 +336,58 @@ const Play = (props: IProps): JSX.Element => {
       <Players
         players={playPhase.propagated.players}
         observers={playPhase.propagated.observers}
+        bots={playPhase.propagated.bots}
         landlord={playPhase.landlord}
         landlords_team={playPhase.landlords_team}
         name={props.name}
         next={nextPlayer}
       />
+      <Table
+        players={playPhase.propagated.players}
+        bots={playPhase.propagated.bots}
+        landlord={playPhase.landlord}
+        landlordsTeam={playPhase.landlords_team}
+        next={nextPlayer}
+        selfId={currentPlayer.id}
+        status={
+          <StatusRail
+            trump={playPhase.trump}
+            declarerName={
+              playPhase.landlord !== undefined && playPhase.landlord !== null
+                ? (playPhase.propagated.players.find(
+                    (p) => p.id === playPhase.landlord,
+                  )?.name ?? null)
+                : null
+            }
+            points={nonLandlordPointsWithPenalties}
+            turnName={
+              playPhase.propagated.players.find((p) => p.id === nextPlayer)
+                ?.name ?? null
+            }
+            isYourTurn={isCurrentPlayerTurn}
+          />
+        }
+        center={
+          <Trick
+            trick={playPhase.trick}
+            players={playPhase.propagated.players}
+            landlord={playPhase.landlord}
+            landlord_suffix={landlordSuffix}
+            landlords_team={playPhase.landlords_team}
+            next={nextPlayer}
+            name={props.name}
+            showTrickInPlayerOrder={props.showTrickInPlayerOrder}
+          />
+        }
+      />
       <Trump trump={playPhase.trump} />
       <Friends gameMode={playPhase.game_mode} showPlayed={true} />
       {playPhase.removed_cards!.length > 0 ? (
-        <p>
-          Note:{" "}
+        <p className="text-sm text-[var(--text-on-felt-soft)]">
+          {t("play.removedNote")}{" "}
           {playPhase.removed_cards!.map((c) => (
             <InlineCard key={c} card={c} />
-          ))}{" "}
-          have been removed from the deck
+          ))}
         </p>
       ) : null}
       {settings.showPointsAboveGame && (
@@ -362,16 +404,6 @@ const Play = (props: IProps): JSX.Element => {
           smallerTeamSize={smallerTeamSize}
         />
       )}
-      <Trick
-        trick={playPhase.trick}
-        players={playPhase.propagated.players}
-        landlord={playPhase.landlord}
-        landlord_suffix={landlordSuffix}
-        landlords_team={playPhase.landlords_team}
-        next={nextPlayer}
-        name={props.name}
-        showTrickInPlayerOrder={props.showTrickInPlayerOrder}
-      />
       <AutoPlayButton
         onSubmit={playCards}
         playDescription={
@@ -384,45 +416,48 @@ const Play = (props: IProps): JSX.Element => {
         unsetAutoPlayWhenWinnerChanges={props.unsetAutoPlayWhenWinnerChanges}
         isCurrentPlayerTurn={isCurrentPlayerTurn}
       />
-      {playPhase.propagated.play_takeback_policy === "AllowPlayTakeback" && (
-        <button className="big" onClick={takeBackCards} disabled={!canTakeBack}>
-          Take back last play
-        </button>
-      )}
-      <button
-        className="big"
-        onClick={endTrick}
-        disabled={
-          playPhase.trick.player_queue.length > 0 || playPhase.game_ended_early
-        }
-      >
-        Finish trick
-      </button>
-      {canEndGameEarly && (
+      <div className="my-2 flex flex-wrap items-center gap-2">
+        {playPhase.propagated.play_takeback_policy === "AllowPlayTakeback" && (
+          <button
+            className="sj-btn"
+            onClick={takeBackCards}
+            disabled={!canTakeBack}
+          >
+            {t("play.takeBack")}
+          </button>
+        )}
         <button
-          className="big"
-          onClick={() => {
-            if (
-              confirm(
-                "Do you want to end the game early? There may still be points in the bottom...",
-              )
-            ) {
-              endGameEarly();
-            }
-          }}
+          className="sj-btn"
+          onClick={endTrick}
+          disabled={
+            playPhase.trick.player_queue.length > 0 ||
+            playPhase.game_ended_early
+          }
         >
-          End game early
+          {t("play.finishTrick")}
         </button>
-      )}
-      {canFinish && (
-        <button className="big" onClick={startNewGame}>
-          Finish game
-        </button>
-      )}
-      <BeepButton />
+        {canEndGameEarly && (
+          <button
+            className="sj-btn"
+            onClick={() => {
+              if (confirm(t("play.confirmEndEarly"))) {
+                endGameEarly();
+              }
+            }}
+          >
+            {t("play.endEarly")}
+          </button>
+        )}
+        {canFinish && (
+          <button className="sj-btn sj-btn-primary" onClick={startNewGame}>
+            {t("play.finishGame")}
+          </button>
+        )}
+        <BeepButton />
+      </div>
       {canFinish && !noCardsLeft && (
         <div>
-          <p>Cards remaining (that were not played):</p>
+          <p>{t("play.cardsRemaining")}</p>
           {playPhase.propagated.players.map((p) => (
             <LabeledPlay
               key={p.id}
@@ -455,47 +490,62 @@ const Play = (props: IProps): JSX.Element => {
           {lastPlay === undefined &&
             isCurrentPlayerTurn &&
             grouping.length > 1 && (
-              <div>
-                <p>
-                  It looks like you are making a play that can be interpreted in
-                  multiple ways!
+              <div className="sj-rail my-2 p-3">
+                <p className="m-0 font-semibold">
+                  {t("play.multiInterpretation")}
                 </p>
-                <p>Which of the following did you mean?</p>
-                {grouping.map((g, gidx) => (
-                  <button
-                    key={gidx}
-                    onClick={(evt) => {
-                      evt.preventDefault();
-                      setGrouping([g]);
-                    }}
-                    className="big"
-                  >
-                    {g.description}
-                  </button>
-                ))}
+                <p className="mb-2 mt-1 text-sm text-[var(--text-secondary)]">
+                  {t("play.whichDidYouMean")}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {grouping.map((g, gidx) => (
+                    <button
+                      key={gidx}
+                      onClick={(evt) => {
+                        evt.preventDefault();
+                        setGrouping([g]);
+                      }}
+                      className="sj-btn"
+                    >
+                      {g.description}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
-          <Cards
-            hands={playPhase.hands}
-            playerId={currentPlayer.id}
-            trump={playPhase.trump}
-            selectedCards={selected}
-            onSelect={(newSelected) => {
-              updateSelectionAndGrouping(
-                newSelected,
-                playPhase.trump,
-                playPhase.propagated.tractor_requirements!,
-              );
-            }}
-            notifyEmpty={isCurrentPlayerTurn}
-          />
+          <div className="sj-hand-fan mt-2">
+            <div className="mb-1 flex items-center justify-between px-2">
+              <span className="text-sm font-semibold text-[var(--text-on-felt)]">
+                {t("play.yourHand")}
+              </span>
+              {isCurrentPlayerTurn && (
+                <span className="sj-chip sj-chip-accent">
+                  {t("rail.yourTurn")}
+                </span>
+              )}
+            </div>
+            <Cards
+              hands={playPhase.hands}
+              playerId={currentPlayer.id}
+              trump={playPhase.trump}
+              selectedCards={selected}
+              onSelect={(newSelected) => {
+                updateSelectionAndGrouping(
+                  newSelected,
+                  playPhase.trump,
+                  playPhase.propagated.tractor_requirements!,
+                );
+              }}
+              notifyEmpty={isCurrentPlayerTurn}
+            />
+          </div>
         </>
       )}
       {playPhase.last_trick !== undefined &&
       playPhase.last_trick !== null &&
       props.showLastTrick ? (
         <div>
-          <p>Previous trick</p>
+          <p>{t("play.previousTrick")}</p>
           <Trick
             trick={playPhase.last_trick}
             players={playPhase.propagated.players}
@@ -527,7 +577,7 @@ const Play = (props: IProps): JSX.Element => {
         trump={playPhase.trump}
         className="kitty"
         cards={playPhase.kitty}
-        label="底牌"
+        label={t("term.kitty")}
       />
     </div>
   );

@@ -1,10 +1,18 @@
 const path = require("path");
+const webpack = require("webpack");
 const TerserJsPlugin = require("terser-webpack-plugin");
 const WasmPackPlugin = require("@wasm-tool/wasm-pack-plugin");
 const HtmlWebpackPlugin = require("html-webpack-plugin");
 const CopyWebpackPlugin = require("copy-webpack-plugin");
 const MiniCssExtractPlugin = require("mini-css-extract-plugin");
 const CssMinimizerPlugin = require("css-minimizer-webpack-plugin");
+
+// Optional build-time WebSocket host, baked into the bundle for standalone
+// (e.g. Vercel) frontend deploys where the backend's /runtime.js is not served.
+// When unset (the single-service Koyeb deploy), this is an empty string and the
+// app falls back to window._WEBSOCKET_HOST (from /runtime.js) and then to
+// same-origin. See WebsocketProvider.tsx / WasmOrRpcProvider.tsx.
+const WEBSOCKET_HOST = process.env.WEBSOCKET_HOST || "";
 
 module.exports = {
   mode: "production",
@@ -29,7 +37,18 @@ module.exports = {
       },
       {
         test: /\.css$/i,
-        use: [MiniCssExtractPlugin.loader, "css-loader"],
+        use: [
+          MiniCssExtractPlugin.loader,
+          "css-loader",
+          {
+            loader: "postcss-loader",
+            options: {
+              postcssOptions: {
+                config: path.resolve(__dirname, "postcss.config.js"),
+              },
+            },
+          },
+        ],
       },
     ],
   },
@@ -62,6 +81,9 @@ module.exports = {
     hints: false,
   },
   plugins: [
+    new webpack.DefinePlugin({
+      "process.env.WEBSOCKET_HOST": JSON.stringify(WEBSOCKET_HOST),
+    }),
     new WasmPackPlugin({
       crateDirectory: path.resolve(__dirname, "shengji-wasm"),
       outName: "shengji-core",

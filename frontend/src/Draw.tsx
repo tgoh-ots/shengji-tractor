@@ -7,6 +7,7 @@ import LabeledPlay from "./LabeledPlay";
 import BeepButton from "./BeepButton";
 import BidArea from "./BidArea";
 import InlineCard from "./InlineCard";
+import { translate as t } from "./i18n";
 
 import type { JSX } from "react";
 
@@ -147,6 +148,7 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
         <Players
           players={this.props.state.propagated.players}
           observers={this.props.state.propagated.observers}
+          bots={this.props.state.propagated.bots}
           landlord={landlord}
           next={next}
           name={this.props.name}
@@ -169,16 +171,14 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
           header={
             <>
               <h2>
-                Bids ({this.props.state.deck.length} cards remaining in the
-                deck)
+                {t("bid.remaining", { count: this.props.state.deck.length })}
               </h2>
               {this.props.state.removed_cards!.length > 0 ? (
                 <p>
-                  Note:{" "}
+                  {t("play.removedNote")}{" "}
                   {this.props.state.removed_cards!.map((c) => (
                     <InlineCard key={c} card={c} />
-                  ))}{" "}
-                  have been removed from the deck
+                  ))}
                 </p>
               ) : null}
             </>
@@ -193,10 +193,10 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
                 disabled={!canDraw}
                 className="big"
               >
-                Draw card
+                {t("bid.drawCard")}
               </button>
               <label>
-                auto-draw
+                {t("bid.autoDraw")}
                 <input
                   type="checkbox"
                   name="autodraw"
@@ -231,7 +231,7 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
                 }
                 className="big"
               >
-                Pick up cards from the bottom
+                {t("bid.pickUpKitty")}
               </button>
               <button
                 onClick={this.revealCard}
@@ -249,7 +249,7 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
                 }
                 className="big"
               >
-                Reveal card from the bottom
+                {t("bid.revealCard")}
               </button>
               <BeepButton />
             </>
@@ -263,7 +263,7 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
           className="kitty"
           cards={this.props.state.kitty}
           trump={{ NoTrump: {} }}
-          label="底牌"
+          label={t("term.kitty")}
         />
       </div>
     );

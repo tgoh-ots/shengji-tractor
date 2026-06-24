@@ -74,6 +74,12 @@ impl DrawPhase {
         &mut self.propagated
     }
 
+    /// The (possibly redacted) hands drawn so far. Used by the bot policy to
+    /// evaluate bidding strength from the acting player's own hand.
+    pub fn hands(&self) -> &Hands {
+        &self.hands
+    }
+
     pub fn removed_cards(&self) -> &[Card] {
         &self.removed_cards
     }
@@ -249,8 +255,43 @@ impl DrawPhase {
         Bid::take_back_bid(id, self.propagated.bid_takeback_policy, &mut self.bids, 0)
     }
 
+    /// The legal bids the given player could make right now. Used by the bot
+    /// policy to make a minimal (dumb-but-legal) bid so that an all-bot table can
+    /// make progress when no landlord has been pre-selected. Returns an empty
+    /// vector if the player cannot bid (e.g. cards have already been revealed).
+    pub fn valid_bids(&self, id: PlayerID) -> Result<Vec<Bid>, Error> {
+        if self.revealed_cards > 0 {
+            return Ok(vec![]);
+        }
+        Bid::valid_bids(
+            id,
+            &self.bids,
+            &self.hands,
+            &self.propagated.players,
+            self.propagated.landlord,
+            0,
+            self.propagated.bid_policy,
+            self.propagated.bid_reinforcement_policy,
+            self.propagated.joker_bid_policy,
+            self.num_decks,
+        )
+    }
+
     pub fn done_drawing(&self) -> bool {
         self.deck.is_empty()
+    }
+
+    /// The number of cards that have been revealed from the bottom of the deck so
+    /// far. Together with an auto-bid this is used by the bot driver to decide
+    /// whether the reveal-bottom step has already happened.
+    pub fn revealed_cards(&self) -> usize {
+        self.revealed_cards
+    }
+
+    /// Whether the winning bid has already been determined (either through an
+    /// auto-bid from revealing the bottom, or a regular bid).
+    pub fn bid_decided(&self) -> bool {
+        self.autobid.is_some() || !self.bids.is_empty()
     }
 
     pub fn advance(&self, id: PlayerID) -> Result<ExchangePhase, Error> {

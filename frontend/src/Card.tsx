@@ -3,7 +3,7 @@ import * as React from "react";
 import classNames from "classnames";
 import memoize from "./memoize";
 import InlineCard from "./InlineCard";
-import { cardLookup } from "./util/cardHelpers";
+import { cardLookup, cardAriaLabel } from "./util/cardHelpers";
 import { SettingsContext } from "./AppStateProvider";
 import { ISuitOverrides } from "./state/Settings";
 import { Trump, CardInfo } from "./gen-types";
@@ -214,6 +214,8 @@ const Card = (props: IProps): JSX.Element => {
     const nonSVG = (
       <div
         className={classNames("card", "unknown", props.className)}
+        role="img"
+        aria-label={cardAriaLabel(props.card)}
         style={{
           marginRight: props.collapseRight ? `-${bounds.width * 0.6}px` : "0",
         }}
@@ -236,6 +238,8 @@ const Card = (props: IProps): JSX.Element => {
         <React.Suspense fallback={nonSVG}>
           <div
             className={classNames("card", "svg", "unknown", props.className)}
+            role="img"
+            aria-label={cardAriaLabel(props.card)}
             style={{
               marginRight: props.collapseRight
                 ? `-${bounds.width * 0.6}px`
@@ -255,6 +259,35 @@ const Card = (props: IProps): JSX.Element => {
     }
   } else {
     const staticCardInfo = cardLookup[props.card];
+
+    // Trump/level-aware accessible label + keyboard activation for selectable
+    // cards. When the card has an onClick, expose it as a focusable button.
+    const ariaLabel = cardAriaLabel(props.card, {
+      isTrump: cardInfo?.effective_suit === "Trump",
+      isLevel:
+        cardInfo !== null &&
+        cardInfo.number !== null &&
+        cardInfo.effective_suit === "Trump" &&
+        staticCardInfo.typ !== "🃏" &&
+        staticCardInfo.typ !== "🃟",
+      points: cardInfo?.points,
+    });
+    const interactive = props.onClick !== undefined;
+    const interactiveProps = interactive
+      ? {
+          role: "button" as const,
+          tabIndex: 0,
+          "aria-pressed": props.className?.includes("selected")
+            ? true
+            : undefined,
+          onKeyDown: (event: React.KeyboardEvent) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              props.onClick?.(event as unknown as React.MouseEvent);
+            }
+          },
+        }
+      : { role: "img" as const };
 
     const label = (offset: number): JSX.Element | null => {
       if (isLoading || !cardInfo) return null;
@@ -283,6 +316,8 @@ const Card = (props: IProps): JSX.Element => {
           props.className,
           isLoading ? "loading" : null,
         )}
+        {...interactiveProps}
+        aria-label={ariaLabel}
         onClick={props.onClick}
         onMouseEnter={props.onMouseEnter}
         onMouseLeave={props.onMouseLeave}
@@ -320,6 +355,8 @@ const Card = (props: IProps): JSX.Element => {
               staticCardInfo.typ,
               props.className,
             )}
+            {...interactiveProps}
+            aria-label={ariaLabel}
             onClick={props.onClick}
             onMouseEnter={props.onMouseEnter}
             onMouseLeave={props.onMouseLeave}

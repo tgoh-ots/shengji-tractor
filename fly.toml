@@ -1,0 +1,54 @@
+# Fly.io configuration for the Shengji backend (single service: serves the
+# embedded frontend AND the WebSocket /api). See DEPLOY.md "Path A".
+#
+# First time:   fly launch --no-deploy --copy-config   (creates the app)
+# Deploy:       fly deploy
+#
+# IMPORTANT: change `app` below to your unique Fly app name before deploying
+# (or let `fly launch` set it). The CORS_ALLOWED_ORIGINS value must list the
+# real origin(s) you serve from in production — do NOT ship "*".
+
+app = "shengji-tractor"
+primary_region = "iad"   # pick one near your players: https://fly.io/docs/reference/regions/
+
+[build]
+  dockerfile = "Dockerfile.deploy"
+
+[env]
+  # The server hard-binds 0.0.0.0:3030; Fly routes external 80/443 to it via
+  # internal_port below. PORT is informational (the binary does not read it).
+  PORT = "3030"
+  VERSION = "fly"
+  # Production CORS / WebSocket-Origin allow-list. Replace with your real
+  # origin(s). For the single-service deploy this is the Fly app URL itself;
+  # if you add a Vercel frontend (Path B), set it to the Vercel origin instead.
+  # Comma-separate multiple origins. NEVER use "*" in production.
+  CORS_ALLOWED_ORIGINS = "https://shengji-tractor.fly.dev"
+  # WEBSOCKET_HOST: leave UNSET for the single-service deploy (same-origin
+  # works). Only set it (e.g. "wss://shengji-CHANGE-ME.fly.dev/api") when a
+  # standalone Vercel frontend points at this backend. Set via `fly secrets`
+  # or add it here if non-secret.
+
+[http_service]
+  internal_port = 3030
+  force_https = true
+  # Pay-per-use: stop the machine when idle, start it on the next request.
+  # Wake is ~1-2s; the game's reconnect-by-name already covers the brief gap,
+  # so mid-game wakes are seamless. Set min_machines_running = 1 for always-on
+  # (no cold start) at slightly higher cost.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  # WebSocket-friendly: a single concurrent-request soft/hard cap that comfortably
+  # holds many long-lived WS connections on one small machine.
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 200
+    hard_limit = 250
+
+[[vm]]
+  # Smallest paid VM (~$2/mo if always-on; cheaper with auto-stop). Bump
+  # memory to 512 if you see OOM kills under load.
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  cpus = 1

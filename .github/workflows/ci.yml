@@ -1,0 +1,108 @@
+name: CI
+
+# Clean, fork-friendly CI. Replaces the old rbtying-specific workflows.
+# Builds the backend binary + frontend bundle and runs a FAST test subset.
+# The heavy self-play "difficulty ladder" test is #[ignore]d in the source and
+# is intentionally NOT run here (it takes minutes and wants a release build).
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save free CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The CI box doesn't need LTO; keep release-ish builds quick.
+  CARGO_PROFILE_RELEASE_LTO: "false"
+
+jobs:
+  build-and-test:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      # The frontend must be built BEFORE the backend: the `shengji` binary
+      # embeds frontend/dist at compile time via include_dir!, so `cargo build
+      # --bin shengji` fails if dist is absent.
+      - name: Install frontend deps
+        run: yarn install --frozen-lockfile
+        working-directory: ./frontend
+
+      - name: Build frontend
+        run: yarn build
+        working-directory: ./frontend
+
+      - name: Frontend unit tests
+        run: yarn test
+        working-directory: ./frontend
+
+      - name: Build backend binary
+        run: cargo build --bin shengji
+
+      # Fast test subset: mechanics + core lib tests, EXCLUDING the slow
+      # self-play / difficulty-ladder tests (they each run many full simulated
+      # games and take minutes in a debug build). The heaviest ladder test is
+      # already #[ignore]d in the source; the remaining self-play tests are
+      # skipped here by name. Run the full set locally / in release with:
+      #   cargo test -p shengji-core --release -- --include-ignored
+      - name: Fast Rust tests
+        run: |
+          cargo test -p shengji-mechanics -p shengji-core --lib -- \
+            --skip self_play \
+            --skip difficulty_ladder
+
+  audit:
+    name: cargo audit (informational)
+    runs-on: ubuntu-latest
+    # Advisory only — never blocks the merge.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run cargo audit
+        run: cargo audit
+
+  secret-scan:
+    name: gitleaks secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

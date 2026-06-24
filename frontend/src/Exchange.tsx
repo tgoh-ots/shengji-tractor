@@ -14,6 +14,7 @@ import { ExchangePhase, Friend } from "./gen-types";
 import Cards from "./Cards";
 import { prefillCardInfoCache } from "./util/cachePrefill";
 import { useEngine } from "./useEngine";
+import { translate as t } from "./i18n";
 
 import type { JSX } from "react";
 
@@ -173,7 +174,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
     const exchangeUI =
       isExchanger && !this.props.state.finalized ? (
         <>
-          <h2>Your hand</h2>
+          <h2>{t("exchange.yourHand")}</h2>
           <Cards
             hands={this.props.state.hands}
             playerId={playerId}
@@ -181,8 +182,10 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
             trump={this.props.state.trump}
           />
           <h2>
-            Discarded cards {this.props.state.kitty.length} /{" "}
-            {this.props.state.kitty_size}
+            {t("exchange.discarded", {
+              n: this.props.state.kitty.length,
+              total: this.props.state.kitty_size,
+            })}
           </h2>
           <div className="kitty">
             {this.props.state.kitty.map((c, idx) => (
@@ -203,7 +206,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
               }
               className="big"
             >
-              Finalize exchanged cards
+              {t("exchange.finalize")}
             </button>
           ) : null}
         </>
@@ -221,7 +224,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
         }
         className="big"
       >
-        Start game
+        {t("exchange.start")}
       </button>
     );
     const bidUI =
@@ -245,7 +248,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
             jokerBidPolicy={this.props.state.propagated.joker_bid_policy!}
             numDecks={this.props.state.num_decks}
             header={
-              <h2>Bids (round {this.props.state.epoch! + 1} of bidding)</h2>
+              <h2>{t("bid.round", { round: this.props.state.epoch! + 1 })}</h2>
             }
             suffixButtons={
               <>
@@ -257,7 +260,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
                   }
                   className="big"
                 >
-                  Pick up cards from the bottom
+                  {t("bid.pickUpKitty")}
                 </button>
                 {isLandlord ? startGame : null}
               </>
@@ -271,7 +274,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
             className="kitty"
             trump={this.props.state.trump}
             cards={this.props.state.kitty}
-            label="底牌"
+            label={t("term.kitty")}
           />
         </>
       ) : null;
@@ -300,7 +303,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
             );
           })}
           <button onClick={this.pickFriends} className="big">
-            Pick friends
+            {t("exchange.pickFriends")}
           </button>
         </div>
       ) : null;
@@ -314,6 +317,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
         <Players
           players={this.props.state.propagated.players}
           observers={this.props.state.propagated.observers}
+          bots={this.props.state.propagated.bots}
           landlord={this.props.state.landlord}
           next={this.props.state.landlord}
           name={this.props.name}
@@ -337,7 +341,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
               playerId={playerId}
               trump={this.props.state.trump}
             />
-            <p>Waiting...</p>
+            <p>{t("exchange.waiting")}</p>
           </>
         ) : null}
         {playerId !== nextPlayer && <BeepButton />}

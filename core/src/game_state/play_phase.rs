@@ -139,6 +139,39 @@ impl PlayPhase {
         &self.hands
     }
 
+    /// The most recently completed trick, if any. Used by the bot's card /
+    /// void tracker to reconstruct the (limited) public play history available
+    /// from the redacted view.
+    pub fn last_trick(&self) -> Option<&Trick> {
+        self.last_trick.as_ref()
+    }
+
+    /// The number of decks in play.
+    pub fn num_decks(&self) -> usize {
+        self.num_decks
+    }
+
+    /// The landlord seat.
+    pub fn landlord(&self) -> PlayerID {
+        self.landlord
+    }
+
+    /// The trump for this hand.
+    pub fn trump(&self) -> Trump {
+        self.trump
+    }
+
+    /// Build a copy of this play phase with the hands replaced by a fully
+    /// determinized assignment. Used by the bot's determinized search so that
+    /// rollouts can run on the real engine APIs. The trick state, points,
+    /// kitty, team assignment and all settings are preserved; only the cards
+    /// in each seat's hand are swapped for the sampled world.
+    pub fn clone_with_hands(&self, hands: Hands) -> PlayPhase {
+        let mut clone = self.clone();
+        clone.hands = hands;
+        clone
+    }
+
     pub fn propagated(&self) -> &PropagatedState {
         &self.propagated
     }

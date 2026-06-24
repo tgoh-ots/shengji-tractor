@@ -39,9 +39,14 @@ tokio = { version = "1.28", features = [
     "sync",
     "io-util",
 ] }
-tower-http = { version = "0.4", features = ["fs", "cors"] }
+tower-http = { version = "0.4", features = ["fs", "cors", "set-header"] }
 zstd = "0.12"
 
 [dev-dependencies]
 axum-test = "13.0"
 tower = { version = "0.4", features = ["util"] }
+# WebSocket client for the end-to-end integration test (`tests/e2e_game.rs`).
+# axum-test 13 has no WS support, so the test binds a real TcpListener and
+# drives the server over an actual WebSocket. Pinned to the version already in
+# Cargo.lock (a transitive axum dep) so `cargo test --locked` resolves cleanly.
+tokio-tungstenite = "0.20"

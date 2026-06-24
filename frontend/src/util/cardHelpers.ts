@@ -83,3 +83,56 @@ export const cardToUnicodeSuit = (
   const table = fill ? suitToFilledUnicode : suitToUnicode;
   return table[card.suit];
 };
+
+const suitToName: { [key in Suit]: string } = {
+  clubs: "clubs",
+  diamonds: "diamonds",
+  hearts: "hearts",
+  spades: "spades",
+};
+
+// Human-readable accessible label for a card glyph (used as aria-label).
+//
+// When `state` is supplied (computed from the live Trump), the label also
+// announces whether the card is currently trump, the level/rank card, and
+// whether it carries points — useful for screen-reader players following the
+// game.
+export const cardAriaLabel = (
+  unicode: string,
+  state?: { isTrump?: boolean; isLevel?: boolean; points?: number },
+): string => {
+  if (unicode === "🂠") {
+    return "face-down card";
+  }
+  if (!(unicode in cardLookup)) {
+    return "card";
+  }
+  let base = "card";
+  if (unicode === "🃟") {
+    base = "little joker";
+  } else if (unicode === "🃏") {
+    base = "big joker";
+  } else {
+    try {
+      const card = unicodeToCard(unicode);
+      if (card.type === "suit_card") {
+        base = `${card.rank} of ${suitToName[card.suit]}`;
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  if (state !== undefined) {
+    const tags: string[] = [];
+    if (state.isTrump) tags.push("trump");
+    if (state.isLevel) tags.push("level card");
+    if (state.points !== undefined && state.points > 0) {
+      tags.push(`${state.points} points`);
+    }
+    if (tags.length > 0) {
+      base += `, ${tags.join(", ")}`;
+    }
+  }
+  return base;
+};

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::bail;
 use slog::{debug, error, info, o, Logger};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -9,12 +10,16 @@ use shengji_types::GameMessage;
 use storage::Storage;
 
 use crate::{
+    security::{
+        sanitize_chat_message, sanitize_text, ResourceLimits, MAX_NAME_BYTES, ROOM_NAME_BYTES,
+    },
     serving_types::{JoinRoom, UserMessage, VersionedGame},
     state_dump::InMemoryStats,
     utils::{execute_immutable_operation, execute_operation},
     ZSTD_COMPRESSOR,
 };
 
+#[allow(clippy::too_many_arguments)]
 pub async fn entrypoint<S: Storage<VersionedGame, E>, E: std::fmt::Debug + Send>(
     tx: mpsc::UnboundedSender<Vec<u8>>,
     rx: mpsc::UnboundedReceiver<Vec<u8>>,
@@ -22,8 +27,18 @@ pub async fn entrypoint<S: Storage<VersionedGame, E>, E: std::fmt::Debug + Send>
     logger: Logger,
     backend_storage: S,
     stats: Arc<Mutex<InMemoryStats>>,
+    resource_limits: Arc<ResourceLimits>,
 ) {
-    let _ = handle_user_connected(tx, rx, ws_id, logger, backend_storage, stats).await;
+    let _ = handle_user_connected(
+        tx,
+        rx,
+        ws_id,
+        logger,
+        backend_storage,
+        stats,
+        resource_limits,
+    )
+    .await;
 }
 
 async fn send_to_user(
@@ -56,6 +71,7 @@ async fn send_to_user_with_compression(
     Err(anyhow::anyhow!("Unable to send message to user {:?}", msg))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_user_connected<S: Storage<VersionedGame, E>, E: std::fmt::Debug + Send>(
     tx: mpsc::UnboundedSender<Vec<u8>>,
     mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
@@ -63,18 +79,30 @@ async fn handle_user_connected<S: Storage<VersionedGame, E>, E: std::fmt::Debug 
     logger: Logger,
     backend_storage: S,
     stats: Arc<Mutex<InMemoryStats>>,
+    resource_limits: Arc<ResourceLimits>,
 ) -> Result<(), anyhow::Error> {
     let (room, name, disable_compression) = loop {
         if let Some(msg) = rx.recv().await {
-            let err = match serde_json::from_slice(&msg) {
+            let err = match serde_json::from_slice::<JoinRoom>(&msg) {
                 Ok(JoinRoom {
                     room_name,
                     name,
                     disable_compression,
-                }) if room_name.len() == 16 && name.len() < 32 => {
-                    break (room_name, name, disable_compression);
+                }) => {
+                    // Sanitize the player name server-side: strip control
+                    // characters and enforce the length cap. The room name has a
+                    // fixed length and is treated as an opaque id, so it is only
+                    // length-validated (not sanitized) to preserve room keys.
+                    let name = sanitize_text(&name);
+                    if room_name.len() == ROOM_NAME_BYTES
+                        && room_name.chars().all(|c| !c.is_control())
+                        && !name.is_empty()
+                        && name.len() < MAX_NAME_BYTES
+                    {
+                        break (room_name, name, disable_compression);
+                    }
+                    GameMessage::Error("invalid room or name".to_string())
                 }
-                Ok(_) => GameMessage::Error("invalid room or name".to_string()),
                 Err(err) => GameMessage::Error(format!("couldn't deserialize message {err:?}")),
             };
 
@@ -85,6 +113,26 @@ async fn handle_user_connected<S: Storage<VersionedGame, E>, E: std::fmt::Debug 
     };
 
     let logger = logger.new(o!("room" => room.clone(), "name" => name.clone()));
+
+    // Enforce the global cap on the number of concurrent rooms. If this would be
+    // a brand-new room and we are already at capacity, reject the join. Joining
+    // an already-existing room is always allowed (it doesn't grow the room count).
+    if let Ok(keys) = backend_storage.clone().get_all_keys().await {
+        let room_key = room.as_bytes().to_vec();
+        let room_exists = keys.contains(&room_key);
+        if !room_exists && keys.len() >= resource_limits.max_total_rooms {
+            let _ = send_to_user(
+                &tx,
+                &GameMessage::Error(
+                    "The server is at capacity; please try again later.".to_string(),
+                ),
+            )
+            .await;
+            return Err(anyhow::anyhow!(
+                "rejecting new room: at max_total_rooms capacity"
+            ));
+        }
+    }
 
     let subscription = match backend_storage
         .clone()
@@ -121,6 +169,7 @@ async fn handle_user_connected<S: Storage<VersionedGame, E>, E: std::fmt::Debug 
         room.clone(),
         backend_storage.clone(),
         stats.clone(),
+        resource_limits.clone(),
     )
     .await
     .map_err(|_| anyhow::anyhow!("Failed to register user"))?;
@@ -194,6 +243,7 @@ async fn player_subscribe_task(
     debug!(logger_, "Subscription task completed");
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn register_user<S: Storage<VersionedGame, E>, E: std::fmt::Debug + Send>(
     logger: Logger,
     name: String,
@@ -201,15 +251,31 @@ async fn register_user<S: Storage<VersionedGame, E>, E: std::fmt::Debug + Send>(
     room: String,
     backend_storage: S,
     stats: Arc<Mutex<InMemoryStats>>,
+    resource_limits: Arc<ResourceLimits>,
 ) -> Result<(PlayerID, u64), ()> {
     let (player_id_tx, player_id_rx) = oneshot::channel();
     let logger_ = logger.clone();
     let name_ = name.clone();
+    let limits = resource_limits.clone();
     execute_operation(
         ws_id,
         &room,
         backend_storage.clone(),
         move |g, version, associated_websockets| {
+            // Enforce per-room player/observer caps for *new* participants. A
+            // rejoin under an existing name is always allowed (it doesn't grow
+            // the room). Whether a new registrant becomes a player or an
+            // observer depends on the game phase: the lobby (Initialize) seats
+            // players, all later phases add observers.
+            if !g.has_participant_named(&name_) {
+                if g.is_in_lobby() {
+                    if g.num_players() >= limits.max_players_per_room {
+                        bail!("This room is full (maximum players reached).");
+                    }
+                } else if g.num_observers() >= limits.max_observers_per_room {
+                    bail!("This room has too many observers.");
+                }
+            }
             let (assigned_player_id, register_msgs) = g.register(name_)?;
             info!(logger_, "Joining room"; "player_id" => assigned_player_id.0);
             let mut clients_to_disconnect = vec![];
@@ -352,15 +418,32 @@ async fn handle_user_action<S: Storage<VersionedGame, E>, E: Send>(
             .await;
         }
         UserMessage::Message(m) => {
-            backend_storage
-                .publish(
-                    room_name.as_bytes().to_vec(),
-                    GameMessage::Message {
-                        from: name,
-                        message: m,
-                    },
-                )
-                .await?;
+            // Sanitize chat server-side: strip control characters, trim, and
+            // reject empty or oversized messages. The frontend renders chat as
+            // text, but we still neutralize control sequences and bound length
+            // before storing/broadcasting.
+            match sanitize_chat_message(&m) {
+                Some(message) => {
+                    backend_storage
+                        .publish(
+                            room_name.as_bytes().to_vec(),
+                            GameMessage::Message {
+                                from: name,
+                                message,
+                            },
+                        )
+                        .await?;
+                }
+                None => {
+                    let _ = backend_storage
+                        .publish_to_single_subscriber(
+                            room_name.as_bytes().to_vec(),
+                            ws_id,
+                            GameMessage::Error("Chat message was empty or too long.".to_string()),
+                        )
+                        .await;
+                }
+            }
         }
         UserMessage::ReadyCheck => {
             backend_storage
@@ -414,8 +497,13 @@ async fn handle_user_action<S: Storage<VersionedGame, E>, E: Send>(
                 room_name,
                 backend_storage,
                 move |game, _, _| {
-                    Ok(game
-                        .interact(action, caller, &logger)?
+                    // Apply the human's action, then let any bot players that now
+                    // need to act take their turns. Both happen within this single
+                    // locked operation so the moves are applied atomically and the
+                    // combined set of broadcasts is published together.
+                    let mut broadcasts = game.interact(action, caller, &logger)?;
+                    broadcasts.extend(shengji_core::bot::advance_bots(game, &logger)?);
+                    Ok(broadcasts
                         .into_iter()
                         .map(|(data, message)| GameMessage::Broadcast { data, message })
                         .collect())

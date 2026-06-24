@@ -1,4 +1,4 @@
-use anyhow::{bail, Error};
+use anyhow::{anyhow, bail, Error};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slog::{debug, info, o, Logger};
@@ -14,6 +14,7 @@ use shengji_mechanics::trick::{
 };
 use shengji_mechanics::types::{Card, PlayerID, Rank};
 
+use crate::bot::BotDifficulty;
 use crate::game_state::{initialize_phase::InitializePhase, GameState};
 use crate::message::MessageVariant;
 use crate::settings::{
@@ -73,6 +74,31 @@ impl InteractiveGame {
         self.state.next_player()
     }
 
+    /// Number of seated players currently in the game.
+    pub fn num_players(&self) -> usize {
+        self.state.players().len()
+    }
+
+    /// Number of observers currently watching the game.
+    pub fn num_observers(&self) -> usize {
+        self.state.observers().len()
+    }
+
+    /// Whether a participant (player or observer) with the given name is already
+    /// registered. Used to distinguish a rejoin (always allowed) from a new join
+    /// (subject to capacity limits).
+    pub fn has_participant_named(&self, name: &str) -> bool {
+        self.state.players().iter().any(|p| p.name == name)
+            || self.state.observers().iter().any(|p| p.name == name)
+    }
+
+    /// Whether the game is in the pre-game lobby (Initialize) phase, where new
+    /// registrants are seated as players. In all later phases new registrants
+    /// join as observers instead.
+    pub fn is_in_lobby(&self) -> bool {
+        matches!(self.state, GameState::Initialize(_))
+    }
+
     pub fn player_name(&self, player_id: PlayerID) -> Result<&'_ str, Error> {
         self.state.player_name(player_id)
     }
@@ -122,6 +148,43 @@ impl InteractiveGame {
             (Action::MakePlayer(id), GameState::Initialize(ref mut state)) => {
                 info!(logger, "Making observer a player"; "id" => id.0);
                 state.make_player(id)?
+            }
+            (Action::AddAIPlayer { difficulty }, GameState::Initialize(ref mut state)) => {
+                info!(logger, "Adding AI player"; "difficulty" => difficulty.as_str());
+                let propagated = state.propagated_mut();
+                let name = propagated.generate_bot_name(difficulty);
+                let (bot_id, mut msgs) = propagated.add_player(name)?;
+                propagated.register_bot(bot_id, difficulty);
+                // Replace the generic JoinedGame message with a bot-specific one.
+                msgs.retain(
+                    |m| !matches!(m, MessageVariant::JoinedGame { player } if *player == bot_id),
+                );
+                msgs.insert(
+                    0,
+                    MessageVariant::AddedBot {
+                        player: bot_id,
+                        difficulty,
+                    },
+                );
+                msgs
+            }
+            (Action::RemoveAIPlayer(bot_id), GameState::Initialize(ref mut state)) => {
+                info!(logger, "Removing AI player"; "id" => bot_id.0);
+                let propagated = state.propagated_mut();
+                if propagated.is_bot(bot_id).is_none() {
+                    bail!("player is not a bot");
+                }
+                let name = propagated
+                    .players()
+                    .iter()
+                    .find(|p| p.id == bot_id)
+                    .map(|p| p.name.clone())
+                    .ok_or_else(|| anyhow!("bot player not found"))?;
+                let mut msgs = propagated.remove_player(bot_id)?;
+                // Replace the generic LeftGame message with a bot-specific one.
+                msgs.retain(|m| !matches!(m, MessageVariant::LeftGame { name: n } if *n == name));
+                msgs.insert(0, MessageVariant::RemovedBot { name });
+                msgs
             }
             (Action::SetNumDecks(num_decks), GameState::Initialize(ref mut state)) => {
                 info!(logger, "Setting number of decks"; "num_decks" => num_decks);
@@ -434,6 +497,8 @@ pub enum Action {
     ResetGame,
     MakeObserver(PlayerID),
     MakePlayer(PlayerID),
+    AddAIPlayer { difficulty: BotDifficulty },
+    RemoveAIPlayer(PlayerID),
     SetChatLink(Option<String>),
     SetNumDecks(Option<usize>),
     SetSpecialDecks(Vec<Deck>),
@@ -505,5 +570,191 @@ impl BroadcastMessage {
         player_name: impl Fn(PlayerID) -> Result<&'a str, Error>,
     ) -> Result<String, Error> {
         self.variant.to_string(self.actor, player_name)
+    }
+
+    pub fn variant(&self) -> &MessageVariant {
+        &self.variant
+    }
+}
+
+#[cfg(test)]
+mod move_validation_tests {
+    //! Server-side move-validation assertions (Milestone 4, P0).
+    //!
+    //! These confirm the engine rejects the three unambiguous classes of
+    //! illegal move via the public `InteractiveGame::interact` API:
+    //!   (a) acting out of turn,
+    //!   (b) playing cards you do not hold,
+    //!   (c) acting in the wrong phase.
+
+    use slog::{o, Discard, Logger};
+
+    use shengji_mechanics::types::{Card, PlayerID};
+
+    use crate::bot::{advance_bots, BotDifficulty};
+    use crate::game_state::GameState;
+    use crate::interactive::{Action, InteractiveGame};
+    use crate::message::MessageVariant;
+
+    fn null_logger() -> Logger {
+        Logger::root(Discard, o!())
+    }
+
+    fn added_bot_id(msgs: &[(super::BroadcastMessage, String)]) -> PlayerID {
+        for (b, _) in msgs {
+            if let MessageVariant::AddedBot { player, .. } = b.variant() {
+                return *player;
+            }
+        }
+        panic!("no AddedBot message found");
+    }
+
+    /// Build a game with one human seat (`host`) and three bots, then drive it
+    /// into a mid-Play state where it is the human's turn to act. The bots handle
+    /// bidding/exchange/leading, while we explicitly perform the human's draws so
+    /// the table can progress. `advance_bots` deliberately stops in the Play phase
+    /// as soon as the next actor is the (non-bot) human — giving us a populated
+    /// Play state we can probe for the validation assertions.
+    ///
+    /// Returns the game, the human player id, and all four seated player ids.
+    fn game_in_play_phase(logger: &Logger) -> (InteractiveGame, PlayerID, Vec<PlayerID>) {
+        let mut game = InteractiveGame::new();
+        let (host, _) = game.register("host".to_string()).unwrap();
+        let mut bot_ids = vec![];
+        for _ in 0..3 {
+            let msgs = game
+                .interact(
+                    Action::AddAIPlayer {
+                        difficulty: BotDifficulty::Medium,
+                    },
+                    host,
+                    logger,
+                )
+                .unwrap();
+            bot_ids.push(added_bot_id(&msgs));
+        }
+        game.interact(Action::StartGame, host, logger).unwrap();
+
+        let mut all_ids = vec![host];
+        all_ids.extend(bot_ids.iter().copied());
+
+        for _ in 0..5000 {
+            // Let the bots make whatever progress they can.
+            advance_bots(&mut game, logger).unwrap();
+
+            match &game.dump_state().unwrap() {
+                GameState::Play(p) if !p.game_finished() && !p.hands().is_empty() => {
+                    // advance_bots stopped because it's the human's turn (or a
+                    // human-led trick boundary). This is exactly the mid-Play
+                    // state we want.
+                    if p.next_player().map(|n| n == host).unwrap_or(false) {
+                        return (game, host, all_ids);
+                    }
+                    // If we stopped at a trick boundary the human must finish,
+                    // finish it and continue.
+                    if game.interact(Action::EndTrick, host, logger).is_err() {
+                        // Nothing the human can do here; bail to avoid spinning.
+                        break;
+                    }
+                }
+                // The human must draw their own cards (bots draw via
+                // advance_bots). Draw when it is the human's turn; otherwise we
+                // are waiting on bots or a bid, so let advance_bots proceed.
+                GameState::Draw(p)
+                    if !p.done_drawing() && p.next_player().map(|n| n == host).unwrap_or(false) =>
+                {
+                    let _ = game.interact(Action::DrawCard, host, logger);
+                }
+                _ => {}
+            }
+        }
+        panic!("game never reached a mid-Play state on the human's turn");
+    }
+
+    #[test]
+    fn rejects_acting_out_of_turn() {
+        let logger = null_logger();
+        let (mut game, _host, all_ids) = game_in_play_phase(&logger);
+
+        let current = game.next_player().unwrap();
+        // Pick a seated player who is NOT the current actor, and a card they hold.
+        let other = *all_ids.iter().find(|id| **id != current).unwrap();
+        let state = game.dump_state().unwrap();
+        let play = match &state {
+            GameState::Play(p) => p,
+            _ => panic!("expected Play phase"),
+        };
+        let card = *play
+            .hands()
+            .get(other)
+            .unwrap()
+            .keys()
+            .find(|c| **c != shengji_mechanics::types::Card::Unknown)
+            .expect("the out-of-turn player should hold at least one card");
+
+        let res = game.interact(Action::PlayCards(vec![card]), other, &logger);
+        assert!(
+            res.is_err(),
+            "playing out of turn must be rejected, got {:?}",
+            res
+        );
+    }
+
+    #[test]
+    fn rejects_playing_cards_not_held() {
+        let logger = null_logger();
+        let (mut game, _host, _all_ids) = game_in_play_phase(&logger);
+
+        let current = game.next_player().unwrap();
+        let state = game.dump_state().unwrap();
+        let play = match &state {
+            GameState::Play(p) => p,
+            _ => panic!("expected Play phase"),
+        };
+        let held: std::collections::HashMap<Card, usize> =
+            play.hands().get(current).unwrap().clone();
+
+        // Find a card the current player does NOT hold.
+        let not_held = shengji_mechanics::types::FULL_DECK
+            .iter()
+            .copied()
+            .find(|c| held.get(c).copied().unwrap_or(0) == 0)
+            .expect("some card the player does not hold");
+
+        let res = game.interact(Action::PlayCards(vec![not_held]), current, &logger);
+        assert!(
+            res.is_err(),
+            "playing a card you don't hold must be rejected, got {:?}",
+            res
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_phase_action() {
+        let logger = null_logger();
+        let (mut game, _host, all_ids) = game_in_play_phase(&logger);
+
+        // DrawCard is only valid in the Draw phase; in Play it must be rejected.
+        let res = game.interact(Action::DrawCard, all_ids[0], &logger);
+        assert!(
+            res.is_err(),
+            "a Draw-phase action in the Play phase must be rejected, got {:?}",
+            res
+        );
+
+        // Conversely, a Play action attempted before the game starts (Initialize
+        // phase) must also be rejected.
+        let mut fresh = InteractiveGame::new();
+        let (host, _) = fresh.register("host".to_string()).unwrap();
+        let res = fresh.interact(
+            Action::PlayCards(vec![shengji_mechanics::types::FULL_DECK[0]]),
+            host,
+            &logger,
+        );
+        assert!(
+            res.is_err(),
+            "a Play action in the Initialize phase must be rejected, got {:?}",
+            res
+        );
     }
 }

@@ -18,7 +18,17 @@ use shengji_mechanics::trick::{
 };
 use shengji_mechanics::types::{Card, Number, PlayerID, Rank};
 
+use crate::bot::BotDifficulty;
 use crate::message::MessageVariant;
+
+/// The registration of an AI bot player. The `player_id` matches the regular
+/// player entry in [`PropagatedState::players`]; this registry is what marks that
+/// seat as bot-controlled.
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct BotRegistration {
+    pub player_id: PlayerID,
+    pub difficulty: BotDifficulty,
+}
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, JsonSchema, Hash, PartialEq, Eq)]
 pub struct Friend {
@@ -322,6 +332,9 @@ pub struct PropagatedState {
     pub(crate) game_visibility: GameVisibility,
     #[serde(default)]
     pub(crate) compound_formats: CompoundFormats,
+    #[slog(skip)]
+    #[serde(default)]
+    pub(crate) bots: Vec<BotRegistration>,
 }
 
 impl PropagatedState {
@@ -406,6 +419,54 @@ impl PropagatedState {
         Ok((id, msgs))
     }
 
+    /// Register the given player id as a bot with the provided difficulty.
+    pub fn register_bot(&mut self, player_id: PlayerID, difficulty: BotDifficulty) {
+        // Replace any existing registration for this id (shouldn't normally happen).
+        self.bots.retain(|b| b.player_id != player_id);
+        self.bots.push(BotRegistration {
+            player_id,
+            difficulty,
+        });
+    }
+
+    /// Remove any bot registration associated with the given player id.
+    pub fn unregister_bot(&mut self, player_id: PlayerID) {
+        self.bots.retain(|b| b.player_id != player_id);
+    }
+
+    /// Returns the difficulty for the given player id if it is a registered bot.
+    pub fn is_bot(&self, player_id: PlayerID) -> Option<BotDifficulty> {
+        self.bots
+            .iter()
+            .find(|b| b.player_id == player_id)
+            .map(|b| b.difficulty)
+    }
+
+    pub fn bots(&self) -> &[BotRegistration] {
+        &self.bots
+    }
+
+    /// Generate a unique display name for a freshly-added bot, such as
+    /// `🤖 Easy Bot` or `🤖 Medium Bot 2`.
+    pub fn generate_bot_name(&self, difficulty: BotDifficulty) -> String {
+        let base = format!("🤖 {} Bot", difficulty.as_str());
+        let name_taken = |name: &str| {
+            self.players.iter().any(|p| p.name == name)
+                || self.observers.iter().any(|p| p.name == name)
+        };
+        if !name_taken(&base) {
+            return base;
+        }
+        let mut suffix = 2;
+        loop {
+            let candidate = format!("{base} {suffix}");
+            if !name_taken(&candidate) {
+                return candidate;
+            }
+            suffix += 1;
+        }
+    }
+
     pub fn reorder_players(&mut self, order: &[PlayerID]) -> Result<(), Error> {
         let uniq = order.iter().cloned().collect::<HashSet<PlayerID>>();
         if uniq.len() != self.players.len() {
@@ -442,6 +503,7 @@ impl PropagatedState {
                 self.landlord = None;
             }
             self.players.retain(|p| p.id != id);
+            self.unregister_bot(id);
             msgs.extend(self.num_players_changed()?);
             Ok(msgs)
         } else {
@@ -850,6 +912,8 @@ impl PropagatedState {
             if self.landlord == Some(player_id) {
                 self.landlord = None;
             }
+            // A bot cannot meaningfully be an observer; drop its registration.
+            self.unregister_bot(player_id);
             self.observers.push(player);
             self.num_players_changed()
         } else {

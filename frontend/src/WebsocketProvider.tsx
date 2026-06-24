@@ -112,14 +112,28 @@ const WebsocketProvider: React.FunctionComponent<
   }, [timer, setTimerRef]);
 
   React.useEffect(() => {
+    // Resolution order for the game WebSocket host:
+    //   1. window._WEBSOCKET_HOST  — injected at runtime by the backend's
+    //      /runtime.js (set from the WEBSOCKET_HOST env var). Present for the
+    //      single-service deploy.
+    //   2. process.env.WEBSOCKET_HOST — baked into the bundle at build time via
+    //      webpack DefinePlugin. Used by a standalone frontend (e.g. Vercel)
+    //      that has no /runtime.js but points at a separate backend.
+    //   3. same-origin — the original default; preserved so the single-service
+    //      Koyeb deploy keeps working unchanged.
     const runtimeWebsocketHost = (window as any)._WEBSOCKET_HOST;
+    const bakedWebsocketHost = process.env.WEBSOCKET_HOST;
     const uri =
       runtimeWebsocketHost !== undefined && runtimeWebsocketHost !== null
         ? runtimeWebsocketHost
-        : (location.protocol === "https:" ? "wss://" : "ws://") +
-          location.host +
-          location.pathname +
-          (location.pathname.endsWith("/") ? "api" : "/api");
+        : bakedWebsocketHost !== undefined &&
+            bakedWebsocketHost !== null &&
+            bakedWebsocketHost !== ""
+          ? bakedWebsocketHost
+          : (location.protocol === "https:" ? "wss://" : "ws://") +
+            location.host +
+            location.pathname +
+            (location.pathname.endsWith("/") ? "api" : "/api");
 
     const ws = new WebSocket(uri);
     setWebsocket(ws);

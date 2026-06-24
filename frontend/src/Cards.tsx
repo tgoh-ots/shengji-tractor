@@ -34,14 +34,48 @@ const Cards = (props: IProps): JSX.Element => {
   const engine = useEngine();
   const { separateCardsBySuit, disableSuitHighlights, reverseCardOrder } =
     React.useContext(SettingsContext);
-  const handleSelect = (card: string) => () => {
-    if (props.onCardClick !== undefined) {
-      props.onCardClick(card);
-    }
-    if (selectedCards !== undefined && props.onSelect !== undefined) {
-      props.onSelect([...selectedCards, card]);
-    }
+
+  // Count how many copies of a card are currently available (unselected).
+  const availableCountOf = (card: string): number => {
+    const total =
+      props.playerId in hands.hands
+        ? (hands.hands[props.playerId][card] ?? 0)
+        : 0;
+    const selectedOfCard = (selectedCards ?? []).filter(
+      (c) => c === card,
+    ).length;
+    return total - selectedOfCard;
   };
+
+  // Track the last tapped card + time so a quick double-tap on touch devices
+  // (which have no shift key) can select all remaining copies at once — the
+  // touch equivalent of shift-click for grabbing pairs / tractor members.
+  const lastTapRef = React.useRef<{ card: string; time: number } | null>(null);
+
+  const handleSelect =
+    (card: string) => (event?: React.MouseEvent | React.KeyboardEvent) => {
+      if (props.onCardClick !== undefined) {
+        props.onCardClick(card);
+      }
+      if (selectedCards !== undefined && props.onSelect !== undefined) {
+        // Shift-click (or shift+Enter) selects ALL remaining copies of this
+        // card at once — a fast path for picking pairs / tractor members.
+        const now = Date.now();
+        const prevTap = lastTapRef.current;
+        const isDoubleTap =
+          prevTap !== null && prevTap.card === card && now - prevTap.time < 350;
+        lastTapRef.current = { card, time: now };
+        const selectAll =
+          (event !== undefined && "shiftKey" in event && event.shiftKey) ||
+          isDoubleTap;
+        if (selectAll) {
+          const toAdd = Array(Math.max(availableCountOf(card), 1)).fill(card);
+          props.onSelect([...selectedCards, ...toAdd]);
+        } else {
+          props.onSelect([...selectedCards, card]);
+        }
+      }
+    };
 
   const handleUnselect = (card: string) => () => {
     if (selectedCards !== undefined) {
@@ -179,6 +213,7 @@ const Cards = (props: IProps): JSX.Element => {
               {g.map((c, idx) => (
                 <Card
                   key={`${gidx}-${idx}`}
+                  className="selected"
                   onClick={handleUnselect(c.card)}
                   trump={props.trump}
                   card={c.card}

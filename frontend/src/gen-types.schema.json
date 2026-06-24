@@ -154,6 +154,34 @@
         },
         {
           "type": "object",
+          "required": ["AddAIPlayer"],
+          "properties": {
+            "AddAIPlayer": {
+              "type": "object",
+              "required": ["difficulty"],
+              "properties": {
+                "difficulty": {
+                  "$ref": "#/definitions/BotDifficulty"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["RemoveAIPlayer"],
+          "properties": {
+            "RemoveAIPlayer": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
           "required": ["SetChatLink"],
           "properties": {
             "SetChatLink": {
@@ -749,6 +777,35 @@
     "BonusLevelPolicy": {
       "type": "string",
       "enum": ["NoBonusLevel", "BonusLevelForSmallerLandlordTeam"]
+    },
+    "BotDifficulty": {
+      "description": "The difficulty of a bot player. For Milestone 1 the difficulty does not yet influence the (dumb-but-legal) policy, but it is plumbed through so that a smarter brain can use it in a later milestone.\n\n`Omniscient` is a DELIBERATE, clearly-labeled, opt-in CHEATING tier that plays with PERFECT INFORMATION (it is allowed to see every opponent's hand). It exists for testing and for an \"impossible\" practice opponent; it must be chosen explicitly in the lobby and is surfaced with a cheater badge in the UI. The three honest tiers (`Easy`/`Medium`/`Hard`) never receive anything but their own redacted, per-player view — see [`observed_state`], which is the single, centralized place where the perfect-information bypass is gated.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": ["Easy", "Medium", "Hard"]
+        },
+        {
+          "description": "CHEATER tier: sees all opponents' hands and plays with perfect information. The ONLY difficulty for which [`observed_state`] returns the true, unredacted state.",
+          "type": "string",
+          "enum": ["Omniscient"]
+        }
+      ]
+    },
+    "BotRegistration": {
+      "description": "The registration of an AI bot player. The `player_id` matches the regular player entry in [`PropagatedState::players`]; this registry is what marks that seat as bot-controlled.",
+      "type": "object",
+      "required": ["difficulty", "player_id"],
+      "properties": {
+        "difficulty": {
+          "$ref": "#/definitions/BotDifficulty"
+        },
+        "player_id": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
     },
     "BroadcastMessage": {
       "type": "object",
@@ -1998,6 +2055,37 @@
         },
         {
           "type": "object",
+          "required": ["difficulty", "player", "type"],
+          "properties": {
+            "difficulty": {
+              "$ref": "#/definitions/BotDifficulty"
+            },
+            "player": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "enum": ["AddedBot"]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["name", "type"],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": ["RemovedBot"]
+            }
+          }
+        },
+        {
+          "type": "object",
           "required": ["policy", "type"],
           "properties": {
             "policy": {
@@ -2939,6 +3027,13 @@
               "$ref": "#/definitions/BombPolicy"
             }
           ]
+        },
+        "bots": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/BotRegistration"
+          }
         },
         "chat_link": {
           "type": ["string", "null"]

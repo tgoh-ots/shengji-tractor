@@ -22,6 +22,8 @@ import { WebsocketContext } from "./WebsocketProvider";
 
 import Header from "./Header";
 import Players from "./Players";
+import AddAIPlayer from "./AddAIPlayer";
+import { useTranslation } from "./i18n";
 import { GameScoringSettings } from "./ScoringSettings";
 
 import type { JSX } from "react";
@@ -731,6 +733,7 @@ interface IProps {
 
 const Initialize = (props: IProps): JSX.Element => {
   const { send } = React.useContext(WebsocketContext);
+  const { t } = useTranslation();
   const [showPicker, setShowPicker] = React.useState<boolean>(false);
   const setGameMode = (evt: React.ChangeEvent<HTMLSelectElement>): void => {
     evt.preventDefault();
@@ -1233,46 +1236,60 @@ const Initialize = (props: IProps): JSX.Element => {
         gameMode={props.state.propagated.game_mode}
         chatLink={props.state.propagated.chat_link}
       />
-      <Players
-        players={props.state.propagated.players}
-        observers={props.state.propagated.observers}
-        landlord={props.state.propagated.landlord}
-        next={null}
-        movable={true}
-        name={props.name}
-      />
-      <p>
-        Send link to other players to allow them to join the game:{" "}
-        <a href={window.location.href} target="_blank" rel="noreferrer">
-          <code>{window.location.href}</code>
-        </a>
-      </p>
-      {props.state.propagated.players.length >= 4 ? (
-        <>
-          <button
-            className="big"
-            disabled={
-              props.state.propagated.game_start_policy ===
-                "AllowLandlordOnly" &&
-              landlordIndex !== -1 &&
-              props.state.propagated.players[landlordIndex].name !== props.name
-            }
-            onClick={startGame}
+      <div className="sj-panel mb-4 p-4">
+        <Players
+          players={props.state.propagated.players}
+          observers={props.state.propagated.observers}
+          bots={props.state.propagated.bots}
+          landlord={props.state.propagated.landlord}
+          next={null}
+          movable={true}
+          name={props.name}
+        />
+        <p className="mt-3 text-sm text-[var(--text-secondary)]">
+          {t("lobby.shareLink")}{" "}
+          <a
+            href={window.location.href}
+            target="_blank"
+            rel="noreferrer"
+            className="text-[var(--accent)] underline"
           >
-            Start game
-          </button>
-          <ReadyCheck />
-        </>
-      ) : (
-        <h2>Waiting for players...</h2>
-      )}
-      <RandomizePlayersButton players={props.state.propagated.players}>
-        Randomize player order
-      </RandomizePlayersButton>
-      <Kicker
-        players={props.state.propagated.players}
-        onKick={(playerId: number) => send({ Kick: playerId })}
-      />
+            <code>{window.location.href}</code>
+          </a>
+        </p>
+      </div>
+      <AddAIPlayer />
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        {props.state.propagated.players.length >= 4 ? (
+          <>
+            <button
+              className="sj-btn sj-btn-primary"
+              disabled={
+                props.state.propagated.game_start_policy ===
+                  "AllowLandlordOnly" &&
+                landlordIndex !== -1 &&
+                props.state.propagated.players[landlordIndex].name !==
+                  props.name
+              }
+              onClick={startGame}
+            >
+              {t("lobby.start")}
+            </button>
+            <ReadyCheck />
+          </>
+        ) : (
+          <h2 className="m-0 text-lg font-semibold text-[var(--text-on-felt-soft)]">
+            {t("lobby.waiting")}
+          </h2>
+        )}
+        <RandomizePlayersButton players={props.state.propagated.players}>
+          {t("lobby.randomize")}
+        </RandomizePlayersButton>
+        <Kicker
+          players={props.state.propagated.players}
+          onKick={(playerId: number) => send({ Kick: playerId })}
+        />
+      </div>
       <div className="game-settings">
         <h3>Game settings</h3>
         <div>

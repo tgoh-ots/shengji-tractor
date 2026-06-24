@@ -4,6 +4,7 @@ import { TimerContext } from "./TimerProvider";
 import LabeledPlay from "./LabeledPlay";
 import PublicRoomsPane from "./PublicRoomsPane";
 import { isWasmAvailable } from "./detectWasm";
+import { useTranslation } from "./i18n";
 
 import type { JSX } from "react";
 
@@ -21,6 +22,7 @@ const JoinRoom = (props: IProps): JSX.Element => {
   );
   const { send } = React.useContext(WebsocketContext);
   const { setTimeout } = React.useContext(TimerContext);
+  const { t } = useTranslation();
 
   const handleChange = (event: React.ChangeEvent<HTMLInputElement>): void =>
     props.setName(event.target.value.trim());
@@ -42,7 +44,8 @@ const JoinRoom = (props: IProps): JSX.Element => {
   const editableRoomName = (
     <input
       type="text"
-      placeholder="Enter a room code"
+      className="sj-input"
+      placeholder={t("join.enterRoom")}
       value={props.room_name}
       onChange={handleRoomChange}
       maxLength={16}
@@ -50,6 +53,7 @@ const JoinRoom = (props: IProps): JSX.Element => {
   );
   const nonEditableRoomName = (
     <span
+      className="sj-chip cursor-pointer font-mono text-base"
       title="Set the room name"
       onClick={(evt) => {
         evt.preventDefault();
@@ -75,71 +79,68 @@ const JoinRoom = (props: IProps): JSX.Element => {
 
   return (
     <div>
-      <LabeledPlay
-        cards={["🃟", "🃟", "🃏", "🃏"]}
-        trump={{ NoTrump: {} }}
-        label={null}
-      ></LabeledPlay>
-      <form className="join-room" onSubmit={handleSubmit}>
-        <div>
-          <h2>
-            <label>
-              <strong>Room Name:</strong>{" "}
-              {editable ? editableRoomName : nonEditableRoomName}{" "}
-              <span
-                title="Generate new room"
-                onClick={() => generateRoomName()}
-              >
-                🎲
-              </span>{" "}
-            </label>
-          </h2>
-        </div>
-        <div>
-          <label>
-            <strong>Player Name:</strong>{" "}
-            <input
-              type="text"
-              placeholder="Enter your name here"
-              value={props.name}
-              onChange={handleChange}
-              autoFocus={true}
-            />
-          </label>
+      <div className="mb-4 flex justify-center">
+        <LabeledPlay
+          cards={["🃟", "🃟", "🃏", "🃏"]}
+          trump={{ NoTrump: {} }}
+          label={null}
+        ></LabeledPlay>
+      </div>
+      <form className="join-room flex flex-col gap-4" onSubmit={handleSubmit}>
+        <label className="flex flex-col gap-1">
+          <span className="text-sm font-semibold text-[var(--text-secondary)]">
+            {t("join.roomName")}
+          </span>
+          <span className="flex items-center gap-2">
+            {editable ? editableRoomName : nonEditableRoomName}
+            <button
+              type="button"
+              className="sj-btn sj-btn-ghost !min-h-[40px] !px-3 !text-[var(--text-primary)]"
+              title={t("join.generateRoom")}
+              aria-label={t("join.generateRoom")}
+              onClick={() => generateRoomName()}
+            >
+              🎲
+            </button>
+          </span>
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-sm font-semibold text-[var(--text-secondary)]">
+            {t("join.playerName")}
+          </span>
           <input
-            type="submit"
-            value="Join (or create) the game!"
-            disabled={
-              props.room_name.length !== 16 ||
-              props.name.length === 0 ||
-              props.name.length > 32
-            }
+            type="text"
+            className="sj-input"
+            placeholder={t("join.enterName")}
+            value={props.name}
+            onChange={handleChange}
+            autoFocus={true}
           />
-        </div>
+        </label>
+        <button
+          type="submit"
+          className="sj-btn sj-btn-primary w-full"
+          disabled={
+            props.room_name.length !== 16 ||
+            props.name.length === 0 ||
+            props.name.length > 32
+          }
+        >
+          {t("join.join")}
+        </button>
       </form>
-      <div>
+      <div className="mt-5 space-y-2 text-sm text-[var(--text-secondary)]">
+        <p>{t("join.intro")}</p>
         <p>
-          Welcome to the game! Enter your name above to create a new game, or
-          (re-)join the game if it already exists.
+          <a
+            href="rules.html"
+            target="_blank"
+            className="text-[var(--accent)] underline"
+          >
+            {t("join.readRules")}
+          </a>
         </p>
-        <p>
-          If you&apos;re unfamiliar with the game, it might be helpful to{" "}
-          <a href="rules.html" target="_blank">
-            read the rules
-          </a>{" "}
-          and then shadow another player&mdash;you can just join with the same
-          name, case-sensitive.
-        </p>
-        <p>
-          Once you are in the game, share the room link with at least three
-          friends to start playing!
-        </p>
-        <p>
-          This is a game with many house rules, so be sure to check out the game
-          settings to see if your favorite rules are implemented. There&apos;s
-          also a settings gear at the top, which can change how the game looks
-          to you.
-        </p>
+        <p>{t("join.shareIntro")}</p>
       </div>
       <PublicRoomsPane setRoomName={props.setRoomName} />
     </div>

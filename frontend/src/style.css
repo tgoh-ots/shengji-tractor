@@ -1,21 +1,19 @@
-body {
-  font-family: sans-serif;
-  margin: 0;
-  padding: 0;
-}
-
-.dark-mode {
-  background: #000;
-}
-
-.dark-mode #root {
-  color: #fff;
-}
+/*
+ * Card-rendering + legacy gameplay styles.
+ *
+ * IMPORTANT: the suit-color class selectors (.♢ .♡ .♤ .♧ .🃟 .🃏 .🂠) are
+ * load-bearing — Card.tsx reads their computed `color` via getComputedStyle to
+ * fill the SVG/canvas card glyphs. Do NOT rename or remove them.
+ *
+ * Theming note: historically a `.dark-mode` class on <body> drove dark colors.
+ * ThemeProvider now also sets [data-theme] on <html>; we honor BOTH so the
+ * glyph color computation keeps working under either signal.
+ */
 
 button.big {
   padding: 10px;
   cursor: pointer;
-  margin: 10px;
+  margin: 6px;
   line-height: 1em;
 }
 
@@ -26,19 +24,17 @@ button.normal {
   line-height: 1em;
 }
 
-.dark-mode .icon-button {
-  color: #fff;
-}
-
 .header-message {
-  background-color: rgba(255, 255, 0, 0.7);
+  background-color: var(--color-accent-400, rgba(255, 255, 0, 0.85));
+  color: #2a1a02;
   position: fixed;
   width: 100%;
   left: 0;
   top: 0;
   text-align: center;
-  border-bottom: 1px #000 solid;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.25);
   cursor: pointer;
+  z-index: 50;
 }
 
 .emoji-picker-react button {
@@ -50,22 +46,13 @@ button.normal {
   margin: 0 5px;
 }
 
-.player {
-  border: 1px #000 solid;
-  padding: 10px;
-  line-height: 1em;
-}
-
-.dark-mode .player {
-  border-color: #fff;
-}
-
 .errors {
   position: fixed;
   z-index: 100;
-  background: #f00;
+  background: #e11d2e;
   color: #fff;
-  padding: 0 10px;
+  padding: 4px 12px;
+  border-radius: 0 0 10px 10px;
 }
 
 .trick {
@@ -83,18 +70,26 @@ button.normal {
   margin-top: 20px;
 }
 
-.card.highlighted {
-  border-bottom: 1px solid;
-  margin-bottom: -1px;
-}
-
+/* Modern card chrome: rounded corners + soft shadow on the rendered glyph. */
 .card > svg {
   background: #fff;
   margin-left: 1px;
+  border-radius: 8px;
+  box-shadow:
+    0 1px 2px rgba(8, 32, 31, 0.18),
+    0 4px 12px rgba(8, 32, 31, 0.16);
+  transition:
+    transform 120ms ease,
+    box-shadow 120ms ease;
 }
 
-.dark-mode .card > svg {
-  background: #000;
+.dark-mode .card > svg,
+[data-theme="dark"] .card > svg {
+  background: #f7f9fb;
+}
+
+.card.svg > svg {
+  border-radius: 8px;
 }
 
 .card:first-child > svg {
@@ -115,13 +110,13 @@ button.normal {
   z-index: 1;
   background: #fff;
   width: 1.5em;
+  border-radius: 4px;
 }
 
-.dark-mode .card .card-label {
-  background: #000;
-}
-
-.more .card .card-label {
+.dark-mode .card .card-label,
+[data-theme="dark"] .card .card-label {
+  background: #f7f9fb;
+  color: #1c232a;
 }
 
 .hand .unselected-cards.unclickable .card {
@@ -133,11 +128,14 @@ button.normal {
 }
 
 .hand .unselected-cards .card:hover svg {
-  transform: translateY(-20px);
+  transform: translateY(-18px);
+  box-shadow:
+    0 8px 16px rgba(8, 32, 31, 0.22),
+    0 18px 34px rgba(8, 32, 31, 0.24);
 }
 
 .hand .unselected-cards .card:hover .card-label {
-  transform: translateY(-20px);
+  transform: translateY(-18px);
 }
 
 .card .card-icon {
@@ -148,7 +146,7 @@ button.normal {
 }
 
 .hand .unselected-cards .card:hover .card-icon {
-  transform: translateY(-20px);
+  transform: translateY(-18px);
 }
 
 .kitty {
@@ -162,65 +160,54 @@ button.normal {
 }
 
 .ReactModal__Overlay {
-  z-index: 2;
+  z-index: 200 !important;
+  background: rgba(8, 22, 21, 0.55) !important;
+  backdrop-filter: blur(3px);
+}
+
+.ReactModal__Content {
+  background: var(--surface-panel, #fff) !important;
+  color: var(--text-primary, #121821) !important;
+  border: 1px solid var(--border-subtle, #cfd6dd) !important;
+  border-radius: var(--radius-2xl, 18px) !important;
+  box-shadow: var(--shadow-panel, 0 12px 32px rgba(8, 32, 31, 0.18)) !important;
+  max-height: 85dvh;
+  overflow: auto;
 }
 
 .notify .card,
 .card.notify {
   animation: blinkingText 1.5s 1;
-  color: #000;
 }
 
 @keyframes blinkingText {
   0% {
-    color: #000;
+    filter: none;
   }
   50% {
-    color: #aaa;
+    filter: drop-shadow(0 0 8px var(--color-accent-400, #fbbf24));
   }
   100% {
-    color: #000;
+    filter: none;
   }
 }
 
-@keyframes blinkingTextDark {
-  0% {
-    color: #fff;
-  }
-  50% {
-    color: #555;
-  }
-  100% {
-    color: #fff;
-  }
-}
-
-.dark-mode .notify .card,
-.dark-mode .card.notify {
-  animation: blinkingTextDark 1.5s 1;
-  color: #fff;
-}
-
+/* ---- Suit colors (load-bearing — see note at top) ---- */
 .♢ {
   color: #bb0313;
 }
-
 .♡ {
   color: #bb0313;
 }
-
 .♤ {
-  color: #000;
+  color: #1c232a;
 }
-
 .♧ {
-  color: #000;
+  color: #1c232a;
 }
-
 .🃟 {
-  color: #000;
+  color: #1c232a;
 }
-
 .🃏 {
   color: #bb0313;
 }
@@ -233,50 +220,25 @@ button.normal {
 .four-color.♢ {
   color: #1933f9;
 }
-
 .four-color .♡,
 .four-color.♡ {
   color: #bb0313;
 }
-
 .four-color .♤,
 .four-color.♤ {
-  color: #000;
+  color: #1c232a;
 }
-
 .four-color .♧,
 .four-color.♧ {
-  color: #477e1b;
+  color: #2f7d22;
 }
-
 .four-color .🃟,
 .four-color.🃟 {
-  color: #000;
+  color: #1c232a;
 }
-
 .four-color .🃏,
 .four-color.🃏 {
   color: #bb0313;
-}
-
-.dark-mode .♧,
-.dark-mode.♧ {
-  color: #fff;
-}
-
-.dark-mode .♤,
-.dark-mode.♤,
-.dark-mode .four-color .♤,
-.dark-mode .four-color.♤ {
-  color: #fff;
-}
-
-.dark-mode .🃟,
-.dark-mode.🃟,
-.dark-mode .four-color .🃟,
-.dark-mode .four-color.🃟,
-.darkmode.four-color.🃟 {
-  color: #fff;
 }
 
 .hand p {
@@ -293,91 +255,26 @@ button.normal {
 }
 
 .next {
-  color: #1933f9;
-  font-weight: bold;
-}
-
-.dark-mode .next {
-  color: #96a2fa;
-}
-
-.landlord {
-  background: #ddd;
-}
-
-.landlord .card svg {
-  background: #ddd;
-}
-
-.dark-mode .landlord,
-.dark-mode .landlord .card svg {
-  background: #333;
-}
-
-.observer {
-  border: 1px #222 dashed;
-  color: #222;
-}
-
-.chat {
-  min-width: 225px;
-  width: 20%;
-  border: 1px #eee solid;
-  float: right;
-  margin-top: 20px;
-}
-
-.dark-mode .chat {
-  border: #222;
-}
-
-.game {
-  min-width: 690px;
-  min-height: 660px;
-  padding: 0 20px;
-  width: 70%;
-  display: inline-block;
-}
-
-.hide-chat-box .game {
-  width: 95%;
-}
-
-.messages {
-  padding-top: 10px;
-  padding-left: 10px;
-  height: 400px;
-  overflow-y: auto;
-  overflow-anchor: none;
-}
-
-.chat-anchor {
-  overflow-anchor: auto;
-  height: 1px;
-}
-
-.message {
-  margin: 0;
-}
-
-.game-message {
-  color: #00f;
+  color: var(--accent, #f59e0b);
+  font-weight: 700;
 }
 
 .labeled-play {
   display: inline-block;
   padding: 10px;
-  border: 1px solid #000;
-  margin-bottom: 20px;
-}
-
-.dark-mode .labeled-play {
-  border-color: #fff;
+  border: 1px solid var(--border-subtle, #cfd6dd);
+  border-radius: var(--radius-xl, 14px);
+  margin-bottom: 16px;
+  margin-right: 10px;
+  background: var(--surface-panel-soft, rgba(255, 255, 255, 0.06));
 }
 
 .labeled-play .label {
   text-align: center;
-  line-height: 1em;
+  line-height: 1.2em;
+  margin-top: 4px;
+  color: var(--text-primary, inherit);
+  font-weight: 600;
 }
 
 .labeled-play .card-group {
@@ -393,7 +290,8 @@ button.normal {
 }
 
 .labeled-play.winning {
-  box-shadow: inset 0px 0px 0px 2px #bb0313;
+  box-shadow: 0 0 0 2px var(--accent, #f59e0b);
+  border-color: var(--accent, #f59e0b);
 }
 
 .always-show-labels .more .card.svg .card-label,
@@ -403,7 +301,7 @@ button.normal {
 
 .labeled-play .play {
   display: inline-block;
-  padding-bottom: 20px;
+  padding-bottom: 16px;
 }
 
 .labeled-play .play + .play {
@@ -433,7 +331,7 @@ button.normal {
 }
 
 .red {
-  color: #bb0313;
+  color: #ff6b6b;
 }
 
 .join-room div {
@@ -442,10 +340,6 @@ button.normal {
 
 .join-room span {
   cursor: pointer;
-}
-
-.join-room h2 input {
-  font-size: 24px;
 }
 
 .kicker button {
@@ -457,6 +351,109 @@ label {
   line-height: 25px;
 }
 
+/* ---- Responsive table shell + chat (NEW) ---- */
+.sj-table-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 300px);
+  grid-template-areas:
+    "game chat"
+    "footer footer";
+  gap: 18px;
+  align-items: start;
+}
+
+.sj-table-shell .game {
+  grid-area: game;
+  min-width: 0;
+  width: auto;
+  min-height: auto;
+  display: block;
+  padding: 0;
+}
+
+.sj-table-shell .chat {
+  grid-area: chat;
+  position: sticky;
+  top: 12px;
+  width: 100%;
+  min-width: 0;
+  float: none;
+  margin: 0;
+  max-height: 80dvh;
+}
+
+.sj-table-shell > .clear-both,
+.sj-table-shell > div:last-child {
+  grid-area: footer;
+}
+
+.chat {
+  border: 1px solid var(--border-subtle, #cfd6dd);
+  border-radius: var(--radius-xl, 14px);
+  background: var(--surface-panel, #fff);
+  color: var(--text-primary, #121821);
+  overflow: hidden;
+}
+
+.messages {
+  padding: 10px;
+  height: 340px;
+  overflow-y: auto;
+  overflow-anchor: none;
+}
+
+.chat-anchor {
+  overflow-anchor: auto;
+  height: 1px;
+}
+
+.message {
+  margin: 0;
+}
+
+.game-message {
+  color: var(--accent, #f59e0b);
+}
+
+/* Hide chat box mode + small screens collapse to one column. */
+.hide-chat-box .sj-table-shell {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "game"
+    "footer";
+}
+
+.hide-chat-box .chat {
+  display: none;
+}
+
+@media (max-width: 860px) {
+  .sj-table-shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "game"
+      "chat"
+      "footer";
+  }
+
+  .sj-table-shell .chat {
+    position: static;
+    max-height: 50dvh;
+  }
+}
+
+/* On phones, fan/overlap the hand harder so ~25 cards always fit. */
+@media (max-width: 640px) {
+  .hand .unselected-cards,
+  .hand .selected-cards {
+    padding: 0 4px;
+    white-space: nowrap;
+    overflow-x: auto;
+    overflow-y: visible;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
 /* used by rules.html */
 .rules .card {
   font-size: 8em;
@@ -464,4 +461,269 @@ label {
 }
 .rules .card:last-child {
   margin-right: 0;
+}
+
+/* =====================================================================
+ * In-game table — 4-seat CSS-grid layout (Milestone 3).
+ *
+ * The table is a felt "board" with a center trick area, the player's hand
+ * fanned along the bottom, and the three opponents arranged top/left/right.
+ * It reflows for portrait/mobile so the hand stays at the bottom and the
+ * opponents collapse into a compact top strip.
+ * ===================================================================== */
+.sj-table {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(72px, auto) minmax(0, 1fr) minmax(72px, auto);
+  grid-template-rows: auto minmax(120px, 1fr) auto;
+  grid-template-areas:
+    "rail   top    rail2"
+    "left   center right"
+    "bottom bottom bottom";
+  gap: 10px;
+  padding: clamp(10px, 2vw, 22px);
+  border-radius: var(--radius-2xl, 18px);
+  background:
+    radial-gradient(
+      120% 80% at 50% 0%,
+      var(--color-felt-600, #1f544d),
+      var(--color-felt-800, #123733) 70%
+    ),
+    var(--color-felt-800, #123733);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    inset 0 2px 30px rgba(8, 32, 31, 0.45),
+    var(--shadow-panel, 0 12px 32px rgba(8, 32, 31, 0.18));
+}
+
+.sj-table-status {
+  grid-area: rail / rail / rail2 / rail2;
+  grid-column: 1 / -1;
+}
+
+.sj-seat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.sj-seat-top {
+  grid-area: top;
+  justify-self: center;
+}
+.sj-seat-left {
+  grid-area: left;
+  justify-self: start;
+  align-self: center;
+}
+.sj-seat-right {
+  grid-area: right;
+  justify-self: end;
+  align-self: center;
+}
+.sj-seat-bottom {
+  grid-area: bottom;
+  justify-self: center;
+}
+
+.sj-seat-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 14ch;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-on-felt, #eef6f3);
+  background: rgba(8, 22, 21, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition:
+    background 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.sj-seat-name.is-landlord {
+  border-color: color-mix(in srgb, var(--accent, #f59e0b) 55%, transparent);
+}
+
+.sj-seat-name.is-turn {
+  background: color-mix(
+    in srgb,
+    var(--accent, #f59e0b) 22%,
+    rgba(8, 22, 21, 0.4)
+  );
+  border-color: var(--accent, #f59e0b);
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--accent, #f59e0b) 45%, transparent);
+  color: #fff7e6;
+}
+
+.sj-seat-badge {
+  font-size: 0.7rem;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent, #f59e0b) 28%, transparent);
+  color: #fff7e6;
+}
+
+.sj-center {
+  grid-area: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  min-width: 0;
+}
+
+/* Trick centered in the felt; each play animates in from below. */
+.sj-center .trick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: flex-end;
+  justify-content: center;
+  width: 100%;
+  padding: 4px;
+}
+
+.sj-center .labeled-play {
+  margin: 0;
+  background: rgba(8, 22, 21, 0.28);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.sj-center .labeled-play .label {
+  color: var(--text-on-felt, #eef6f3);
+}
+
+/* Animate played card groups gliding into the center. */
+.labeled-play {
+  animation: sj-play-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes sj-play-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Dealing animation for hand cards (GPU transform/opacity). */
+@keyframes sj-deal-in {
+  from {
+    opacity: 0;
+    transform: translateY(-16px) rotate(-2deg);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) rotate(0);
+  }
+}
+
+.sj-hand-panel {
+  width: 100%;
+}
+
+/* The hand clamps card overlap so ~25 cards always fit the viewport. */
+.sj-hand-fan .unselected-cards .card,
+.sj-hand-fan .selected-cards .card {
+  /* Overlap scales with how wide the screen is — never wider than ~0.6 of a
+     card, never tighter than what keeps the rank readable. */
+  margin-right: clamp(-2.6rem, -7vw, -0.7rem);
+}
+
+.sj-hand-fan .unselected-cards .card:last-child,
+.sj-hand-fan .selected-cards .card:last-child {
+  margin-right: 0;
+}
+
+/* Selected cards lift up so the pair/tractor multi-select reads clearly. */
+.sj-hand-fan .selected-cards .card > svg {
+  box-shadow:
+    0 0 0 2px var(--accent, #f59e0b),
+    0 8px 18px rgba(8, 32, 31, 0.3);
+}
+
+/* Bigger keyboard/touch affordance: visible focus ring on cards. */
+.card:focus-visible {
+  outline: none;
+}
+.card:focus-visible > svg {
+  outline: 3px solid var(--ring, #f59e0b);
+  outline-offset: 2px;
+}
+
+/* Center "your turn" pulse on the empty hand placeholder. */
+.sj-turn-banner {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px auto;
+  padding: 6px 16px;
+  border-radius: 999px;
+  font-weight: 700;
+  color: var(--accent-contrast, #2a1a02);
+  background: var(--accent, #f59e0b);
+  box-shadow: 0 6px 18px
+    color-mix(in srgb, var(--accent, #f59e0b) 35%, transparent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .sj-turn-banner {
+    animation: sj-pulse 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes sj-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.04);
+  }
+}
+
+/* Portrait / mobile: opponents become a compact top strip, hand stays bottom. */
+@media (max-width: 720px) {
+  .sj-table {
+    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-rows: auto auto minmax(90px, 1fr) auto;
+    grid-template-areas:
+      "rail  rail   rail2"
+      "left  top    right"
+      "center center center"
+      "bottom bottom bottom";
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .sj-seat-left {
+    justify-self: start;
+    align-self: start;
+  }
+  .sj-seat-right {
+    justify-self: end;
+    align-self: start;
+  }
+  .sj-seat-top {
+    align-self: start;
+  }
+
+  .sj-seat-name {
+    max-width: 10ch;
+    font-size: 0.78rem;
+    padding: 3px 9px;
+  }
 }

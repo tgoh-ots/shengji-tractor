@@ -1,0 +1,304 @@
+//! Card / void tracking and a determinizer for imperfect-information search.
+//!
+//! # Honesty invariant
+//!
+//! Everything in this module is derived ONLY from the per-player redacted view
+//! ([`GameState::for_player`]). In that view every other seat's cards are
+//! [`Card::Unknown`] and the kitty is hidden. We NEVER read the real hands. To
+//! reason about the hidden cards, [`sample_hidden_hands`] *samples* a plausible
+//! assignment of the unseen cards to the other seats, respecting:
+//!
+//! * each seat's known hand count (number of [`Card::Unknown`]s it holds),
+//! * established per-seat suit voids (inferred from public play history),
+//! * the declared trump,
+//! * cards already played / visible (so we never deal a card that is accounted
+//!   for elsewhere).
+//!
+//! The result is a fully-determined [`PlayPhase`] (built from the real engine
+//! constructor) on which rollouts can run using the genuine game APIs.
+
+use std::collections::HashMap;
+
+use rand::seq::SliceRandom;
+use rand::Rng;
+
+use shengji_mechanics::hands::Hands;
+use shengji_mechanics::types::{Card, EffectiveSuit, PlayerID, Trump, FULL_DECK};
+
+use crate::game_state::play_phase::PlayPhase;
+
+/// A determinized "world": a guess at every seat's full hand, consistent with
+/// the acting player's knowledge.
+pub struct DeterminizedWorld {
+    pub play: PlayPhase,
+}
+
+/// Tracks, from the redacted view + public play history, which cards are no
+/// longer hidden and which seats are known to be void in a given suit.
+pub struct Knowledge {
+    /// Cards the acting player can see (own hand + everything on the table +
+    /// everything in completed tricks). These are removed from the pool of
+    /// hidden cards to be dealt to opponents.
+    pub seen: HashMap<Card, usize>,
+    /// Per-seat established voids (effective suits the seat is known to lack).
+    pub voids: HashMap<PlayerID, Vec<EffectiveSuit>>,
+    /// Number of unknown (hidden) cards each seat currently holds.
+    pub hidden_counts: HashMap<PlayerID, usize>,
+    pub trump: Trump,
+    pub num_decks: usize,
+}
+
+impl Knowledge {
+    /// Derive knowledge from a redacted [`PlayPhase`] view for player `me`.
+    pub fn from_play_view(p: &PlayPhase, me: PlayerID) -> Self {
+        let trump = p.trick().trump();
+        let num_decks = p.num_decks();
+        let hands = p.hands();
+
+        let mut seen: HashMap<Card, usize> = HashMap::new();
+        let mut hidden_counts: HashMap<PlayerID, usize> = HashMap::new();
+
+        // Our own hand is fully visible.
+        if let Ok(my_hand) = hands.get(me) {
+            for (card, ct) in my_hand {
+                if *card != Card::Unknown {
+                    *seen.entry(*card).or_insert(0) += *ct;
+                }
+            }
+        }
+
+        // Every other seat shows only Card::Unknown; count how many they hold.
+        for player in p.propagated().players() {
+            if player.id == me {
+                continue;
+            }
+            let count = hands
+                .counts(player.id)
+                .map(|h| h.values().sum::<usize>())
+                .unwrap_or(0);
+            hidden_counts.insert(player.id, count);
+        }
+
+        // Cards already played and resting on the table (current trick) are
+        // visible to everyone.
+        for pc in p.trick().played_cards() {
+            for card in &pc.cards {
+                if *card != Card::Unknown {
+                    *seen.entry(*card).or_insert(0) += 1;
+                }
+            }
+        }
+        // ... as are the cards in the most recently completed trick (the engine
+        // keeps the last trick around).
+        if let Some(last) = p.last_trick() {
+            for pc in last.played_cards() {
+                for card in &pc.cards {
+                    if *card != Card::Unknown {
+                        *seen.entry(*card).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        let voids = Self::infer_voids(p, me);
+
+        Knowledge {
+            seen,
+            voids,
+            hidden_counts,
+            trump,
+            num_decks,
+        }
+    }
+
+    /// Infer per-seat voids from the public history. A seat is void in the led
+    /// suit of a trick if it followed with cards of a different effective suit
+    /// (i.e. it couldn't follow). We examine the current trick and the last
+    /// completed trick (the only history the engine retains).
+    fn infer_voids(p: &PlayPhase, me: PlayerID) -> HashMap<PlayerID, Vec<EffectiveSuit>> {
+        let trump = p.trick().trump();
+        let mut voids: HashMap<PlayerID, Vec<EffectiveSuit>> = HashMap::new();
+
+        let mut note_void = |pid: PlayerID, suit: EffectiveSuit| {
+            let entry = voids.entry(pid).or_default();
+            if !entry.contains(&suit) {
+                entry.push(suit);
+            }
+        };
+
+        let mut scan = |trick: &shengji_mechanics::trick::Trick| {
+            let played = trick.played_cards();
+            if played.is_empty() {
+                return;
+            }
+            // The led suit is the effective suit of the first card the leader
+            // played.
+            let led_suit = match played[0].cards.first() {
+                Some(c) => trump.effective_suit(*c),
+                None => return,
+            };
+            for pc in played.iter().skip(1) {
+                if pc.id == me {
+                    continue;
+                }
+                // If any played card is off-suit, the seat couldn't fully follow
+                // and is therefore void (or short) in the led suit. We treat
+                // "played an off-suit card" as a void signal: an honest follower
+                // only plays off-suit when it has run out of the led suit.
+                let played_off_suit = pc
+                    .cards
+                    .iter()
+                    .any(|c| trump.effective_suit(*c) != led_suit);
+                if played_off_suit {
+                    note_void(pc.id, led_suit);
+                }
+            }
+        };
+
+        scan(p.trick());
+        if let Some(last) = p.last_trick() {
+            scan(last);
+        }
+
+        voids
+    }
+
+    /// The multiset of cards that are hidden from the acting player and must be
+    /// distributed to the other seats. This is the full deck (num_decks copies)
+    /// minus everything the player has seen. The kitty (buried cards) is NOT in
+    /// any seat's hand, so we must also account for it: we compute the total
+    /// hidden-seat capacity and only deal that many cards, leaving the rest
+    /// (which correspond to the kitty / removed cards) undealt.
+    fn hidden_pool(&self) -> Vec<Card> {
+        let mut pool: Vec<Card> = Vec::new();
+        for card in FULL_DECK.iter() {
+            let total = self.num_decks;
+            let seen = self.seen.get(card).copied().unwrap_or(0);
+            for _ in seen..total {
+                pool.push(*card);
+            }
+        }
+        pool
+    }
+}
+
+/// Sample a plausible full assignment of hidden cards to the other seats,
+/// producing a fully-determined [`PlayPhase`] for rollouts.
+///
+/// Returns `None` if a consistent assignment could not be found (e.g. the void
+/// constraints are unsatisfiable for the sampled order); callers should fall
+/// back to the heuristic in that case.
+pub fn sample_hidden_hands<R: Rng>(
+    view: &PlayPhase,
+    me: PlayerID,
+    rng: &mut R,
+) -> Option<DeterminizedWorld> {
+    let knowledge = Knowledge::from_play_view(view, me);
+    let trump = knowledge.trump;
+
+    let mut pool = knowledge.hidden_pool();
+    pool.shuffle(rng);
+
+    // Seats to fill (everyone but me), each needing `hidden_counts` cards.
+    let mut targets: Vec<(PlayerID, usize)> = knowledge
+        .hidden_counts
+        .iter()
+        .map(|(pid, ct)| (*pid, *ct))
+        .filter(|(_, ct)| *ct > 0)
+        .collect();
+    // Deterministic-ish ordering then shuffle so we don't bias by player id.
+    targets.sort_by_key(|(pid, _)| pid.0);
+    targets.shuffle(rng);
+
+    let total_needed: usize = targets.iter().map(|(_, ct)| ct).sum();
+    if pool.len() < total_needed {
+        // Shouldn't happen, but guard against an inconsistent count.
+        return None;
+    }
+
+    // Greedy constraint-respecting deal: for each card in the (shuffled) pool,
+    // place it into a seat that still needs cards and is not void in that card's
+    // effective suit. We process seats round-robin-ish by repeatedly trying to
+    // satisfy the neediest seats first to avoid dead-ends.
+    let mut assignment: HashMap<PlayerID, Vec<Card>> = HashMap::new();
+    for (pid, _) in &targets {
+        assignment.insert(*pid, Vec::new());
+    }
+    let mut remaining: HashMap<PlayerID, usize> =
+        targets.iter().map(|(pid, ct)| (*pid, *ct)).collect();
+
+    let void_of = |pid: PlayerID, suit: EffectiveSuit| -> bool {
+        knowledge
+            .voids
+            .get(&pid)
+            .map(|v| v.contains(&suit))
+            .unwrap_or(false)
+    };
+
+    // First pass: deal each pool card to a legal seat. Track leftovers that
+    // couldn't be placed on the first try.
+    let mut leftovers: Vec<Card> = Vec::new();
+    for card in pool {
+        let suit = trump.effective_suit(card);
+        // Candidate seats: still need cards and not void in this suit.
+        let mut best: Option<PlayerID> = None;
+        let mut best_need = 0usize;
+        for (pid, _) in &targets {
+            let need = *remaining.get(pid).unwrap_or(&0);
+            if need == 0 || void_of(*pid, suit) {
+                continue;
+            }
+            if need > best_need {
+                best_need = need;
+                best = Some(*pid);
+            }
+        }
+        match best {
+            Some(pid) => {
+                assignment.get_mut(&pid).unwrap().push(card);
+                *remaining.get_mut(&pid).unwrap() -= 1;
+            }
+            None => leftovers.push(card),
+        }
+    }
+
+    // Second pass: place leftovers into any seat that still needs cards, even if
+    // that violates a (soft) void constraint. Voids are heuristic inferences,
+    // so relaxing them here keeps the determinization from failing outright
+    // while still being correct w.r.t. hand counts and the card multiset.
+    for card in leftovers {
+        let mut placed = false;
+        for (pid, _) in &targets {
+            if *remaining.get(pid).unwrap_or(&0) > 0 {
+                assignment.get_mut(pid).unwrap().push(card);
+                *remaining.get_mut(pid).unwrap() -= 1;
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            // All seats full; this card belongs to the kitty/removed pile. Drop.
+        }
+    }
+
+    // Sanity: every seat must be exactly full.
+    for (pid, ct) in &targets {
+        if assignment.get(pid).map(|c| c.len()).unwrap_or(0) != *ct {
+            return None;
+        }
+    }
+
+    // Build the determinized Hands: my real hand + sampled opponent hands.
+    let mut hands = Hands::new(view.propagated().players().iter().map(|p| p.id));
+    hands.set_trump(trump);
+    if let Ok(my_hand) = view.hands().get(me) {
+        let my_cards: Vec<Card> = Card::cards(my_hand.iter()).copied().collect();
+        hands.add(me, my_cards).ok()?;
+    }
+    for (pid, cards) in assignment {
+        hands.add(pid, cards).ok()?;
+    }
+
+    let play = view.clone_with_hands(hands);
+    Some(DeterminizedWorld { play })
+}

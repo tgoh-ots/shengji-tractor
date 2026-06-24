@@ -1,3 +1,16 @@
 /target
 **/target
 .DS_Store
+
+# Local env / secrets — never commit real credentials
+.env
+.env.*
+!.env.example
+backend/.env
+*.pem
+*.key
+*.keystore
+
+# Local server state dumps
+shengji_*.json
+sj_smoke_*.json

@@ -1,6 +1,7 @@
 import * as React from "react";
 import { GameMode } from "./gen-types";
 import InlineCard from "./InlineCard";
+import { useTranslation } from "./i18n";
 
 import type { JSX } from "react";
 
@@ -11,6 +12,7 @@ interface IProps {
 
 const Friends = (props: IProps): JSX.Element => {
   const { gameMode } = props;
+  const { t, lang } = useTranslation();
   if (gameMode !== "Tractor") {
     return (
       <div className="pending-friends">
@@ -26,14 +28,24 @@ const Friends = (props: IProps): JSX.Element => {
           ) {
             return null;
           }
+          const ordinal =
+            lang === "zh"
+              ? String(friend.initial_skip + 1)
+              : nth(friend.initial_skip + 1);
+          // Render the translated sentence, splitting on the {card} placeholder
+          // so we can drop the actual card glyph inline. We deliberately do not
+          // pass `card` to t() so the placeholder survives for the split.
+          const template = t("friends.intro", { nth: ordinal });
+          const [before, after] = template.split("{card}");
           return (
             <p key={idx}>
-              The person to play the {nth(friend.initial_skip + 1)}{" "}
-              <InlineCard card={friend.card} /> is a friend.{" "}
+              {before}
+              <InlineCard card={friend.card} />
+              {after}{" "}
               {props.showPlayed
-                ? `${
-                    friend.initial_skip - friend.skip
-                  } played in previous tricks.`
+                ? t("friends.played", {
+                    n: friend.initial_skip - friend.skip,
+                  })
                 : ""}
             </p>
           );

@@ -55,14 +55,26 @@ type WasmRpcRequest =
 async function callRpc<T>(request: WasmRpcRequest): Promise<T> {
   const bodyString = JSON.stringify(request);
 
-  // Respect WEBSOCKET_HOST for RPC calls when set
+  // Respect WEBSOCKET_HOST for RPC calls when set. Resolution order mirrors
+  // WebsocketProvider: runtime (window._WEBSOCKET_HOST from /runtime.js) first,
+  // then the build-time baked value (process.env.WEBSOCKET_HOST, for a
+  // standalone frontend), then same-origin ("/api/rpc").
   const runtimeWebsocketHost = (window as any)._WEBSOCKET_HOST;
+  const bakedWebsocketHost = process.env.WEBSOCKET_HOST;
+  const websocketHost =
+    runtimeWebsocketHost !== undefined && runtimeWebsocketHost !== null
+      ? runtimeWebsocketHost
+      : bakedWebsocketHost !== undefined &&
+          bakedWebsocketHost !== null &&
+          bakedWebsocketHost !== ""
+        ? bakedWebsocketHost
+        : null;
   let rpcUrl = "/api/rpc";
 
-  if (runtimeWebsocketHost !== undefined && runtimeWebsocketHost !== null) {
+  if (websocketHost !== undefined && websocketHost !== null) {
     // Convert WebSocket URL to HTTP URL for RPC calls
     // Replace wss:// with https:// and ws:// with http://
-    const httpUrl = runtimeWebsocketHost
+    const httpUrl = websocketHost
       .replace(/^wss:\/\//, "https://")
       .replace(/^ws:\/\//, "http://");
 

@@ -7,6 +7,7 @@ import {
 } from "./state/Settings";
 import { CompactPicker } from "react-color";
 import styled from "styled-components";
+import { useTheme } from "./ThemeProvider";
 
 import type { JSX } from "react";
 
@@ -31,6 +32,7 @@ interface IProps {
 
 const SettingsPane = (props: IProps): JSX.Element => {
   const { settings } = props;
+  const { theme, setTheme } = useTheme();
   const makeChangeHandler = (partialSettings: Partial<Settings>) => () => {
     const newSettings = { ...props.settings, ...partialSettings };
     props.onChangeSettings(newSettings);
@@ -84,8 +86,17 @@ const SettingsPane = (props: IProps): JSX.Element => {
             <input
               name="dark-mode"
               type="checkbox"
-              checked={settings.darkMode}
-              onChange={makeChangeHandler({ darkMode: !settings.darkMode })}
+              checked={theme === "dark"}
+              onChange={() => {
+                const next = theme === "dark" ? "light" : "dark";
+                setTheme(next);
+                // Keep the legacy settings.darkMode flag in sync so any code
+                // that still reads it stays consistent.
+                props.onChangeSettings({
+                  ...props.settings,
+                  darkMode: next === "dark",
+                });
+              }}
             />
           </Cell>
         </Row>

@@ -17,6 +17,7 @@ import { cardLookup } from "./util/cardHelpers";
 import { useEngine } from "./useEngine";
 import { SettingsContext } from "./AppStateProvider";
 import { explainScoringCache, getExplainScoringKey } from "./util/cachePrefill";
+import { useTranslation } from "./i18n";
 
 import type { JSX } from "react";
 
@@ -78,6 +79,7 @@ const Points = (props: IProps): JSX.Element => {
   );
   const settings = React.useContext(SettingsContext);
   const engine = useEngine();
+  const { t } = useTranslation();
   const [scoreData, setScoreData] = React.useState<ComputeScoreResponse | null>(
     null,
   );
@@ -174,7 +176,7 @@ const Points = (props: IProps): JSX.Element => {
   ]);
 
   if (isLoading || !scoreData) {
-    return <div>Loading scores...</div>;
+    return <div>{t("points.loading")}</div>;
   }
 
   const { score, next_threshold: nextThreshold } = scoreData;
@@ -206,25 +208,24 @@ const Points = (props: IProps): JSX.Element => {
 
   let thresholdStr = "";
   if (score.landlord_won) {
-    thresholdStr = `${landlord?.name}'s team will go up ${
-      score.landlord_delta
-    } level${score.landlord_delta === 1 ? "" : "s"}`;
+    thresholdStr = t("points.willGoUp", {
+      name: landlord?.name ?? "",
+      n: score.landlord_delta,
+    });
     if (score.landlord_bonus) {
-      thresholdStr += ", including a small-team bonus";
+      thresholdStr += t("points.smallTeamBonus");
     }
   } else if (score.non_landlord_delta === 0) {
-    thresholdStr = "Neither team will go up a level";
+    thresholdStr = t("points.neitherUp");
   } else {
-    thresholdStr = `The attacking team will go up ${
-      score.non_landlord_delta
-    } level${score.non_landlord_delta === 1 ? "" : "s"}`;
+    thresholdStr = t("points.attackingUp", { n: score.non_landlord_delta });
   }
 
-  thresholdStr += ` (next threshold: ${nextThreshold}分)`;
+  thresholdStr += ` ${t("points.nextThreshold", { n: nextThreshold })}`;
 
   return (
     <div className="points">
-      <h2>Points</h2>
+      <h2>{t("points.title")}</h2>
       {!settings.showPointsAboveGame && (
         <ProgressBar
           checkpoints={scoreTransitions
@@ -240,8 +241,8 @@ const Points = (props: IProps): JSX.Element => {
         {penaltyDelta === 0
           ? nonLandlordPoints
           : `${nonLandlordPoints} + ${penaltyDelta}`}
-        分{props.hideLandlordPoints ? null : ` / ${totalPointsPlayed}分`} stolen
-        from {landlord?.name}&apos;s team. {thresholdStr}
+        分{props.hideLandlordPoints ? null : ` / ${totalPointsPlayed}分`}{" "}
+        {t("points.stolenFrom", { name: landlord?.name ?? "" })} {thresholdStr}
       </p>
       {playerPointElements}
     </div>

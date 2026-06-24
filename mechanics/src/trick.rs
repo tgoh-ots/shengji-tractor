@@ -635,6 +635,13 @@ impl Trick {
         self.player_queue.front().cloned()
     }
 
+    /// The player currently winning the in-progress trick, if any cards have
+    /// been played. Used by the bot heuristics to reason about whether the
+    /// acting player's team is ahead in the trick.
+    pub fn winner_so_far(&self) -> Option<PlayerID> {
+        self.current_winner
+    }
+
     pub fn player_queue(&self) -> impl Iterator<Item = PlayerID> + '_ {
         self.player_queue.iter().copied()
     }

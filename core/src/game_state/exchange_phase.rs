@@ -301,6 +301,23 @@ impl ExchangePhase {
         self.landlord
     }
 
+    /// The number of cards that belong in the kitty (buried pile).
+    pub fn kitty_size(&self) -> usize {
+        self.kitty_size
+    }
+
+    /// The kitty cards, if they are visible in this (possibly redacted) view.
+    /// In a redacted view the kitty is only un-hidden for the current exchanger
+    /// before finalization; otherwise the cards are [`Card::Unknown`]. Returns
+    /// `None` when the kitty is hidden so callers don't act on garbage.
+    pub fn visible_kitty(&self) -> Option<&[Card]> {
+        if self.kitty.contains(&Card::Unknown) {
+            None
+        } else {
+            Some(&self.kitty)
+        }
+    }
+
     pub fn hands(&self) -> &Hands {
         &self.hands
     }

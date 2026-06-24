@@ -1,5 +1,16 @@
+# Keep the Docker build context small. The deploy image (Dockerfile.deploy)
+# builds the frontend and backend from source inside the image, so none of
+# these local build artifacts are needed in the context.
+.git/
 target/
-**/pkg/
-**/dist/
-**/node_modules/
 **/target/
+node_modules/
+**/node_modules/
+frontend/dist/
+**/dist/
+**/pkg/
+.github/
+*.md
+.env
+.env.*
+!.env.example

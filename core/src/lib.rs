@@ -6,6 +6,7 @@
 
 pub mod settings;
 
+pub mod bot;
 pub mod game_state;
 pub mod interactive;
 pub mod message;

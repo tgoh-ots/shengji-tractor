@@ -14,6 +14,7 @@ use shengji_mechanics::trick::{
 };
 use shengji_mechanics::types::{Card, PlayerID, Rank};
 
+use crate::bot::BotDifficulty;
 use crate::game_state::play_phase::PlayerGameFinishedResult;
 use crate::settings::{
     AdvancementPolicy, BackToTwoSetting, FirstLandlordSelectionPolicy, FriendSelectionPolicy,
@@ -61,6 +62,13 @@ pub enum MessageVariant {
         already_joined: bool,
     },
     LeftGame {
+        name: String,
+    },
+    AddedBot {
+        player: PlayerID,
+        difficulty: BotDifficulty,
+    },
+    RemovedBot {
         name: String,
     },
     AdvancementPolicySet {
@@ -239,6 +247,9 @@ impl MessageVariant {
             JoinedTeam { player, already_joined: true } =>
                 format!("{} tried to join the team, but was already a member", player_name(*player)?),
             LeftGame { ref name } => format!("{name} has left the game"),
+            AddedBot { player, difficulty } =>
+                format!("{} added a {} bot ({})", n?, difficulty.as_str(), player_name(*player)?),
+            RemovedBot { ref name } => format!("{name} (bot) has left the game"),
             AdvancementPolicySet { policy: AdvancementPolicy::FullyUnrestricted } =>
                 format!("{} removed all advancement restrictions", n?),
             AdvancementPolicySet { policy: AdvancementPolicy::Unrestricted } =>

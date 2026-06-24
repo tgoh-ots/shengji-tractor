@@ -1375,6 +1375,7 @@ dependencies = [
  "slog-term",
  "storage",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tower-http",
  "wasm-rpc-impl",

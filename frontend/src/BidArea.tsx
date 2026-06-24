@@ -12,6 +12,7 @@ import {
 import { WebsocketContext } from "./WebsocketProvider";
 import LabeledPlay from "./LabeledPlay";
 import { useEngine } from "./useEngine";
+import { useTranslation } from "./i18n";
 
 import type { JSX } from "react";
 
@@ -37,6 +38,7 @@ interface IBidAreaProps {
 const BidArea = (props: IBidAreaProps): JSX.Element => {
   const { send } = React.useContext(WebsocketContext);
   const engine = useEngine();
+  const { t } = useTranslation();
   const [validBids, setValidBids] = React.useState<Bid[]>([]);
   const [isLoadingBids, setIsLoadingBids] = React.useState<boolean>(false);
   const trump = props.trump == null ? { NoTrump: {} } : props.trump;
@@ -117,7 +119,7 @@ const BidArea = (props: IBidAreaProps): JSX.Element => {
         {props.header}
         {props.autobid !== null ? (
           <LabeledPlay
-            label={`${players[props.autobid.id].name} (from bottom)`}
+            label={`${players[props.autobid.id].name} ${t("bid.fromBottom")}`}
             trump={trump}
             cards={[props.autobid.card]}
           />
@@ -134,7 +136,7 @@ const BidArea = (props: IBidAreaProps): JSX.Element => {
           );
         })}
         {props.bids.length === 0 && props.autobid === null ? (
-          <LabeledPlay trump={trump} label={"No bids yet..."} cards={["🂠"]} />
+          <LabeledPlay trump={trump} label={t("bid.noBidsYet")} cards={["🂠"]} />
         ) : null}
       </div>
     );
@@ -160,7 +162,7 @@ const BidArea = (props: IBidAreaProps): JSX.Element => {
           {props.header}
           {props.autobid !== null ? (
             <LabeledPlay
-              label={`${players[props.autobid.id].name} (from bottom)`}
+              label={`${players[props.autobid.id].name} ${t("bid.fromBottom")}`}
               cards={[props.autobid.card]}
               trump={trump}
             />
@@ -179,9 +181,13 @@ const BidArea = (props: IBidAreaProps): JSX.Element => {
           {props.trump !== undefined &&
           "NoTrump" in props.trump &&
           props.trump?.NoTrump?.number === null ? (
-            <>No bidding in no trump!</>
+            <>{t("bid.noBidsInNoTrump")}</>
           ) : props.bids.length === 0 && props.autobid === null ? (
-            <LabeledPlay trump={trump} label={"No bids yet..."} cards={["🂠"]} />
+            <LabeledPlay
+              trump={trump}
+              label={t("bid.noBidsYet")}
+              cards={["🂠"]}
+            />
           ) : null}
         </div>
         {props.prefixButtons}
@@ -195,16 +201,16 @@ const BidArea = (props: IBidAreaProps): JSX.Element => {
             }
             className="big"
           >
-            Take back bid
+            {t("bid.takeBack")}
           </button>
         ) : null}
         {props.suffixButtons}
         {isLoadingBids ? (
-          <p>Loading bid options...</p>
+          <p>{t("bid.loading")}</p>
         ) : validBids.length > 0 ? (
-          <p>Click a bid option to bid</p>
+          <p>{t("bid.clickToBid")}</p>
         ) : (
-          <p>No available bids!</p>
+          <p>{t("bid.noAvailable")}</p>
         )}
         {!isLoadingBids &&
           validBids.map((bid, idx) => {
@@ -213,7 +219,7 @@ const BidArea = (props: IBidAreaProps): JSX.Element => {
                 trump={trump}
                 cards={Array(bid.count).fill(bid.card)}
                 key={idx}
-                label={`Bid option ${idx + 1}`}
+                label={t("bid.option", { n: idx + 1 })}
                 onClick={() => {
                   send({ Action: { Bid: [bid.card, bid.count] } });
                 }}
