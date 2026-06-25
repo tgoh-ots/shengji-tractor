@@ -22,7 +22,9 @@ const Confetti = React.lazy(async () => await import("./Confetti"));
 const Brand = (): JSX.Element => (
   <h1 className="m-0 max-w-[min(100%,11rem)] text-xl font-bold leading-tight tracking-tight text-[var(--text-on-felt)] sm:max-w-none sm:text-3xl">
     升级 <span className="text-[var(--accent)]">Tractor</span>
-    <span className="mx-2 hidden text-[var(--text-on-felt-soft)] sm:inline">·</span>
+    <span className="mx-2 hidden text-[var(--text-on-felt-soft)] sm:inline">
+      ·
+    </span>
     <span className="hidden sm:inline">
       找朋友 <span className="text-[var(--accent)]">Finding Friends</span>
     </span>

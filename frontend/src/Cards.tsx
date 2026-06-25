@@ -206,7 +206,9 @@ const Cards = (props: IProps): JSX.Element => {
 
   return (
     <div className="hand">
-      {props.selectedCards !== undefined ? (
+      {props.selectedCards !== undefined &&
+      (props.selectedCards.length > 0 ||
+        (notifyEmpty && unselectedCardGroups.length === 0)) ? (
         <div className="selected-cards">
           {selectedCardGroups.map((g, gidx) => (
             <div style={{ display: "inline-block" }} key={gidx}>

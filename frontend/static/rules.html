@@ -1,11 +1,189 @@
 <!DOCTYPE html>
-<html>
+<html lang="en" data-theme="dark">
     <head>
         <title>升级 / 找朋友 Rules</title>
         <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <link rel="stylesheet" type="text/css" href="style.css">
         <style>
-          .card { background: #fff; height: inherit; }
+          /*
+           * Standalone rules page styling. The app's style.css supplies the
+           * design tokens and the load-bearing card/suit classes; this block
+           * lays the long-form rules text out for readability on the dark
+           * theme: a centered, comfortably-wide reading column, a clear
+           * heading hierarchy, sensible spacing, and styled tables/lists.
+           */
+          :root {
+            color-scheme: dark;
+          }
+
+          body.rules {
+            margin: 0;
+            padding: 2.5rem 1.25rem 4rem;
+            color: var(--text-on-felt, #eef6f3);
+            line-height: 1.7;
+            font-size: 1.0625rem;
+          }
+
+          /* Center every direct child into a readable column (~70ch). */
+          body.rules > * {
+            max-width: 70ch;
+            margin-left: auto;
+            margin-right: auto;
+          }
+
+          body.rules h1 {
+            max-width: 70ch;
+            margin: 0 auto 1.5rem;
+            font-size: clamp(1.9rem, 4vw, 2.6rem);
+            font-weight: 800;
+            line-height: 1.2;
+            letter-spacing: -0.01em;
+            text-align: center;
+            color: #fff;
+          }
+
+          body.rules h2 {
+            margin: 2.75rem auto 0.85rem;
+            padding-bottom: 0.4rem;
+            font-size: 1.6rem;
+            font-weight: 700;
+            line-height: 1.25;
+            color: #fff;
+            border-bottom: 2px solid
+              color-mix(in srgb, var(--accent, #fbbf24) 55%, transparent);
+          }
+
+          body.rules h3 {
+            margin: 2rem auto 0.65rem;
+            font-size: 1.3rem;
+            font-weight: 700;
+            color: var(--accent, #fbbf24);
+          }
+
+          body.rules h4 {
+            margin: 1.6rem auto 0.5rem;
+            font-size: 1.12rem;
+            font-weight: 700;
+            color: #fff;
+          }
+
+          body.rules h5 {
+            margin: 1.4rem auto 0.4rem;
+            font-size: 1rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--text-on-felt-soft, #9fc0b9);
+          }
+
+          body.rules p {
+            margin: 0 auto 1.1rem;
+          }
+
+          body.rules a {
+            color: var(--accent, #fbbf24);
+            text-underline-offset: 2px;
+          }
+          body.rules a:hover {
+            text-decoration: none;
+          }
+
+          body.rules ul,
+          body.rules ol {
+            margin: 0 auto 1.25rem;
+            padding-left: 1.5rem;
+          }
+          body.rules li {
+            margin-bottom: 0.4rem;
+          }
+          body.rules li::marker {
+            color: var(--accent, #fbbf24);
+          }
+
+          /* The four-color toggle reads as a tidy control, not a stray label. */
+          body.rules > label {
+            display: flex;
+            align-items: center;
+            gap: 0.55rem;
+            width: fit-content;
+            margin: 0 auto 2rem;
+            padding: 0.6rem 1rem;
+            border-radius: 999px;
+            background: rgba(8, 22, 21, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            font-weight: 600;
+            cursor: pointer;
+          }
+          body.rules > label input {
+            width: 1.05rem;
+            height: 1.05rem;
+            cursor: pointer;
+          }
+
+          /* The round-result deck selector. */
+          body.rules > select {
+            display: block;
+            margin: 0 auto 1rem;
+            padding: 0.45rem 0.7rem;
+            border-radius: 0.6rem;
+            background: var(--color-slate-800, #1c232a);
+            color: var(--text-on-felt, #eef6f3);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            font-size: 1rem;
+          }
+
+          /* Readable, dark-friendly tables. */
+          body.rules table {
+            width: 100%;
+            max-width: 70ch;
+            margin: 0 auto 1.5rem;
+            border-collapse: collapse;
+            background: rgba(8, 22, 21, 0.35);
+            border: 1px solid rgba(255, 255, 255, 0.14) !important;
+            border-radius: 0.6rem;
+            overflow: hidden;
+            font-size: 0.98rem;
+          }
+          body.rules table thead td {
+            background: rgba(8, 22, 21, 0.55);
+            font-weight: 700;
+            color: #fff;
+          }
+          body.rules table td {
+            padding: 0.55rem 0.85rem;
+            border: 1px solid rgba(255, 255, 255, 0.12) !important;
+            text-align: left;
+            vertical-align: top;
+          }
+          body.rules table tbody tr:nth-child(even) td {
+            background: rgba(255, 255, 255, 0.03);
+          }
+
+          /* Card-example panels: present each labelled play as a tidy card. */
+          body.rules .labeled-play {
+            display: inline-block;
+            vertical-align: top;
+            margin: 0 0.75rem 1rem 0;
+            padding: 0.5rem 0.75rem 0.65rem;
+            background: rgba(8, 22, 21, 0.35);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 0.75rem;
+            max-width: none;
+          }
+          body.rules .labeled-play .label {
+            margin-top: 0.35rem;
+            color: var(--text-on-felt-soft, #9fc0b9);
+            font-weight: 600;
+            font-size: 0.92rem;
+          }
+
+          /* Card glyphs render large; keep them on a light face for contrast. */
+          body.rules .card {
+            background: #fff;
+            height: inherit;
+            border-radius: 6px;
+          }
         </style>
     </head>
   <body id="body" class="rules">
@@ -1145,11 +1323,9 @@
       <script type="text/javascript">
         const body = document.getElementById("body");
         function toggleFourColor(evt) {
-          if (evt.target.checked) {
-            body.className = "four-color";
-          } else {
-            body.className = "";
-          }
+          // Keep the `rules` class so the page styling is preserved; only
+          // add/remove the `four-color` modifier.
+          body.classList.toggle("four-color", evt.target.checked);
         }
         document.getElementById("four-color-toggle").addEventListener("change", toggleFourColor);
 

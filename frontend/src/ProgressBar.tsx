@@ -10,134 +10,107 @@ interface IProps {
   hideLandlordPoints: boolean;
 }
 
-interface CheckpointCircleProps {
-  text: number;
-  color: string;
-  borderColor?: string;
-  position: string;
-  marginTop: string;
-}
+const challengerColor = "#5bc0de";
+const landlordColor = "#d9534f";
 
-const CheckpointCircle = (props: CheckpointCircleProps): JSX.Element => {
-  return (
-    <div
-      style={{
-        position: "relative",
-        left: props.position,
-        transform: "translate(-50%, 0%)",
-        backgroundColor: props.color,
-        marginTop: props.marginTop,
-        height: "30px",
-        width: "30px",
-        borderWidth: "5px",
-        borderStyle: "solid",
-        borderColor:
-          props.borderColor !== undefined ? props.borderColor : props.color,
-        borderRadius: "25px",
-      }}
-    >
-      <div
-        style={{
-          width: "100%",
-          height: "100%",
-          display: "flex",
-          justifyContent: "center",
-          alignItems: "center",
-        }}
-      >
-        {props.text}
-      </div>
-    </div>
-  );
-};
+const clampPct = (proportion: number): number =>
+  Math.max(0, Math.min(1, proportion)) * 100;
 
-const convertToPercentage = (proportion: number): string => {
-  proportion = Math.max(0, Math.min(1, proportion));
-  return (100 * proportion).toFixed(2) + "%";
-};
-
+/*
+ * Scoring progress bar (dark-mode friendly).
+ *
+ * A single horizontal track shows how many points the attacking ("challenger")
+ * team has collected. Threshold markers (the level-up checkpoints) are laid out
+ * as short ticks with their value labelled BELOW the track, so nothing overlaps
+ * and the scale stays legible. When landlord points are visible, a second
+ * marker shows their progress from the top end.
+ */
 const ProgressBar = (props: IProps): JSX.Element => {
-  const landlordColor = "#d9534f";
-  const challengerColor = "#5bc0de";
-  const neutralColor = "lightgray";
+  const { totalPoints, challengerPoints, landlordPoints, checkpoints } = props;
 
-  const { totalPoints, challengerPoints, landlordPoints } = props;
-  const checkpointColors = props.checkpoints.map((checkpoint) => {
-    if (challengerPoints >= checkpoint) {
-      return challengerColor;
-    } else if (landlordPoints >= totalPoints - checkpoint) {
-      return landlordColor;
-    } else {
-      return neutralColor;
-    }
-  });
-  const landlordPosition = convertToPercentage(
-    (totalPoints - landlordPoints) / totalPoints,
-  );
-  const landlordWidth = convertToPercentage(landlordPoints / totalPoints);
-  const challengerPosition = convertToPercentage(
-    challengerPoints / totalPoints,
-  );
+  const challengerPct = clampPct(challengerPoints / totalPoints);
+  // Landlord points count down from the top of the scale.
+  const landlordMarker = totalPoints - landlordPoints;
+  const landlordPct = clampPct(landlordMarker / totalPoints);
 
   return (
-    <div style={{ color: "#000", padding: "0px 5px" }}>
-      <div
-        style={{
-          width: "100%",
-          borderRadius: "5px",
-          backgroundColor: "lightgray",
-        }}
-      >
+    <div className="sj-score-bar">
+      <div className="sj-score-track" aria-hidden="true">
         <div
+          className="sj-score-fill"
           style={{
-            width: challengerPosition,
-            height: "20px",
-            borderRadius: "5px",
+            width: `${challengerPct}%`,
             backgroundColor: challengerColor,
           }}
         />
+        {/* Threshold ticks sit on top of the track. */}
+        {checkpoints.map((checkpoint, i) => {
+          const reached = challengerPoints >= checkpoint;
+          return (
+            <span
+              key={i}
+              className="sj-score-tick"
+              style={{
+                left: `${clampPct(checkpoint / totalPoints)}%`,
+                backgroundColor: reached ? challengerColor : undefined,
+              }}
+            />
+          );
+        })}
+        {/* Current challenger position marker. */}
+        <span
+          className="sj-score-marker"
+          style={{
+            left: `${challengerPct}%`,
+            borderColor: challengerColor,
+          }}
+        />
         {!props.hideLandlordPoints && (
-          <div
-            className="progress-bar-landlord"
-            style={{
-              marginTop: "-20px",
-              position: "relative",
-              left: landlordPosition,
-              width: landlordWidth,
-              height: "20px",
-              borderRadius: "5px",
-              backgroundColor: landlordColor,
-            }}
+          <span
+            className="sj-score-marker"
+            style={{ left: `${landlordPct}%`, borderColor: landlordColor }}
           />
         )}
       </div>
-      {props.checkpoints.map((checkpoint, i) => {
-        return (
-          <CheckpointCircle
+
+      {/* Numeric scale: 0 … thresholds … total, labelled below the track. */}
+      <div className="sj-score-scale" aria-hidden="true">
+        <span className="sj-score-scale-end" style={{ left: "0%" }}>
+          0
+        </span>
+        {checkpoints.map((checkpoint, i) => (
+          <span
             key={i}
-            text={checkpoint}
-            color={checkpointColors[i]}
-            position={convertToPercentage(checkpoint / totalPoints)}
-            marginTop={i === 0 ? "-30px" : "-40px"}
+            className="sj-score-scale-label"
+            style={{ left: `${clampPct(checkpoint / totalPoints)}%` }}
+          >
+            {checkpoint}
+          </span>
+        ))}
+        <span className="sj-score-scale-end" style={{ left: "100%" }}>
+          {totalPoints}
+        </span>
+      </div>
+
+      {/* Legend so the two colored markers are self-explanatory. */}
+      <div className="sj-score-legend">
+        <span className="sj-score-legend-item">
+          <span
+            className="sj-score-swatch"
+            style={{ backgroundColor: challengerColor }}
           />
-        );
-      })}
-      <CheckpointCircle
-        text={challengerPoints}
-        color={"#fff"}
-        borderColor={challengerColor}
-        position={challengerPosition}
-        marginTop={"-40px"}
-      />
-      {!props.hideLandlordPoints && (
-        <CheckpointCircle
-          text={totalPoints - landlordPoints}
-          color={"#fff"}
-          borderColor={landlordColor}
-          position={landlordPosition}
-          marginTop={"-40px"}
-        />
-      )}
+          {challengerPoints}分
+        </span>
+        {!props.hideLandlordPoints && (
+          <span className="sj-score-legend-item">
+            <span
+              className="sj-score-swatch"
+              style={{ backgroundColor: landlordColor }}
+            />
+            {landlordMarker}分
+          </span>
+        )}
+      </div>
     </div>
   );
 };

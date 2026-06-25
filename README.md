@@ -8,7 +8,7 @@ computer opponents.
 
 This is an open-source fork of the [rbtying/shengji](https://github.com/rbtying/shengji)
 engine, fully redesigned with a responsive bilingual (中文 / English) interface,
-cheat-proof AI bots, and one-command deployment on [Fly.io](https://fly.io).
+computer opponents, and one-command deployment on [Fly.io](https://fly.io).
 
 ## Features
 
@@ -17,14 +17,14 @@ cheat-proof AI bots, and one-command deployment on [Fly.io](https://fly.io).
   decks, scoring thresholds, kitty size, throw-evaluation policies, bombs, and
   more).
 - **Computer opponents** — fill empty seats with AI bots across several skill
-  tiers (Easy / Hard / Expert and an "Omniscient" perfect-information tier).
-  The honest tiers are **cheat-proof**: they only see their own hand. The
-  Omniscient tier is a deliberate, clearly-badged perfect-information opponent.
+  tiers (Easy / Hard / Expert, and an "Omniscient" perfect-information tier).
+  The Easy / Hard / Expert tiers play from their own hand only; the Omniscient
+  tier is an optional perfect-information opponent.
   > Note: tier names and behavior are actively being tuned, so treat the above
   > as a general description rather than a fixed contract.
-- **Modern responsive UI** — a redesigned Tailwind-based interface with light
-  and dark themes, four-color suits, and a built-in **About** panel describing
-  the project and its sources.
+- **Modern responsive UI** — a redesigned Tailwind-based dark interface with
+  four-color suits, and a built-in **About** panel describing the project and
+  its sources.
 - **Bilingual** — toggle between 中文 and English from the toolbar.
 
 ## Play

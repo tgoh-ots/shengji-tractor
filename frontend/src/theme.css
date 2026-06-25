@@ -4,10 +4,9 @@
  * Milestone 3 design system — "casino-meets-product-UI".
  *
  * Tailwind v4 design tokens live in the @theme block below and are exposed as
- * CSS custom properties (e.g. --color-felt-700). Light/dark themes are driven
- * by the [data-theme] attribute on <html> (see ThemeProvider). We toggle that
- * attribute manually rather than relying on prefers-color-scheme so users can
- * persist their choice in localStorage.
+ * CSS custom properties (e.g. --color-felt-700). The app is dark-only: a single
+ * dark palette is applied to :root (and [data-theme="dark"], which ThemeProvider
+ * sets on <html>); there is no light theme.
  */
 
 @theme {
@@ -69,29 +68,17 @@
 }
 
 /*
- * Semantic surface tokens. These flip between light and dark and are what the
- * components actually consume (bg-[var(--surface)] etc.). Defaults are light.
+ * Semantic surface tokens — the values the components actually consume
+ * (bg-[var(--surface)] etc.).
+ *
+ * The app is DARK-ONLY: there is a single dark palette and nothing depends on
+ * a light theme. We keep the [data-theme="dark"] selector (ThemeProvider sets
+ * it on <html>) but also apply the same values to :root so the palette is
+ * correct even before/without that attribute.
  */
 :root,
-[data-theme="light"] {
-  --surface-app: var(--color-felt-700);
-  --surface-panel: #ffffff;
-  --surface-panel-soft: var(--color-slate-50);
-  --surface-card: #ffffff;
-  --surface-rail: rgba(255, 255, 255, 0.92);
-  --surface-inset: var(--color-slate-100);
-  --border-subtle: var(--color-slate-200);
-  --border-strong: var(--color-slate-300);
-  --text-primary: var(--color-slate-900);
-  --text-secondary: var(--color-slate-500);
-  --text-on-felt: #eef6f3;
-  --text-on-felt-soft: #b9d4cd;
-  --accent: var(--color-accent-500);
-  --accent-contrast: #2a1a02;
-  --ring: var(--color-accent-500);
-}
-
 [data-theme="dark"] {
+  color-scheme: dark;
   --surface-app: var(--color-felt-950);
   --surface-panel: var(--color-slate-800);
   --surface-panel-soft: var(--color-slate-900);

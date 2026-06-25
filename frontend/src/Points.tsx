@@ -223,6 +223,11 @@ const Points = (props: IProps): JSX.Element => {
 
   thresholdStr += ` ${t("points.nextThreshold", { n: nextThreshold })}`;
 
+  const collectedStr =
+    penaltyDelta === 0
+      ? `${nonLandlordPoints}`
+      : `${nonLandlordPoints} + ${penaltyDelta}`;
+
   return (
     <div className="points mt-4">
       <h2 className="mb-2 text-base font-bold uppercase tracking-wide text-[var(--text-on-felt)]">
@@ -239,14 +244,18 @@ const Points = (props: IProps): JSX.Element => {
           hideLandlordPoints={props.hideLandlordPoints}
         />
       )}
-      <p className="mt-1 text-sm text-[var(--text-on-felt-soft)]">
-        {penaltyDelta === 0
-          ? nonLandlordPoints
-          : `${nonLandlordPoints} + ${penaltyDelta}`}
-        分{props.hideLandlordPoints ? null : ` / ${totalPointsPlayed}分`}{" "}
-        {t("points.stolenFrom", { name: landlord?.name ?? "" })} {thresholdStr}
+      {/* Status message on its OWN line, full contrast, clear of the markers. */}
+      <p className="mt-3 text-sm font-medium leading-snug text-[var(--text-on-felt)]">
+        <span className="font-bold">
+          {collectedStr}分
+          {props.hideLandlordPoints ? null : ` / ${totalPointsPlayed}分`}
+        </span>{" "}
+        <span className="text-[var(--text-on-felt-soft)]">
+          {t("points.stolenFrom", { name: landlord?.name ?? "" })}
+        </span>{" "}
+        {thresholdStr}
       </p>
-      <div className="mt-2 flex flex-wrap gap-2">{playerPointElements}</div>
+      <div className="mt-3 flex flex-wrap gap-2">{playerPointElements}</div>
     </div>
   );
 };

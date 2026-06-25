@@ -6,7 +6,6 @@ import {
   DEFAULT_TRUMP_CARD_ICON,
 } from "./state/Settings";
 import { CompactPicker } from "react-color";
-import { useTheme } from "./ThemeProvider";
 import {
   SettingsSection,
   SettingRow,
@@ -25,7 +24,6 @@ interface IProps {
 
 const SettingsPane = (props: IProps): JSX.Element => {
   const { settings } = props;
-  const { theme, setTheme } = useTheme();
   const toggle = (partialSettings: Partial<Settings>) => (): void => {
     props.onChangeSettings({ ...props.settings, ...partialSettings });
   };
@@ -44,23 +42,7 @@ const SettingsPane = (props: IProps): JSX.Element => {
 
   return (
     <div className="settings">
-      <SettingsSection
-        title="Appearance"
-        subtitle="Theme and how cards are drawn."
-      >
-        <SettingToggleRow
-          name="dark-mode"
-          label="Dark theme"
-          checked={theme === "dark"}
-          onChange={() => {
-            const next = theme === "dark" ? "light" : "dark";
-            setTheme(next);
-            props.onChangeSettings({
-              ...props.settings,
-              darkMode: next === "dark",
-            });
-          }}
-        />
+      <SettingsSection title="Appearance" subtitle="How cards are drawn.">
         <SettingToggleRow
           name="four-color-mode"
           label="Four-color suits"

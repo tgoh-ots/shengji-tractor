@@ -44,7 +44,7 @@ const COPY: Record<Lang, Copy> = {
     title: "About / 关于",
     builtHeading: "How this was built",
     builtBody:
-      'Shengji Online (升级 Online) is a free, open-source way to play 升级 / Tractor / Finding Friends with friends online. It is forked from the open-source rbtying/shengji engine (MIT). On top of that foundation it adds cheat-proof computer opponents — a heuristic + search AI backed by a distilled learned network, plus an optional perfect-information ("omniscient") mode — a fully redesigned, responsive bilingual interface, and deployment on Fly.io.',
+      'Shengji Online (升级 Online) is a free, open-source way to play 升级 / Tractor / Finding Friends with friends online. It is forked from the open-source rbtying/shengji engine (MIT). On top of that foundation it adds computer opponents — a heuristic + search AI backed by a distilled learned network, plus an optional perfect-information ("omniscient") mode — a fully redesigned, responsive bilingual interface, and deployment on Fly.io.',
     sourcesHeading: "Sources",
     sources: [
       {
@@ -81,7 +81,7 @@ const COPY: Record<Lang, Copy> = {
     title: "关于 / About",
     builtHeading: "本项目如何构建",
     builtBody:
-      "升级 Online（Shengji Online）是一个免费、开源的在线平台，可与好友一起玩升级 / 拖拉机 / 找朋友。它基于开源的 rbtying/shengji 引擎（MIT 许可）二次开发。在此基础上，增加了无法作弊的电脑对手——结合启发式搜索与蒸馏后的神经网络，并提供可选的完全信息（“全知”）模式——全新设计的自适应中英双语界面，并部署在 Fly.io 上。",
+      "升级 Online（Shengji Online）是一个免费、开源的在线平台，可与好友一起玩升级 / 拖拉机 / 找朋友。它基于开源的 rbtying/shengji 引擎（MIT 许可）二次开发。在此基础上，增加了电脑对手——结合启发式搜索与蒸馏后的神经网络，并提供可选的完全信息（“全知”）模式——全新设计的自适应中英双语界面，并部署在 Fly.io 上。",
     sourcesHeading: "资料来源",
     sources: [
       {

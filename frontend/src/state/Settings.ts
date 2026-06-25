@@ -40,7 +40,9 @@ export interface ISuitOverrides {
 }
 
 const fourColor: State<boolean> = booleanLocalStorageState("four_color");
-const darkMode: State<boolean> = booleanLocalStorageState("dark_mode");
+// The app is dark-only; `darkMode` now just drives card-glyph rendering and is
+// always on (the user-facing "Dark theme" toggle was removed).
+const darkMode: State<boolean> = booleanLocalStorageState("dark_mode", true);
 const svgCards: State<boolean> = booleanLocalStorageState("svg_cards");
 const showCardLabels: State<boolean> =
   booleanLocalStorageState("show_card_labels");

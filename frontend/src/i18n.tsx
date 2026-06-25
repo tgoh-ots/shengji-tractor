@@ -30,9 +30,7 @@ const en: Dict = {
   "common.you": "You",
   "common.rank": "rank",
 
-  // Theme / language / settings toggles
-  "toolbar.theme.toLight": "Light theme",
-  "toolbar.theme.toDark": "Dark theme",
+  // Language / settings toggles
   "toolbar.language": "中文",
   "toolbar.settings": "Settings",
   "toolbar.fourColor": "Four-color suits",
@@ -63,10 +61,7 @@ const en: Dict = {
   "ai.difficulty.Easy": "Easy",
   "ai.difficulty.Hard": "Hard",
   "ai.difficulty.Expert": "Expert (learned)",
-  "ai.difficulty.Omniscient": "Omniscient (sees all cards)",
-  "ai.cheaterBadge": "CHEATER",
-  "ai.cheaterWarning":
-    "Omniscient bots cheat: they see every player's cards. For practice/testing only.",
+  "ai.difficulty.Omniscient": "Omniscient",
   "ai.botLabel": "Bot",
 
   // Shengji terms
@@ -169,8 +164,6 @@ const zh: Dict = {
   "common.you": "你",
   "common.rank": "级",
 
-  "toolbar.theme.toLight": "浅色主题",
-  "toolbar.theme.toDark": "深色主题",
   "toolbar.language": "English",
   "toolbar.settings": "设置",
   "toolbar.fourColor": "四色花色",
@@ -197,10 +190,7 @@ const zh: Dict = {
   "ai.difficulty.Easy": "简单",
   "ai.difficulty.Hard": "困难",
   "ai.difficulty.Expert": "专家（学习）",
-  "ai.difficulty.Omniscient": "全知（作弊）",
-  "ai.cheaterBadge": "作弊",
-  "ai.cheaterWarning":
-    "全知机器人会作弊：它能看到所有玩家的牌。仅供练习/测试使用。",
+  "ai.difficulty.Omniscient": "全知",
   "ai.botLabel": "机器人",
 
   "term.trump": "主牌",
