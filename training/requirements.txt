@@ -1,0 +1,5 @@
+# Python deps for training the Expert tier's candidate-scoring MLP.
+# Install with:  pip install -r requirements.txt
+torch>=2.0
+onnx>=1.14
+numpy>=1.24

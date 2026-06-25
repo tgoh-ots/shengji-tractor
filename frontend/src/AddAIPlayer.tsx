@@ -18,7 +18,7 @@ import type { JSX } from "react";
  * badge so nobody confuses it with the three fair (honest) tiers.
  */
 
-const HONEST_DIFFICULTIES: BotDifficulty[] = ["Easy", "Medium", "Hard"];
+const HONEST_DIFFICULTIES: BotDifficulty[] = ["Easy", "Hard", "Expert"];
 const CHEATER_DIFFICULTY: BotDifficulty = "Omniscient";
 
 const isCheater = (d: BotDifficulty): boolean => d === CHEATER_DIFFICULTY;
@@ -26,7 +26,7 @@ const isCheater = (d: BotDifficulty): boolean => d === CHEATER_DIFFICULTY;
 const AddAIPlayer = (): JSX.Element => {
   const { send } = React.useContext(WebsocketContext);
   const { t } = useTranslation();
-  const [difficulty, setDifficulty] = React.useState<BotDifficulty>("Medium");
+  const [difficulty, setDifficulty] = React.useState<BotDifficulty>("Hard");
 
   const addBot = (): void => {
     send({ Action: { AddAIPlayer: { difficulty } } });

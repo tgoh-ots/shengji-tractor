@@ -625,7 +625,7 @@ mod move_validation_tests {
             let msgs = game
                 .interact(
                     Action::AddAIPlayer {
-                        difficulty: BotDifficulty::Medium,
+                        difficulty: BotDifficulty::Hard,
                     },
                     host,
                     logger,

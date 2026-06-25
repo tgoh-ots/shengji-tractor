@@ -2,10 +2,10 @@
 name = "shengji-wasm"
 description = "Shengji Core functionality exposed as a WASM file for the frontend"
 version = "0.1.0"
-authors = ["Robert Ying <rbtying@aeturnalus.com>"]
+authors = ["Shengji Online contributors"]
 categories = ["wasm"]
 edition = "2018"
-repository = "https://github.com/rbtying/shengji"
+repository = "https://github.com/tgoh-ots/shengji-tractor"
 license = "MIT"
 publish = false
 

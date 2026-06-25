@@ -199,9 +199,9 @@ describe("WebsocketProvider host resolution with baked fallback", () => {
   const loc = { protocol: "https:", host: "example.com", pathname: "/game/" };
 
   it("prefers window._WEBSOCKET_HOST over the baked value", () => {
-    expect(resolve("wss://runtime.example/api", "wss://baked.example/api", loc)).toBe(
-      "wss://runtime.example/api",
-    );
+    expect(
+      resolve("wss://runtime.example/api", "wss://baked.example/api", loc),
+    ).toBe("wss://runtime.example/api");
   });
 
   it("falls back to the baked value when runtime host is undefined", () => {
@@ -217,7 +217,9 @@ describe("WebsocketProvider host resolution with baked fallback", () => {
   });
 
   it("falls back to same-origin when neither runtime nor baked is set", () => {
-    expect(resolve(undefined, undefined, loc)).toBe("wss://example.com/game/api");
+    expect(resolve(undefined, undefined, loc)).toBe(
+      "wss://example.com/game/api",
+    );
   });
 
   it("treats an empty baked value as unset (same-origin)", () => {

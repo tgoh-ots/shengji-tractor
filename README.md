@@ -1,100 +1,101 @@
-# What is this?
+# Shengji Online (升级 Online)
 
-升级 is a popular Chinese trick-taking playing card game, also known as tractor, finding friends, fighting for 100 points, 80 points, etc. Rules are available
-[here](https://robertying.com/shengji/rules.html). Due to the COVID-19
-shelter-in-place, I've been unable to play the this game in person... so
-I figured an online version would be worthwhile.
+Play 升级 — the popular Chinese trick-taking card game also known as **Tractor**,
+**Finding Friends**, **拖拉机**, or **找朋友** — online with friends, or against
+computer opponents.
 
-# Usage:
+**▶ Play now: https://shengji-tractor.fly.dev**
 
-```
+This is an open-source fork of the [rbtying/shengji](https://github.com/rbtying/shengji)
+engine, fully redesigned with a responsive bilingual (中文 / English) interface,
+cheat-proof AI bots, and one-command deployment on [Fly.io](https://fly.io).
+
+## Features
+
+- **Play with friends online** — share a room link; supports the full ruleset
+  (Tractor / Finding Friends), with extensive per-round settings (number of
+  decks, scoring thresholds, kitty size, throw-evaluation policies, bombs, and
+  more).
+- **Computer opponents** — fill empty seats with AI bots across several skill
+  tiers (Easy / Hard / Expert and an "Omniscient" perfect-information tier).
+  The honest tiers are **cheat-proof**: they only see their own hand. The
+  Omniscient tier is a deliberate, clearly-badged perfect-information opponent.
+  > Note: tier names and behavior are actively being tuned, so treat the above
+  > as a general description rather than a fixed contract.
+- **Modern responsive UI** — a redesigned Tailwind-based interface with light
+  and dark themes, four-color suits, and a built-in **About** panel describing
+  the project and its sources.
+- **Bilingual** — toggle between 中文 and English from the toolbar.
+
+## Play
+
+The hosted instance lives at **https://shengji-tractor.fly.dev** — no install
+required. Just open the link, pick a name, and share the room with friends.
+
+## Run locally
+
+```bash
 cd frontend && yarn build && cd .. && cd backend && cargo run
 ```
 
 The server is a self-contained static binary and does not terminate TLS. It
-listens on 127.0.0.1:3030, and should only be exposed to an external network
-behind a proxy that supports both HTTP and WebSocket protocols (only tested
-with `nginx`).
+listens on `127.0.0.1:3030`, and should only be exposed to an external network
+behind a proxy that supports both HTTP and WebSocket protocols.
 
-## Environment Variables
+### Development
 
-- `CORS_ALLOWED_ORIGINS`: Comma-separated list of allowed origins for CORS requests to the `/api/rpc` endpoint (e.g., `"https://example.com,https://app.example.com"`). Set to `"*"` to allow any origin (not recommended for production). If not set, defaults to allowing common localhost origins for development (`http://localhost:3000,http://localhost:3030,http://127.0.0.1:3000,http://127.0.0.1:3030`).
-
-# Development
-
-```
+```bash
+# in one terminal
 cd frontend && yarn watch
+# in another
 cd backend && cargo run --features dynamic
 ```
 
-## Syncing types from Rust to Typescript
+See [CLAUDE.md](CLAUDE.md) for the full set of build, test, lint, and
+type-generation commands.
 
-There are shared types in the Rust backend and the Typescript frontend; the `frontend/json-schema-bin/src/main.rs` file dumps the Rust types to JSON Schema, and the `yarn types` command will generate the Typescript types.
+### Environment variables
 
-```
-yarn types && yarn prettier --write && yarn lint --fix
-```
+- `CORS_ALLOWED_ORIGINS`: Comma-separated list of allowed origins for CORS
+  requests to the `/api/rpc` endpoint (e.g.
+  `"https://example.com,https://app.example.com"`). Set to `"*"` to allow any
+  origin (not recommended for production). If not set, defaults to allowing
+  common localhost origins for development.
 
-## Generating JSON
-A mapping of card data is generated from the server. It's checked in at
-`src/generated/cards.json`. To update it, start up the server and run
+## Deploy
 
-```
-yarn download-cards-json
-```
+The project deploys to Fly.io. See **[DEPLOY.md](DEPLOY.md)** for the full,
+step-by-step deployment guide (Docker image, `fly.toml`, and configuration).
 
-## Prettier
-To format frontend code:
+## Technical details
 
-```
-# Dry-run/check
-yarn prettier --check
-
-# Fix files, will overwrite files
-yarn prettier --write
-```
-
-## Lint
-To run tslint:
-
-```
-cd frontend && yarn lint
-```
-
-And clippy:
-```
-cargo clippy
-```
-
-## Tests
-To run tests:
-
-### Frontend:
-```
-cd frontend && yarn test
-```
-
-### Backend:
-```
-cargo test
-```
-
-# Technical details
 The entire state of each game is stored in the memory of the server process.
-Restarting the game kicks all players, and games are automatically closed when
-all players have disconnected. The bulk of the game logic is implemented in the
-server, but players are expected to keep each other in check -- the server does
-not validate moves in their entirety.
+Restarting the server kicks all players, and games are automatically closed
+when all players have disconnected. The bulk of the game logic is implemented
+in Rust (shared with the client via WebAssembly); the frontend is React +
+TypeScript. See [CLAUDE.md](CLAUDE.md) for the architecture overview.
 
-For simplicity, the game is written in Rust and Javascript, linking in Axum as
-the WebSocket/HTTP server implementation and using React from a CDN.
+## Credits
 
-# Known issues
-- No mobile support
-- Incomplete validity checking for forced-plays
-- No player limit per game
-- No overall player limit
+This project is a fork and would not exist without the work it builds on:
 
-# Play online!
+- **Original engine:** [github.com/rbtying/shengji](https://github.com/rbtying/shengji),
+  released under the MIT License — the foundation of this fork. See
+  [LICENSE](LICENSE) and [NOTICE](NOTICE), whose original copyright is preserved intact.
 
-[https://robertying.com/shengji/](https://robertying.com/shengji/)
+### Game rules
+
+- [Wikipedia: "Sheng ji"](https://en.wikipedia.org/wiki/Sheng_ji)
+- [pagat.com: Tractor (Tuo La Ji)](https://www.pagat.com/kt5/tractor.html)
+
+### AI research
+
+- [Berkeley EECS-2023-127: ShengJi+](https://www2.eecs.berkeley.edu/Pubs/TechRpts/2023/EECS-2023-127.html)
+  — search/learning approaches for ShengJi.
+- [DouZero](https://github.com/kwai/DouZero) — deep reinforcement learning for
+  related Chinese card games.
+
+## License
+
+[MIT](LICENSE). The original copyright notice is preserved; this fork adds a
+[NOTICE](NOTICE) clarifying the relationship to the upstream project.

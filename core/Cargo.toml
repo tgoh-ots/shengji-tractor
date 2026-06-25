@@ -1,7 +1,7 @@
 [package]
 name = "shengji-core"
 version = "0.1.0"
-authors = ["Robert Ying <rbtying@aeturnalus.com>"]
+authors = ["Shengji Online contributors"]
 edition = "2018"
 publish = false
 
@@ -16,6 +16,10 @@ slog = { version = "2.5", features = ["nested-values"] }
 slog_derive = "0.2"
 schemars = "0.8"
 thiserror = "1.0"
+# Pure-Rust ONNX inference for the Expert tier's learned net. tract is fully
+# Rust (no onnxruntime / `ort` C dependency), so it builds in the musl Docker
+# image used for deploys.
+tract-onnx = "0.21"
 url = "2.1"
 
 [dev-dependencies]

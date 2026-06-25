@@ -4,14 +4,21 @@
 //! decision ONLY from the redacted, per-player view (`GameState::for_player`).
 //! See the honesty-invariant note on [`select_action`].
 //!
-//! The three tiers share a single heuristic backbone ([`crate::bot::heuristics`])
-//! and differ only in a small set of *knobs*:
+//! The honest tiers share a single heuristic backbone ([`crate::bot::heuristics`])
+//! and differ in a small set of *knobs* (and, for `Expert`, a learned net):
 //!
-//! | tier   | card memory | blunder ε | softmax temp | determinized search |
-//! |--------|-------------|-----------|--------------|---------------------|
-//! | Easy   | none        | ~20%      | high (hot)   | no                  |
-//! | Medium | yes (voids) | ~6%       | low          | a few worlds leading|
-//! | Hard   | yes (voids) | ~1%       | ~greedy      | yes (time-boxed)    |
+//! | tier      | card memory | blunder ε | softmax temp | determinized search    |
+//! |-----------|-------------|-----------|--------------|------------------------|
+//! | Easy      | none        | ~28%      | high (hot)   | no                     |
+//! | Hard      | yes (voids) | ~0%       | ~greedy      | yes (time-boxed)       |
+//! | Expert    | yes (voids) | ~0%       | greedy       | learned net (honest)   |
+//! | Omniscient| (cheats)    | 0%        | greedy       | perfect-info search    |
+//!
+//! `Expert` scores each legal candidate with a small MLP distilled from the
+//! `Omniscient` teacher's choices (see [`crate::bot::expert`]); it consumes only
+//! HONEST per-candidate features, so it approximates perfect-info play from the
+//! redacted view. When the model can't load/run, Expert falls back to the `Hard`
+//! determinized search, which itself falls back to the heuristic.
 //!
 //! Whenever any tier's logic fails to produce a move, we fall back to the
 //! original always-legal "dumb" policy so a bot never makes an illegal/None
@@ -43,14 +50,13 @@ struct Knobs {
     /// among the good moves). 0 means pick the top move deterministically.
     temperature: f64,
     /// How many determinized worlds to sample in search. 0 disables search and
-    /// the tier plays directly from the heuristic backbone (Easy). Medium does a
-    /// light search; Hard does a deeper, time-boxed search.
+    /// the tier plays directly from the heuristic backbone (Easy). Hard does a
+    /// deeper, time-boxed search.
     search_worlds: usize,
     /// Maximum candidate moves the search evaluates.
     search_candidates: usize,
     /// How many tricks of look-ahead each rollout plays. Deeper = stronger but
-    /// slower; the main quality lever separating Medium (shallow) from Hard
-    /// (deep).
+    /// slower.
     rollout_tricks: usize,
 }
 
@@ -66,23 +72,23 @@ impl Knobs {
                 search_candidates: 0,
                 rollout_tricks: 0,
             },
-            // Solid club player: card/void memory and rare blunders, playing the
-            // clean heuristic backbone near-greedily but WITHOUT look-ahead
-            // search. This is a strict, reliable step up from Easy (which plays
-            // the same heuristic but noisily) and a clear step below Hard (which
-            // adds determinized search on top of the same heuristic).
-            BotDifficulty::Medium => Knobs {
-                epsilon: 0.04,
-                temperature: 0.15,
-                search_worlds: 0,
-                search_candidates: 0,
-                rollout_tricks: 0,
-            },
-            // Expert: the heuristic PLUS a time-boxed determinized search that
+            // Hard: the heuristic PLUS a time-boxed determinized search that
             // looks ahead over sampled worlds, essentially no blunders, greedy on
             // the search value. Strictly stronger than the bare heuristic when
             // the budget allows any simulations at all.
             BotDifficulty::Hard => Knobs {
+                epsilon: 0.0,
+                temperature: 0.0,
+                search_worlds: 48,
+                search_candidates: 6,
+                rollout_tricks: 8,
+            },
+            // Expert: a learned net scores each legal candidate from HONEST
+            // features (see `choose_play` / `crate::bot::expert`). These knobs
+            // only matter for the fallback path when the model can't run — in
+            // that case Expert behaves like Hard (determinized search). ε = 0 and
+            // temperature = 0 so the net's argmax is taken greedily.
+            BotDifficulty::Expert => Knobs {
                 epsilon: 0.0,
                 temperature: 0.0,
                 search_worlds: 48,
@@ -213,7 +219,18 @@ fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Ca
         }
     }
 
-    // Medium / Hard: time-boxed determinized search. The wall-clock budget
+    // Expert (learned net): score every legal candidate with the distilled MLP
+    // over HONEST per-candidate features and take the best. This is the sole
+    // perfect-info-approximating path; it reads ONLY the redacted view `p`. If
+    // the model can't run (failed to load, no candidates, etc.) we fall through
+    // to the Hard determinized search below, so Expert is never illegal/None.
+    if matches!(difficulty, BotDifficulty::Expert) {
+        if let Some(cards) = crate::bot::expert::choose_play_expert(p, me) {
+            return cards;
+        }
+    }
+
+    // Hard / Expert-fallback: time-boxed determinized search. The wall-clock budget
     // defaults to 1000ms but can be lowered via `SHENGJI_BOT_BUDGET_MS` (used by
     // the self-play eval harness to keep large runs fast). The cap guarantees a
     // slow CPU degrades to fewer simulations rather than hanging.
@@ -230,7 +247,7 @@ fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Ca
         }
     }
 
-    // Heuristic backbone (Easy / Medium, and Hard's fallback).
+    // Heuristic backbone (Easy, and the search tiers' fallback).
     let ranked: Vec<ScoredPlay> = if leading {
         heuristics::ranked_leads(p, me)
     } else {

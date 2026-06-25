@@ -495,33 +495,23 @@ const ChangeLog = (): JSX.Element => {
 
 const Credits = (): JSX.Element => (
   <p style={{ padding: "0 20px" }}>
-    Made by Robert Ying (
-    <a href="mailto:me@robertying.com">me@robertying.com</a>), Abra Shen, and
-    other{" "}
-    <a
-      href="https://github.com/rbtying/shengji/graphs/contributors"
-      target="_blank"
-      rel="noreferrer"
-    >
-      friends
-    </a>
-    . Consider buying us boba via Venmo at @Robert-Ying or via{" "}
-    <a
-      href="https://donate.stripe.com/aEU8x982f3oj4Ja7ss"
-      target="_blank"
-      rel="noreferrer"
-    >
-      other payment methods
-    </a>
-    , or contributing on{" "}
+    Shengji Online (升级 Online) is an open-source fork of the{" "}
     <a
       href="https://github.com/rbtying/shengji"
       target="_blank"
       rel="noreferrer"
     >
+      rbtying/shengji
+    </a>{" "}
+    engine (MIT). Source, issues, and contributions are welcome on{" "}
+    <a
+      href="https://github.com/tgoh-ots/shengji-tractor"
+      target="_blank"
+      rel="noreferrer"
+    >
       GitHub
     </a>
-    !
+    .
     <span style={{ float: "right" }}>
       <ChangeLog />
     </span>

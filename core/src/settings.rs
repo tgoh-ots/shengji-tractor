@@ -447,7 +447,7 @@ impl PropagatedState {
     }
 
     /// Generate a unique display name for a freshly-added bot, such as
-    /// `🤖 Easy Bot` or `🤖 Medium Bot 2`.
+    /// `🤖 Easy Bot` or `🤖 Hard Bot 2`.
     pub fn generate_bot_name(&self, difficulty: BotDifficulty) -> String {
         let base = format!("🤖 {} Bot", difficulty.as_str());
         let name_taken = |name: &str| {

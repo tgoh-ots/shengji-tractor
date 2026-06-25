@@ -40,8 +40,7 @@ pub struct SearchConfig {
     pub max_worlds: usize,
     /// How many tricks (× players) of look-ahead each rollout plays before the
     /// static evaluation. Deeper rollouts give a more accurate value at higher
-    /// cost — the chief lever that distinguishes a Medium (shallow) from a Hard
-    /// (deep) search.
+    /// cost.
     pub rollout_tricks: usize,
     /// RNG seed (lets the eval harness make runs reproducible).
     pub seed: u64,

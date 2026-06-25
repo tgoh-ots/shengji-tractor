@@ -61,8 +61,8 @@ const en: Dict = {
   "ai.remove": "Remove",
   "ai.difficulty": "Difficulty",
   "ai.difficulty.Easy": "Easy",
-  "ai.difficulty.Medium": "Medium",
   "ai.difficulty.Hard": "Hard",
+  "ai.difficulty.Expert": "Expert (learned)",
   "ai.difficulty.Omniscient": "Omniscient (sees all cards)",
   "ai.cheaterBadge": "CHEATER",
   "ai.cheaterWarning":
@@ -195,8 +195,8 @@ const zh: Dict = {
   "ai.remove": "移除",
   "ai.difficulty": "难度",
   "ai.difficulty.Easy": "简单",
-  "ai.difficulty.Medium": "中等",
   "ai.difficulty.Hard": "困难",
+  "ai.difficulty.Expert": "专家（学习）",
   "ai.difficulty.Omniscient": "全知（作弊）",
   "ai.cheaterBadge": "作弊",
   "ai.cheaterWarning":

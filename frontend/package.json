@@ -1,8 +1,8 @@
 {
-  "name": "shengji",
+  "name": "shengji-online",
   "version": "1.0.0",
   "main": "index.ts",
-  "repository": "https://github.com/rbtying/shengji.git",
+  "repository": "https://github.com/tgoh-ots/shengji-tractor.git",
   "license": "MIT",
   "dependencies": {
     "@sentry/react": "^9.13.0",

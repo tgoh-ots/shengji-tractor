@@ -1,0 +1,19 @@
+Shengji Online (升级 Online)
+https://github.com/tgoh-ots/shengji-tractor
+Live: https://shengji-tractor.fly.dev
+
+This project is a fork of the open-source "shengji" engine:
+  https://github.com/rbtying/shengji
+  Copyright (c) 2020 Robert Ying https://robertying.com
+
+The original work is licensed under the MIT License. This fork is also
+distributed under the MIT License. The original copyright notice and
+permission notice are retained in full in the LICENSE file, as required by
+the MIT License. This NOTICE adds clarifying attribution only and does not
+modify, restrict, or supersede the terms of the LICENSE.
+
+Changes in this fork include (non-exhaustive): cheat-proof heuristic + search
+AI opponents backed by a distilled learned network, an optional
+perfect-information ("omniscient") bot mode, a fully redesigned responsive
+bilingual (中文 / English) user interface, and deployment configuration for
+Fly.io.

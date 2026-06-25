@@ -287,7 +287,7 @@ async fn e2e_game_no_hidden_card_leakage() {
         }
 
         // Determine if it is our turn, and if so submit a legal move. We use the
-        // HONEST policy (Medium) on our OWN redacted view: it only returns an
+        // HONEST policy (Hard) on our OWN redacted view: it only returns an
         // action when `next_player == me`, and the action is guaranteed legal.
         let me = match game
             .propagated()
@@ -355,7 +355,9 @@ fn next_action_for(view: &GameState, me: PlayerID) -> Option<Action> {
     // waiting on us: draw, the post-draw bid / kitty pick-up / reveal, exchange
     // (if we are the landlord), play, and finishing a trick we won. (The
     // Omniscient cheat is gated entirely in the server; a human client never
-    // sees hidden cards, so Medium on our redacted view is the right driver.)
+    // sees hidden cards, so an honest tier on our redacted view is the right
+    // driver. We use `Easy` — a pure heuristic with no search/model dependency —
+    // to keep the e2e socket loop fast and self-contained.)
     match view {
         GameState::Initialize(_) => None,
         GameState::Draw(p) => {
@@ -377,7 +379,7 @@ fn next_action_for(view: &GameState, me: PlayerID) -> Option<Action> {
         }
         // Exchange decisions (only the landlord acts) are fully handled by the
         // honest policy.
-        GameState::Exchange(_) => policy::select_action(view, me, BotDifficulty::Medium)
+        GameState::Exchange(_) => policy::select_action(view, me, BotDifficulty::Easy)
             .ok()
             .flatten(),
         GameState::Play(p) => {
@@ -386,11 +388,9 @@ fn next_action_for(view: &GameState, me: PlayerID) -> Option<Action> {
             }
             match p.trick().next_player() {
                 // Our turn to play: the honest policy returns a legal play.
-                Some(next) if next == me => {
-                    policy::select_action(view, me, BotDifficulty::Medium)
-                        .ok()
-                        .flatten()
-                }
+                Some(next) if next == me => policy::select_action(view, me, BotDifficulty::Easy)
+                    .ok()
+                    .flatten(),
                 // Trick complete: if we won it (and thus lead next), finish it.
                 None => match p.trick().complete() {
                     Ok(ended) if ended.winner == me => Some(Action::EndTrick),

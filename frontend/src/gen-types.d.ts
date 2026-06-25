@@ -178,11 +178,13 @@ export type Action =
       PlayCardsWithHint: [Card[], TrickUnit[]];
     };
 /**
- * The difficulty of a bot player. For Milestone 1 the difficulty does not yet influence the (dumb-but-legal) policy, but it is plumbed through so that a smarter brain can use it in a later milestone.
+ * The difficulty of a bot player. The four tiers form a strength ladder `Easy < Hard <= Expert < Omniscient`:
  *
- * `Omniscient` is a DELIBERATE, clearly-labeled, opt-in CHEATING tier that plays with PERFECT INFORMATION (it is allowed to see every opponent's hand). It exists for testing and for an "impossible" practice opponent; it must be chosen explicitly in the lobby and is surfaced with a cheater badge in the UI. The three honest tiers (`Easy`/`Medium`/`Hard`) never receive anything but their own redacted, per-player view — see [`observed_state`], which is the single, centralized place where the perfect-information bypass is gated.
+ * * `Easy` — the bare heuristic backbone played noisily (frequent blunders, hot softmax, no card memory or search). Feels like a casual human. * `Hard` — the same heuristic PLUS a time-boxed determinized (ISMCTS-style) search over sampled worlds. Honest. * `Expert` — a learned neural net (a small MLP trained by behavioral cloning / distillation of the Omniscient teacher's choices) scores each legal candidate from HONEST features only. It approximates perfect-info play from the honest observation. If the model fails to load/run it falls back to the `Hard` heuristic, so Expert is never illegal/None. Honest. * `Omniscient` — a DELIBERATE, clearly-labeled, opt-in CHEATING tier that plays with PERFECT INFORMATION (it is allowed to see every opponent's hand). It exists for testing and for an "impossible" practice opponent; it must be chosen explicitly in the lobby and is surfaced with a cheater badge in the UI.
+ *
+ * The three honest tiers (`Easy`/`Hard`/`Expert`) never receive anything but their own redacted, per-player view — see [`observed_state`], which is the single, centralized place where the perfect-information bypass is gated.
  */
-export type BotDifficulty = ("Easy" | "Medium" | "Hard") | "Omniscient";
+export type BotDifficulty = ("Easy" | "Hard") | "Expert" | "Omniscient";
 export type Number = string;
 export type FriendSelectionPolicy =
   | "Unrestricted"

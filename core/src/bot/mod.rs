@@ -9,6 +9,7 @@ use crate::game_state::GameState;
 use crate::interactive::{Action, BroadcastMessage, InteractiveGame};
 
 pub mod determinize;
+pub mod expert;
 pub mod heuristics;
 pub mod policy;
 pub mod search;
@@ -16,23 +17,36 @@ pub mod search;
 #[cfg(test)]
 mod tests;
 
-/// The difficulty of a bot player. For Milestone 1 the difficulty does not yet
-/// influence the (dumb-but-legal) policy, but it is plumbed through so that a
-/// smarter brain can use it in a later milestone.
+/// The difficulty of a bot player. The four tiers form a strength ladder
+/// `Easy < Hard <= Expert < Omniscient`:
 ///
-/// `Omniscient` is a DELIBERATE, clearly-labeled, opt-in CHEATING tier that
-/// plays with PERFECT INFORMATION (it is allowed to see every opponent's hand).
-/// It exists for testing and for an "impossible" practice opponent; it must be
-/// chosen explicitly in the lobby and is surfaced with a cheater badge in the
-/// UI. The three honest tiers (`Easy`/`Medium`/`Hard`) never receive anything
-/// but their own redacted, per-player view — see [`observed_state`], which is
-/// the single, centralized place where the perfect-information bypass is gated.
+/// * `Easy` — the bare heuristic backbone played noisily (frequent blunders, hot
+///   softmax, no card memory or search). Feels like a casual human.
+/// * `Hard` — the same heuristic PLUS a time-boxed determinized (ISMCTS-style)
+///   search over sampled worlds. Honest.
+/// * `Expert` — a learned neural net (a small MLP trained by behavioral cloning /
+///   distillation of the Omniscient teacher's choices) scores each legal
+///   candidate from HONEST features only. It approximates perfect-info play from
+///   the honest observation. If the model fails to load/run it falls back to the
+///   `Hard` heuristic, so Expert is never illegal/None. Honest.
+/// * `Omniscient` — a DELIBERATE, clearly-labeled, opt-in CHEATING tier that
+///   plays with PERFECT INFORMATION (it is allowed to see every opponent's
+///   hand). It exists for testing and for an "impossible" practice opponent; it
+///   must be chosen explicitly in the lobby and is surfaced with a cheater badge
+///   in the UI.
+///
+/// The three honest tiers (`Easy`/`Hard`/`Expert`) never receive anything but
+/// their own redacted, per-player view — see [`observed_state`], which is the
+/// single, centralized place where the perfect-information bypass is gated.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub enum BotDifficulty {
     Easy,
     #[default]
-    Medium,
     Hard,
+    /// Learned-net tier: a small MLP distilled from the Omniscient teacher,
+    /// scoring legal candidates from HONEST features only. Falls back to the
+    /// `Hard` heuristic if the model can't run. See [`crate::bot::expert`].
+    Expert,
     /// CHEATER tier: sees all opponents' hands and plays with perfect
     /// information. The ONLY difficulty for which [`observed_state`] returns the
     /// true, unredacted state.
@@ -43,8 +57,8 @@ impl BotDifficulty {
     pub fn as_str(self) -> &'static str {
         match self {
             BotDifficulty::Easy => "Easy",
-            BotDifficulty::Medium => "Medium",
             BotDifficulty::Hard => "Hard",
+            BotDifficulty::Expert => "Expert",
             BotDifficulty::Omniscient => "Omniscient",
         }
     }
@@ -67,7 +81,7 @@ const MAX_BOT_ITERATIONS: usize = 5000;
 ///
 /// The honesty invariant is preserved by computing each HONEST bot's move from
 /// the per-player redacted view via [`observed_state`]: the policy never sees the
-/// unredacted game state, so an Easy/Medium/Hard bot cannot observe information a
+/// unredacted game state, so an Easy/Hard/Expert bot cannot observe information a
 /// human in its seat couldn't. The ONLY exception is the explicitly opt-in
 /// `Omniscient` CHEATER tier, for which [`observed_state`] (the single,
 /// centralized perfect-information bypass) returns the true full state.
@@ -224,7 +238,7 @@ fn next_bot_action(game: &mut InteractiveGame) -> Result<Option<(PlayerID, Actio
 /// unredacted game state instead of its own redacted, per-player view. The
 /// decision is gated entirely on [`BotDifficulty::sees_perfect_information`]:
 ///
-/// * For the HONEST tiers (`Easy`/`Medium`/`Hard`) we return
+/// * For the HONEST tiers (`Easy`/`Hard`/`Expert`) we return
 ///   [`InteractiveGame::dump_state_for_player`], i.e. `GameState::for_player`,
 ///   in which every OTHER seat's cards are [`Card::Unknown`](shengji_mechanics::types::Card::Unknown)
 ///   and the kitty is hidden. These tiers therefore structurally cannot read
@@ -252,7 +266,7 @@ fn observed_state(
         // bypass; honest tiers never take this branch.
         game.dump_state()
     } else {
-        // HONEST (Easy/Medium/Hard): the redacted per-player view; opponents'
+        // HONEST (Easy/Hard/Expert): the redacted per-player view; opponents'
         // cards are Card::Unknown and the kitty is hidden.
         game.dump_state_for_player(player)
     }

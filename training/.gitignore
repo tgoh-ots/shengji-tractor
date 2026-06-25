@@ -1,0 +1,7 @@
+# Generated self-play training data — large and reproducible via
+# `cargo run --release --example gen_training_data`. Not committed.
+data.csv
+*.csv
+# Local Python virtualenv.
+.venv/
+__pycache__/

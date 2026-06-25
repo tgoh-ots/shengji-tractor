@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Shengji is an online implementation of the Chinese trick-taking card game 升级 ("Tractor" or "Finding Friends"). It features a Rust backend with WebSocket support and a React TypeScript frontend with WebAssembly integration.
+Shengji Online (升级 Online) is an online implementation of the Chinese trick-taking card game 升级 ("Tractor" or "Finding Friends"). It is an open-source fork of the rbtying/shengji engine (MIT), adding cheat-proof AI opponents, a redesigned responsive bilingual UI, and Fly.io deployment. The live site is https://shengji-tractor.fly.dev. It features a Rust backend with WebSocket support and a React TypeScript frontend with WebAssembly integration.
 
 ## Commands
 

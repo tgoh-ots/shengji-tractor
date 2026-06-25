@@ -1,7 +1,9 @@
 # Shengji Online — Project Progress & Recovery Log
 
 > Durable status doc so work can resume after a crashed/restarted session.
-> **Last updated: 2026-06-23.** Update this at every milestone boundary.
+> **Last updated: 2026-06-24.** Update this at every milestone boundary.
+>
+> **Latest:** AI tiers condensed to **Easy / Hard / Expert / Omniscient** (Medium removed). **Expert** = a distilled learned net (PyTorch → ONNX, run in Rust via `tract`, honest features only; teacher = Omniscient's choices). Measured ~Hard strength: beats Easy (59%), ~par-to-slightly-below Hard (44%); see `training/README.md` to train it stronger (more games / deeper teacher / bigger net). CI fixed (`cargo audit` now truly informational). De-branded: personal author/contact/site refs removed; engine attribution kept in LICENSE/NOTICE/README Credits/About tab. New in-app **About** tab (Toolbar) with a Sources list.
 
 ## What we're building
 A web app to play Shengji (升级 / Tractor) with friends and/or AI bots (Easy/Medium/Hard,
@@ -62,10 +64,11 @@ Forked from **rbtying/shengji** (MIT). Repo: `/Users/tgoh/playground/shengji`.
 | M2.5 | ShengJi+ offline benchmark bridge (measure our bot vs the published RL agent) | ⏳ PENDING (after M2) |
 | Expert | Expert tier: learned net (distill from ShengJi+ / self-play), ONNX → Rust via `tract` | ⏳ PENDING (after M2.5; does NOT block first deploy) |
 | Omniscient | Opt-in PERFECT-INFORMATION cheater tier (perfect-info search; honesty-bypass centralized in `observed_state`, gated to Omniscient only; honest tiers stay honest). UI Add-AI label. backend/tests/e2e_game.rs (WS no-leak e2e). | ✅ DONE & verified (27 core tests incl honesty-inversion; Omniscient beats Hard 62%; WS e2e no-leak passes; FE builds) |
-| M5 | Deploy — backend **LIVE on Fly.io** (app `shengji-tractor`, single machine, auto-stop pay-per-use) at **https://shengji-tractor.fly.dev** (serves frontend + WS; CSP/HSTS/headers verified live). Vercel frontend split = optional next. CI workflows written. | 🔄 backend LIVE; Vercel optional |
+| M5 | Deploy — backend **LIVE on Fly.io** (app `shengji-tractor`, single machine, auto-stop pay-per-use) at **https://shengji-tractor.fly.dev** (serves frontend + WS; CSP/HSTS/headers verified live). Code pushed to public GitHub **tgoh-ots/shengji-tractor**. Vercel declined (single Fly URL). | ✅ DONE |
 | M6 | End-to-end verification: AUTOMATED e2e tests (WS-driven full game via axum-test, asserting flow + no card leakage) + humans + each AI tier (incl Omniscient) + mobile + WS-leak spot-check | ⏳ PENDING (after M2/M3/M4) |
 
 ## Live deployment
+- **GitHub repo:** https://github.com/tgoh-ots/shengji-tractor (public). `origin` = HTTPS as `tgoh-ots` (the machine's SSH key maps to a different account, `tGoh98`, so push over HTTPS); `upstream` = rbtying/shengji. Pushing workflow files needs the gh token's `workflow` scope (already granted).
 - **Backend: LIVE on Fly.io** — app `shengji-tractor`, URL **https://shengji-tractor.fly.dev** (single service: serves embedded frontend + `/api` WebSocket). Verified live: `/`=200, `/stats`=200 (sha=fly), security headers (CSP/HSTS/X-Frame/nosniff) present, `/api`=400 (WS route up). **Single machine — DO NOT scale >1** (rooms are in-memory). `auto_stop` + `min_machines_running=0` (pay-per-use, ~1-2s wake; reconnect-by-name covers mid-game wakes).
 - Redeploy: `export PATH=/opt/homebrew/bin:$PATH; fly deploy --ha=false` (builds `Dockerfile.deploy` on Fly's remote builder). Logs: `fly logs -a shengji-tractor`. Status: `fly status -a shengji-tractor`. Config: `fly.toml`.
 - Prod env: `CORS_ALLOWED_ORIGINS=https://shengji-tractor.fly.dev` (also add the Vercel origin if the frontend is split out), `VERSION=fly`.

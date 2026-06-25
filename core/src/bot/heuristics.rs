@@ -1,5 +1,6 @@
-//! Heuristic Shengji policy: the backbone used directly by Easy/Medium and as
-//! the rollout / leaf policy inside Hard's determinized search.
+//! Heuristic Shengji policy: the backbone used directly by Easy and as
+//! the rollout / leaf policy inside Hard's determinized search (and the
+//! Expert tier's fallback).
 //!
 //! Everything here is computed from the redacted per-player view only.
 //!

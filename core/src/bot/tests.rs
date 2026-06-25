@@ -55,10 +55,12 @@ fn setup_all_bot_game_with(
     (game, bot_ids)
 }
 
-/// Build a 4-player, all-bot Tractor game and start it (all `Medium`). Returns
-/// the started game plus the four bot player ids in seating order.
+/// Build a 4-player, all-bot Tractor game and start it (all `Easy`). Returns
+/// the started game plus the four bot player ids in seating order. `Easy` keeps
+/// the helper fast (no determinized search) for the honesty / determinizer
+/// tests that only need to reach a mid-play state.
 fn setup_all_bot_game(logger: &Logger) -> (InteractiveGame, Vec<PlayerID>) {
-    setup_all_bot_game_with(logger, BotDifficulty::Medium)
+    setup_all_bot_game_with(logger, BotDifficulty::Easy)
 }
 
 #[test]
@@ -390,8 +392,8 @@ fn head_to_head(a: BotDifficulty, b: BotDifficulty, games: usize) -> (usize, usi
 /// Fast CI regression: a small self-play that asserts (a) all-bot hands with
 /// mixed tiers run to completion and a winner is attributed, and (b) the
 /// stronger tier wins a clear majority over a handful of mirrored hands. We pit
-/// Hard vs Medium because that margin is the widest and most reliable (Hard's
-/// determinized search beats Medium's bare heuristic by ~65-69% even at a tiny
+/// Hard vs Easy because that margin is the widest and most reliable (Hard's
+/// determinized search beats Easy's noisy heuristic comfortably even at a tiny
 /// budget). Kept quick via a small search budget.
 #[test]
 fn test_difficulty_ladder_mixed_tier_self_play_quick() {
@@ -401,18 +403,18 @@ fn test_difficulty_ladder_mixed_tier_self_play_quick() {
     // Drive a handful of mixed-tier all-bot hands across every tier pairing and
     // assert each one runs to completion and attributes a winner. This exercises
     // the full per-seat policy path (bid → kitty → trick play) under the honesty
-    // boundary for all three tiers, which is the property we can assert
-    // *robustly* in a fast/noisy debug build. The strict strength ordering
-    // (Hard > Medium > Easy by a stable win-rate margin) is a statistical
-    // property asserted in the heavier, release-oriented
+    // boundary for every tier, which is the property we can assert *robustly* in
+    // a fast/noisy debug build. The strict strength ordering
+    // (Omniscient >= Hard >= Expert > Easy by a stable win-rate margin) is a
+    // statistical property asserted in the heavier, release-oriented
     // `test_difficulty_ladder_monotonic` (run with `--ignored`) and printed by
     // the `eval` example harness.
     let pairings = [
         (BotDifficulty::Omniscient, BotDifficulty::Hard),
         (BotDifficulty::Omniscient, BotDifficulty::Easy),
-        (BotDifficulty::Hard, BotDifficulty::Medium),
+        (BotDifficulty::Hard, BotDifficulty::Expert),
         (BotDifficulty::Hard, BotDifficulty::Easy),
-        (BotDifficulty::Medium, BotDifficulty::Easy),
+        (BotDifficulty::Expert, BotDifficulty::Easy),
     ];
     for (a, b) in pairings {
         let games = 4;
@@ -460,9 +462,9 @@ fn test_difficulty_ladder_mixed_tier_self_play_quick() {
     );
 }
 
-/// Heavier ladder assertion (Hard > Medium > Easy by a stable margin). Ignored
-/// by default so normal CI stays fast; run with
-/// `cargo test -p shengji-core --release -- --ignored` (release strongly
+/// Heavier ladder assertion (Easy < Hard, Easy < Expert, and the Omniscient
+/// ceiling) by a stable margin. Ignored by default so normal CI stays fast; run
+/// with `cargo test -p shengji-core --release -- --ignored` (release strongly
 /// recommended: a debug build gets far fewer simulations per search budget, so
 /// the Hard tier needs more wall-clock to demonstrate its edge). The budget is
 /// set generously so the ordering holds even in a debug build.
@@ -475,9 +477,8 @@ fn test_difficulty_ladder_monotonic() {
     // Perfect-information ceiling: Omniscient (cheating, full search over the
     // true world) is at least as strong as Hard (same search, sampled worlds).
     let (oh_o, oh_h) = head_to_head(BotDifficulty::Omniscient, BotDifficulty::Hard, games);
-    let (hm_h, hm_m) = head_to_head(BotDifficulty::Hard, BotDifficulty::Medium, games);
-    let (me_m, me_e) = head_to_head(BotDifficulty::Medium, BotDifficulty::Easy, games);
     let (he_h, he_e) = head_to_head(BotDifficulty::Hard, BotDifficulty::Easy, games);
+    let (xe_x, xe_e) = head_to_head(BotDifficulty::Expert, BotDifficulty::Easy, games);
 
     assert!(
         oh_o >= oh_h,
@@ -485,9 +486,8 @@ fn test_difficulty_ladder_monotonic() {
         oh_o,
         oh_h
     );
-    assert!(hm_h > hm_m, "Hard ({}) should beat Medium ({})", hm_h, hm_m);
-    assert!(me_m > me_e, "Medium ({}) should beat Easy ({})", me_m, me_e);
     assert!(he_h > he_e, "Hard ({}) should beat Easy ({})", he_h, he_e);
+    assert!(xe_x > xe_e, "Expert ({}) should beat Easy ({})", xe_x, xe_e);
 }
 
 /// Determinizer honesty: a sampled world must (a) give every other seat exactly
@@ -632,8 +632,8 @@ fn test_observed_state_reveals_real_cards_only_for_omniscient() {
     // (2) Honest tiers: every other seat's cards must be Card::Unknown (redacted).
     for difficulty in [
         BotDifficulty::Easy,
-        BotDifficulty::Medium,
         BotDifficulty::Hard,
+        BotDifficulty::Expert,
     ] {
         let honest_view = observed_state(&game, me, difficulty).unwrap();
         let honest_play = match &honest_view {
