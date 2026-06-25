@@ -10,14 +10,25 @@ interface IProps {
 
 const Errors = (props: IProps): JSX.Element => {
   const { updateState } = React.useContext(AppStateContext);
+  if (props.errors.length === 0) {
+    return <></>;
+  }
   return (
-    <div className="errors" onClick={() => updateState({ errors: [] })}>
+    <div
+      className="errors"
+      role="alert"
+      onClick={() => updateState({ errors: [] })}
+      title="Dismiss"
+    >
       <Timeout timeout={5000} callback={() => updateState({ errors: [] })} />
-      {props.errors.map((err, idx) => (
-        <p key={idx}>
-          <code>{err}</code>
-        </p>
-      ))}
+      <span className="errors-icon" aria-hidden="true">
+        ⚠️
+      </span>
+      <div className="errors-body">
+        {props.errors.map((err, idx) => (
+          <p key={idx}>{err}</p>
+        ))}
+      </div>
     </div>
   );
 };

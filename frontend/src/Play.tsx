@@ -11,13 +11,11 @@ import {
 } from "./gen-types";
 import Header from "./Header";
 import Beeper from "./Beeper";
-import Trump from "./Trump";
 import Friends from "./Friends";
 import Trick from "./Trick";
 import Cards from "./Cards";
 import Points, { calculatePoints, ProgressBarDisplay } from "./Points";
 import LabeledPlay from "./LabeledPlay";
-import Players from "./Players";
 import Table from "./Table";
 import ArrayUtils from "./util/array";
 import AutoPlayButton from "./AutoPlayButton";
@@ -39,6 +37,8 @@ const contentStyle: React.CSSProperties = {
   position: "absolute",
   top: "50%",
   left: "50%",
+  width: "min(560px, 92vw)",
+  padding: "1.25rem 1.5rem",
   transform: "translate(-50%, -50%)",
 };
 
@@ -333,15 +333,6 @@ const Play = (props: IProps): JSX.Element => {
         gameMode={playPhase.propagated.game_mode}
         chatLink={playPhase.propagated.chat_link}
       />
-      <Players
-        players={playPhase.propagated.players}
-        observers={playPhase.propagated.observers}
-        bots={playPhase.propagated.bots}
-        landlord={playPhase.landlord}
-        landlords_team={playPhase.landlords_team}
-        name={props.name}
-        next={nextPlayer}
-      />
       <Table
         players={playPhase.propagated.players}
         bots={playPhase.propagated.bots}
@@ -380,7 +371,6 @@ const Play = (props: IProps): JSX.Element => {
           />
         }
       />
-      <Trump trump={playPhase.trump} />
       <Friends gameMode={playPhase.game_mode} showPlayed={true} />
       {playPhase.removed_cards!.length > 0 ? (
         <p className="text-sm text-[var(--text-on-felt-soft)]">
@@ -404,19 +394,19 @@ const Play = (props: IProps): JSX.Element => {
           smallerTeamSize={smallerTeamSize}
         />
       )}
-      <AutoPlayButton
-        onSubmit={playCards}
-        playDescription={
-          grouping.length === 1 && lastPlay === undefined
-            ? grouping[0].description
-            : null
-        }
-        canSubmit={canPlay!}
-        currentWinner={playPhase.trick.current_winner!}
-        unsetAutoPlayWhenWinnerChanges={props.unsetAutoPlayWhenWinnerChanges}
-        isCurrentPlayerTurn={isCurrentPlayerTurn}
-      />
-      <div className="my-2 flex flex-wrap items-center gap-2">
+      <div className="my-3 flex flex-wrap items-center gap-2">
+        <AutoPlayButton
+          onSubmit={playCards}
+          playDescription={
+            grouping.length === 1 && lastPlay === undefined
+              ? grouping[0].description
+              : null
+          }
+          canSubmit={canPlay!}
+          currentWinner={playPhase.trick.current_winner!}
+          unsetAutoPlayWhenWinnerChanges={props.unsetAutoPlayWhenWinnerChanges}
+          isCurrentPlayerTurn={isCurrentPlayerTurn}
+        />
         {playPhase.propagated.play_takeback_policy === "AllowPlayTakeback" && (
           <button
             className="sj-btn"
@@ -772,12 +762,16 @@ const TrickFormatHelper = (props: {
   }, [props.hands]);
 
   return (
-    <>
+    <div className="my-2 flex flex-wrap items-center gap-2">
+      <span className="text-sm font-semibold text-[var(--text-on-felt)]">
+        Need help?
+      </span>
       <Tooltip id="helpTip" place="top" />
       <button
         data-tooltip-id="helpTip"
         data-tooltip-content="Get help on what you can play"
-        className="big"
+        aria-label="What can I play?"
+        className="sj-btn !min-h-[40px] !px-3"
         onClick={(evt) => {
           evt.preventDefault();
           setModalOpen(true);
@@ -789,7 +783,8 @@ const TrickFormatHelper = (props: {
       <button
         data-tooltip-id="suggestTip"
         data-tooltip-content="Suggest a play (not guaranteed to succeed)"
-        className="big"
+        aria-label="Suggest a play"
+        className="sj-btn !min-h-[40px] !px-3"
         disabled={isLoading}
         onClick={async (evt) => {
           evt.preventDefault();
@@ -821,9 +816,14 @@ const TrickFormatHelper = (props: {
       >
         {isLoading ? "..." : "✨"}
       </button>
-      <span style={{ color: "red" }} onClick={() => setMessage("")}>
-        {message}
-      </span>
+      {message !== "" && (
+        <span
+          className="cursor-pointer text-sm font-semibold text-[#ff6b6b]"
+          onClick={() => setMessage("")}
+        >
+          {message}
+        </span>
+      )}
       <ReactModal
         isOpen={modalOpen}
         onRequestClose={() => setModalOpen(false)}
@@ -844,7 +844,7 @@ const TrickFormatHelper = (props: {
           />
         )}
       </ReactModal>
-    </>
+    </div>
   );
 };
 

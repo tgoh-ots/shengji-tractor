@@ -190,28 +190,30 @@ const BidArea = (props: IBidAreaProps): JSX.Element => {
             />
           ) : null}
         </div>
-        {props.prefixButtons}
-        {props.bidTakeBacksEnabled ? (
-          <button
-            onClick={takeBackBid}
-            disabled={
-              props.bids.length === 0 ||
-              props.bids[props.bids.length - 1].id !== playerId ||
-              props.bids[props.bids.length - 1].epoch !== props.epoch
-            }
-            className="big"
-          >
-            {t("bid.takeBack")}
-          </button>
-        ) : null}
-        {props.suffixButtons}
-        {isLoadingBids ? (
-          <p>{t("bid.loading")}</p>
-        ) : validBids.length > 0 ? (
-          <p>{t("bid.clickToBid")}</p>
-        ) : (
-          <p>{t("bid.noAvailable")}</p>
-        )}
+        <div className="my-3 flex flex-wrap items-center gap-2">
+          {props.prefixButtons}
+          {props.bidTakeBacksEnabled ? (
+            <button
+              onClick={takeBackBid}
+              disabled={
+                props.bids.length === 0 ||
+                props.bids[props.bids.length - 1].id !== playerId ||
+                props.bids[props.bids.length - 1].epoch !== props.epoch
+              }
+              className="sj-btn"
+            >
+              {t("bid.takeBack")}
+            </button>
+          ) : null}
+          {props.suffixButtons}
+        </div>
+        <p className="mb-1 text-sm font-semibold text-[var(--text-on-felt)]">
+          {isLoadingBids
+            ? t("bid.loading")
+            : validBids.length > 0
+              ? t("bid.clickToBid")
+              : t("bid.noAvailable")}
+        </p>
         {!isLoadingBids &&
           validBids.map((bid, idx) => {
             return (

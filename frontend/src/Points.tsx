@@ -224,8 +224,10 @@ const Points = (props: IProps): JSX.Element => {
   thresholdStr += ` ${t("points.nextThreshold", { n: nextThreshold })}`;
 
   return (
-    <div className="points">
-      <h2>{t("points.title")}</h2>
+    <div className="points mt-4">
+      <h2 className="mb-2 text-base font-bold uppercase tracking-wide text-[var(--text-on-felt)]">
+        {t("points.title")}
+      </h2>
       {!settings.showPointsAboveGame && (
         <ProgressBar
           checkpoints={scoreTransitions
@@ -237,14 +239,14 @@ const Points = (props: IProps): JSX.Element => {
           hideLandlordPoints={props.hideLandlordPoints}
         />
       )}
-      <p>
+      <p className="mt-1 text-sm text-[var(--text-on-felt-soft)]">
         {penaltyDelta === 0
           ? nonLandlordPoints
           : `${nonLandlordPoints} + ${penaltyDelta}`}
         分{props.hideLandlordPoints ? null : ` / ${totalPointsPlayed}分`}{" "}
         {t("points.stolenFrom", { name: landlord?.name ?? "" })} {thresholdStr}
       </p>
-      {playerPointElements}
+      <div className="mt-2 flex flex-wrap gap-2">{playerPointElements}</div>
     </div>
   );
 };

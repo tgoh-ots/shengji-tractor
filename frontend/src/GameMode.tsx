@@ -8,20 +8,27 @@ interface IProps {
 }
 const GameModeE = (props: IProps): JSX.Element => {
   const rules = (
-    <a href="rules.html" target="_blank">
+    <a
+      href="rules.html"
+      target="_blank"
+      rel="noreferrer"
+      className="ml-2 align-middle text-sm font-semibold text-[var(--accent)] underline decoration-[var(--accent)]/40 underline-offset-2"
+    >
       rules
     </a>
   );
   if (props.gameMode === "Tractor") {
     return (
       <span>
-        升级 / <span className="red">Tractor</span> ({rules})
+        升级 <span className="text-[var(--accent)]">Tractor</span>
+        {rules}
       </span>
     );
   } else {
     return (
       <span>
-        找朋友 / <span className="red">Finding Friends</span> ({rules})
+        找朋友 <span className="text-[var(--accent)]">Finding Friends</span>
+        {rules}
       </span>
     );
   }

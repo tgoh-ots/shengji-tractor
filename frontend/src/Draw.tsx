@@ -170,11 +170,11 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
           numDecks={this.props.state.num_decks}
           header={
             <>
-              <h2>
+              <h2 className="mb-2 text-base font-bold uppercase tracking-wide text-[var(--text-on-felt)]">
                 {t("bid.remaining", { count: this.props.state.deck.length })}
               </h2>
               {this.props.state.removed_cards!.length > 0 ? (
-                <p>
+                <p className="text-sm text-[var(--text-on-felt-soft)]">
                   {t("play.removedNote")}{" "}
                   {this.props.state.removed_cards!.map((c) => (
                     <InlineCard key={c} card={c} />
@@ -191,18 +191,19 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
                   this.drawCard();
                 }}
                 disabled={!canDraw}
-                className="big"
+                className="sj-btn sj-btn-primary"
               >
                 {t("bid.drawCard")}
               </button>
-              <label>
-                {t("bid.autoDraw")}
+              <label className="flex items-center gap-2 text-sm font-medium text-[var(--text-on-felt)]">
                 <input
                   type="checkbox"
                   name="autodraw"
+                  className="h-4 w-4 accent-[var(--accent)]"
                   checked={this.state.autodraw}
                   onChange={this.onAutodrawClicked}
                 />
+                {t("bid.autoDraw")}
               </label>
             </>
           }
@@ -229,7 +230,7 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
                         .first_landlord_selection_policy === "ByFirstBid" &&
                         this.props.state.bids[0].id !== playerId)))
                 }
-                className="big"
+                className="sj-btn"
               >
                 {t("bid.pickUpKitty")}
               </button>
@@ -247,7 +248,7 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
                     landlord !== undefined &&
                     players[landlord].level === "NT")
                 }
-                className="big"
+                className="sj-btn"
               >
                 {t("bid.revealCard")}
               </button>

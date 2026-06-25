@@ -174,14 +174,16 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
     const exchangeUI =
       isExchanger && !this.props.state.finalized ? (
         <>
-          <h2>{t("exchange.yourHand")}</h2>
+          <h2 className="mb-2 mt-3 text-base font-bold uppercase tracking-wide text-[var(--text-on-felt)]">
+            {t("exchange.yourHand")}
+          </h2>
           <Cards
             hands={this.props.state.hands}
             playerId={playerId}
             onCardClick={(c) => this.moveCardToKitty(c)}
             trump={this.props.state.trump}
           />
-          <h2>
+          <h2 className="mb-2 mt-4 text-base font-bold uppercase tracking-wide text-[var(--text-on-felt)]">
             {t("exchange.discarded", {
               n: this.props.state.kitty.length,
               total: this.props.state.kitty_size,
@@ -204,7 +206,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
               disabled={
                 this.props.state.kitty.length !== this.props.state.kitty_size
               }
-              className="big"
+              className="sj-btn"
             >
               {t("exchange.finalize")}
             </button>
@@ -222,7 +224,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
             !this.props.state.finalized &&
             this.props.state.autobid === null)
         }
-        className="big"
+        className="sj-btn sj-btn-primary"
       >
         {t("exchange.start")}
       </button>
@@ -248,7 +250,9 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
             jokerBidPolicy={this.props.state.propagated.joker_bid_policy!}
             numDecks={this.props.state.num_decks}
             header={
-              <h2>{t("bid.round", { round: this.props.state.epoch! + 1 })}</h2>
+              <h2 className="mb-2 text-base font-bold uppercase tracking-wide text-[var(--text-on-felt)]">
+                {t("bid.round", { round: this.props.state.epoch! + 1 })}
+              </h2>
             }
             suffixButtons={
               <>
@@ -258,7 +262,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
                     lastBid.id !== playerId ||
                     lastBid.epoch !== this.props.state.epoch
                   }
-                  className="big"
+                  className="sj-btn"
                 >
                   {t("bid.pickUpKitty")}
                 </button>
@@ -302,7 +306,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
               />
             );
           })}
-          <button onClick={this.pickFriends} className="big">
+          <button onClick={this.pickFriends} className="sj-btn sj-btn-primary">
             {t("exchange.pickFriends")}
           </button>
         </div>
@@ -324,7 +328,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
         />
         <Trump trump={this.props.state.trump} />
         {(this.props.state.removed_cards || []).length > 0 ? (
-          <p>
+          <p className="text-sm text-[var(--text-on-felt-soft)]">
             Note:{" "}
             {(this.props.state.removed_cards || []).map((c) => (
               <InlineCard key={c} card={c} />
@@ -341,7 +345,9 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
               playerId={playerId}
               trump={this.props.state.trump}
             />
-            <p>{t("exchange.waiting")}</p>
+            <p className="mt-2 text-sm text-[var(--text-on-felt-soft)]">
+              {t("exchange.waiting")}
+            </p>
           </>
         ) : null}
         {playerId !== nextPlayer && <BeepButton />}

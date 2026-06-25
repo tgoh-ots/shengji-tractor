@@ -141,3 +141,60 @@ export const SettingButton = (
     </button>
   );
 };
+
+interface SettingToggleProps {
+  checked: boolean;
+  onChange: () => void;
+  name?: string;
+  "aria-label"?: string;
+}
+
+/*
+ * A themed on/off switch backed by a real checkbox input (keeps keyboard +
+ * form semantics). Used for boolean settings in the user-preferences pane.
+ */
+export const SettingToggle = (props: SettingToggleProps): JSX.Element => (
+  <label className="sj-toggle" title={props["aria-label"]}>
+    <input
+      type="checkbox"
+      name={props.name}
+      checked={props.checked}
+      onChange={props.onChange}
+      aria-label={props["aria-label"]}
+    />
+    <span className="sj-toggle-track" aria-hidden="true">
+      <span className="sj-toggle-thumb" />
+    </span>
+  </label>
+);
+
+interface SettingToggleRowProps {
+  label: React.ReactNode;
+  hint?: React.ReactNode;
+  checked: boolean;
+  onChange: () => void;
+  name?: string;
+}
+
+/*
+ * A labeled boolean setting row: description on the left, a switch on the
+ * right. Mirrors SettingRow's responsive layout.
+ */
+export const SettingToggleRow = (props: SettingToggleRowProps): JSX.Element => (
+  <div className="flex items-center justify-between gap-4">
+    <span className="flex flex-col text-sm font-medium text-[var(--text-primary)]">
+      <span>{props.label}</span>
+      {props.hint !== undefined ? (
+        <span className="mt-0.5 text-xs font-normal text-[var(--text-secondary)]">
+          {props.hint}
+        </span>
+      ) : null}
+    </span>
+    <SettingToggle
+      checked={props.checked}
+      onChange={props.onChange}
+      name={props.name}
+      aria-label={typeof props.label === "string" ? props.label : undefined}
+    />
+  </div>
+);

@@ -49,10 +49,42 @@ button.normal {
 .errors {
   position: fixed;
   z-index: 100;
-  background: #e11d2e;
+  top: max(12px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  max-width: min(92vw, 420px);
+  padding: 0.65rem 0.9rem;
+  border-radius: var(--radius-xl, 14px);
+  background: #c81e2e;
   color: #fff;
-  padding: 4px 12px;
-  border-radius: 0 0 10px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: 0 8px 24px rgba(122, 12, 22, 0.35);
+  cursor: pointer;
+  animation: sj-play-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.errors-icon {
+  flex: none;
+  line-height: 1.35;
+}
+
+.errors-body {
+  min-width: 0;
+}
+
+.errors-body p {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.errors-body p + p {
+  margin-top: 0.25rem;
 }
 
 .trick {
@@ -309,15 +341,27 @@ button.normal {
 }
 
 .trump {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   margin: 10px 0;
+  padding: 0.3rem 0.75rem;
+  border-radius: 999px;
+  background: rgba(8, 22, 21, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-on-felt, #eef6f3);
+  font-weight: 600;
+  font-size: 0.9rem;
 }
 
 .pending-friends p {
   margin: 0;
+  color: var(--text-on-felt, #eef6f3);
+  font-size: 0.9rem;
 }
 
 .pending-friends {
-  margin: 10px;
+  margin: 10px 0;
 }
 
 .reset-block {

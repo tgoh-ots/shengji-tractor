@@ -20,7 +20,7 @@ import type { JSX } from "react";
 const Confetti = React.lazy(async () => await import("./Confetti"));
 
 const Brand = (): JSX.Element => (
-  <h1 className="m-0 text-2xl font-bold tracking-tight text-[var(--text-on-felt)] sm:text-3xl">
+  <h1 className="m-0 max-w-[min(100%,22rem)] text-2xl font-bold leading-tight tracking-tight text-[var(--text-on-felt)] sm:max-w-none sm:text-3xl">
     升级 <span className="text-[var(--accent)]">Tractor</span>
     <span className="mx-2 text-[var(--text-on-felt-soft)]">·</span>
     找朋友 <span className="text-[var(--accent)]">Finding Friends</span>

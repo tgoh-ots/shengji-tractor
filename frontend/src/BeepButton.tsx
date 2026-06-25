@@ -8,7 +8,7 @@ const BeepButton = (): JSX.Element => {
 
   return (
     <button
-      className="big"
+      className="sj-btn"
       onClick={() =>
         confirm("Do you really want to send a beep to the current player?") &&
         send("Beep")

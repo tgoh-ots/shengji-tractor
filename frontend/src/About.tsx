@@ -134,35 +134,40 @@ const About = (props: IProps): JSX.Element => {
       style={{ content: contentStyle }}
       contentLabel={copy.title}
     >
-      <div className="sj-about">
-        <h2 style={{ marginTop: 0 }}>{copy.title}</h2>
+      <div className="sj-about text-[var(--text-primary)]">
+        <h2 className="m-0 text-xl font-bold tracking-tight">{copy.title}</h2>
 
-        <h3>{copy.builtHeading}</h3>
-        <p style={{ lineHeight: 1.55 }}>{copy.builtBody}</p>
+        <h3 className="mb-1 mt-4 text-sm font-bold uppercase tracking-wide text-[var(--text-secondary)]">
+          {copy.builtHeading}
+        </h3>
+        <p className="m-0 text-sm leading-relaxed text-[var(--text-primary)]">
+          {copy.builtBody}
+        </p>
 
-        <h3>{copy.sourcesHeading}</h3>
-        <ul style={{ lineHeight: 1.7, paddingLeft: "1.2rem" }}>
+        <h3 className="mb-1 mt-4 text-sm font-bold uppercase tracking-wide text-[var(--text-secondary)]">
+          {copy.sourcesHeading}
+        </h3>
+        <ul className="m-0 list-disc space-y-1 pl-5 text-sm leading-relaxed">
           {copy.sources.map((s) => (
             <li key={s.href}>
-              <a href={s.href} target="_blank" rel="noreferrer">
+              <a
+                href={s.href}
+                target="_blank"
+                rel="noreferrer"
+                className="text-[var(--accent)] underline underline-offset-2"
+              >
                 {s.label}
               </a>{" "}
-              — {s.note}
+              <span className="text-[var(--text-secondary)]">— {s.note}</span>
             </li>
           ))}
         </ul>
 
-        <p
-          style={{
-            fontSize: "0.85rem",
-            opacity: 0.8,
-            marginTop: "1rem",
-          }}
-        >
+        <p className="mt-4 text-xs text-[var(--text-secondary)]">
           {copy.licenseNote}
         </p>
 
-        <div style={{ marginTop: "1.25rem", textAlign: "right" }}>
+        <div className="mt-5 text-right">
           <button
             type="button"
             className="sj-btn sj-btn-primary"
