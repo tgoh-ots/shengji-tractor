@@ -24,36 +24,51 @@ gen_training_data ─────────────► data.csv ──► 
 
 ```sh
 # From the repo root. The Omniscient teacher runs a perfect-info search at every
-# recorded decision, so a small budget keeps it fast; bump it for a stronger
-# (slower) teacher.
-GEN_GAMES=800 SHENGJI_BOT_BUDGET_MS=8 \
+# recorded decision. A LARGER budget gives stronger (less noisy) labels; the
+# per-game wall-clock barely grows because the perfect-info search usually
+# converges well before the budget. The shipped model was distilled from
+# 5000 games at a 500ms teacher budget.
+GEN_GAMES=5000 SHENGJI_BOT_BUDGET_MS=500 \
   cargo run --release --example gen_training_data
-# -> writes training/data.csv  (group, f0..f27, label)
+# -> writes training/data.csv  (group, f0..f35, label)
 ```
 
 Each row is one *candidate*; rows sharing a `group` are the candidates of a
 single decision, and exactly one of them has `label == 1` (the teacher's pick).
 The feature encoding is defined once in `core/src/bot/expert.rs`
-(`candidate_features`, `FEATURE_DIM`) and reused by both the exporter and the
+(`candidate_features`, `FEATURE_DIM = 36`) and reused by both the exporter and the
 Rust inference path, so training and serving can never drift.
+
+The 36-feature encoding mixes a compact candidate/trick/hand summary (indices
+0–27) with **honest card-memory** features (28–35) derived from
+`Knowledge::from_play_view`: the fraction of trumps still unseen, my share of the
+live trumps, whether the opponents still to act are known void in the led suit,
+points left unseen, my seat position, whether the candidate is an uncatchable
+top of its suit, and overall game progress. These were the lever that pushed the
+distilled net clearly above Hard — they are all computed from the redacted view
++ public play history (never hidden hands), preserving the honesty invariant.
 
 ### 2. Train + export ONNX (Python)
 
 ```sh
 cd training
-python3 -m venv .venv && . .venv/bin/activate     # optional
+python3 -m venv .venv && . .venv/bin/activate     # recommended
 pip install -r requirements.txt                   # torch + onnx + numpy (large)
 python train_expert.py --data data.csv \
-  --out ../core/src/bot/expert_model.onnx --epochs 60
+  --out ../core/src/bot/expert_model.onnx          # defaults: hidden 128, 200 epochs
 ```
 
-The model is a tiny 2-hidden-layer MLP (`FEATURE_DIM → 64 → 64 → 1`) trained with
-a softmax cross-entropy over each decision's candidates (the teacher's candidate
-should get the top logit). The headline metric is **top-1 accuracy** = fraction
-of decisions where the net's argmax candidate equals the teacher's pick; compare
-it against the printed random-guess baseline (≈ 1 / avg-candidates).
+The model is a 3-hidden-layer MLP (`FEATURE_DIM → 128 → 128 → 64 → 1`) with ReLU
++ dropout, trained with a softmax cross-entropy over each decision's candidates
+(the teacher's candidate should get the top logit). It uses a cosine LR schedule
+and **early stopping** on val top-1 accuracy (`--patience`, default 25). The
+headline metric is **top-1 accuracy** = fraction of decisions where the net's
+argmax candidate equals the teacher's pick; compare it against the printed
+random-guess baseline (≈ 1 / avg-candidates).
 
-It exports `expert_model.onnx` with input `x:[N,28]` → output `[N,1]` (opset 13).
+Dropout is a no-op in eval/export, so the exported graph is just Gemm/ReLU and
+loads cleanly in tract. It exports `expert_model.onnx` with input `x:[N,36]` →
+output `[N,1]` (opset 13, legacy TorchScript exporter via `dynamo=False`).
 
 ### 3. Use it (Rust)
 
@@ -71,11 +86,15 @@ cargo run --release --example eval     # prints Easy/Hard/Expert/Omniscient ladd
 
 ## Training longer / stronger
 
-- More data: raise `GEN_GAMES` (e.g. 2000–5000).
+- More data: raise `GEN_GAMES` (the shipped model used 5000; 8000+ helps a bit
+  more with diminishing returns).
 - Stronger teacher labels: raise `SHENGJI_BOT_BUDGET_MS` during generation so the
-  Omniscient search is deeper (slower).
-- Bigger/longer net: `--hidden 128 --epochs 150`.
-- The feature set is deliberately compact; richer features (per-suit voids
-  inferred from play, remaining-trump counts, seat position relative to the
-  landlord) would raise the ceiling — add them to `candidate_features` in
-  `expert.rs` (bump `FEATURE_DIM`) and regenerate + retrain.
+  Omniscient search is deeper. This is nearly free in wall-clock because the
+  perfect-info search usually converges before the budget.
+- Bigger/longer net: `--hidden 192 --epochs 300` (early stopping caps the cost).
+- Richer honest features are the highest-leverage knob and already include the
+  remaining-trump counts, per-seat voids of the seats still to act, seat
+  position, and uncatchable-top detection (indices 28–35 of
+  `candidate_features`). Further honest signals (e.g. per-suit remaining high
+  cards, landlord-relative seat) can be added there — bump `FEATURE_DIM`, keep
+  the Python `FEATURE_DIM` in sync, and regenerate + retrain.

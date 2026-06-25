@@ -43,7 +43,7 @@ import torch
 import torch.nn as nn
 
 # The feature dimension MUST match `bot::expert::FEATURE_DIM` in the Rust crate.
-FEATURE_DIM = 28
+FEATURE_DIM = 36
 
 
 def load_groups(path):
@@ -88,20 +88,28 @@ def load_groups(path):
 
 
 class CandidateScorer(nn.Module):
-    """Small MLP scoring ONE candidate feature vector -> scalar logit.
+    """MLP scoring ONE candidate feature vector -> scalar logit.
 
-    Kept intentionally tiny (two hidden layers) so it is fast to train on
-    CPU/MPS and cheap to run per-candidate in tract at serving time.
+    A 3-hidden-layer net (`in -> hidden -> hidden -> hidden//2 -> 1`) with ReLU
+    activations and dropout for regularization. Still tiny by ML standards, so it
+    trains in seconds on MPS/CPU and runs per-candidate cheaply in tract at
+    serving time (a few matmuls). Dropout becomes identity in eval/export, so the
+    exported ONNX is just Gemm+ReLU — well within tract's supported op set.
     """
 
-    def __init__(self, in_dim=FEATURE_DIM, hidden=64):
+    def __init__(self, in_dim=FEATURE_DIM, hidden=128, dropout=0.1):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden, hidden),
             nn.ReLU(),
-            nn.Linear(hidden, 1),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, hidden // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden // 2, 1),
         )
 
     def forward(self, x):
@@ -149,20 +157,54 @@ def listwise_loss(model, feats, target, mask):
     return -chosen.mean()
 
 
-def evaluate(model, groups, device):
+def build_eval_tensors(groups, device):
+    """Pre-pad all groups into a single (G, Kmax, D) tensor + (G, Kmax) mask +
+    (G,) targets so evaluation is one vectorized forward pass instead of G tiny
+    per-group passes (which sync the GPU G times and are pathologically slow on
+    MPS for large datasets). Returns None for an empty group list."""
+    if not groups:
+        return None
+    kmax = max(g[0].shape[0] for g in groups)
+    g = len(groups)
+    feats = np.zeros((g, kmax, FEATURE_DIM), dtype=np.float32)
+    mask = np.zeros((g, kmax), dtype=np.float32)
+    target = np.zeros((g,), dtype=np.int64)
+    for i, (X, y) in enumerate(groups):
+        n = X.shape[0]
+        feats[i, :n] = X
+        mask[i, :n] = 1.0
+        target[i] = y
+    return (
+        torch.from_numpy(feats).to(device),
+        torch.from_numpy(mask).to(device),
+        torch.from_numpy(target).to(device),
+    )
+
+
+def evaluate(model, eval_tensors, device, chunk=4096):
     """Top-1 accuracy: fraction of decisions where the model's argmax candidate
-    is the teacher's pick. This is the headline distillation metric."""
+    is the teacher's pick. This is the headline distillation metric. Vectorized
+    over the pre-padded eval tensors, processed in chunks to bound memory, with a
+    single host sync at the end."""
+    if eval_tensors is None:
+        return 0.0
+    feats, mask, target = eval_tensors
+    g, kmax, d = feats.shape
     model.eval()
     correct = 0
+    neg_inf = torch.finfo(feats.dtype).min
     with torch.no_grad():
-        for X, y in groups:
-            t = torch.from_numpy(X).to(device)
-            scores = model(t).reshape(-1)
-            pred = int(torch.argmax(scores).item())
-            if pred == y:
-                correct += 1
+        for start in range(0, g, chunk):
+            fb = feats[start : start + chunk]
+            mb = mask[start : start + chunk]
+            tb = target[start : start + chunk]
+            b = fb.shape[0]
+            logits = model(fb.reshape(b * kmax, d)).reshape(b, kmax)
+            logits = torch.where(mb > 0, logits, torch.full_like(logits, neg_inf))
+            pred = torch.argmax(logits, dim=1)
+            correct += int((pred == tb).sum().item())
     model.train()
-    return correct / max(1, len(groups))
+    return correct / max(1, g)
 
 
 def main():
@@ -174,10 +216,18 @@ def main():
             os.path.dirname(__file__), "..", "core", "src", "bot", "expert_model.onnx"
         ),
     )
-    ap.add_argument("--epochs", type=int, default=60)
-    ap.add_argument("--batch-groups", type=int, default=128)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--hidden", type=int, default=64)
+    ap.add_argument("--epochs", type=int, default=120)
+    ap.add_argument("--batch-groups", type=int, default=512)
+    ap.add_argument("--lr", type=float, default=1.5e-3)
+    ap.add_argument("--hidden", type=int, default=128)
+    ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--weight-decay", type=float, default=1e-5)
+    ap.add_argument(
+        "--patience",
+        type=int,
+        default=25,
+        help="early-stop if val top-1 hasn't improved for this many evals",
+    )
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -218,11 +268,22 @@ def main():
     )
     print(f"Training on {device}.")
 
-    model = CandidateScorer(hidden=args.hidden).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    model = CandidateScorer(hidden=args.hidden, dropout=args.dropout).to(device)
+    opt = torch.optim.Adam(
+        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+    )
+    # Cosine-anneal the learning rate over the full epoch budget for a smooth
+    # decay; combined with early stopping this avoids over/under-fitting.
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
+
+    # Pre-pad eval sets ONCE so per-epoch accuracy is a single vectorized pass.
+    train_eval = build_eval_tensors(train_groups, device)
+    val_eval = build_eval_tensors(val_groups, device)
 
     best_val = -1.0
     best_state = None
+    epochs_since_improve = 0
+    stop = False
     for epoch in range(args.epochs):
         total = 0.0
         nb = 0
@@ -235,21 +296,38 @@ def main():
             opt.step()
             total += float(loss.item())
             nb += 1
+        sched.step()
+        # Evaluate every epoch so early stopping is responsive; printing is
+        # throttled to keep the log readable.
+        val_acc = evaluate(model, val_eval, device)
+        if val_acc > best_val + 1e-4:
+            best_val = val_acc
+            best_state = {
+                k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+            }
+            epochs_since_improve = 0
+        else:
+            epochs_since_improve += 1
         if epoch % 5 == 0 or epoch == args.epochs - 1:
-            tr_acc = evaluate(model, train_groups, device)
-            val_acc = evaluate(model, val_groups, device)
+            tr_acc = evaluate(model, train_eval, device)
             print(
                 f"epoch {epoch:3d}  loss {total / max(1, nb):.4f}  "
-                f"train top-1 {tr_acc:.1%}  val top-1 {val_acc:.1%}"
+                f"train top-1 {tr_acc:.1%}  val top-1 {val_acc:.1%}  "
+                f"(best {best_val:.1%}, lr {sched.get_last_lr()[0]:.2e})"
             )
-            if val_acc > best_val:
-                best_val = val_acc
-                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        if epochs_since_improve >= args.patience:
+            print(
+                f"Early stop at epoch {epoch} "
+                f"(no val improvement for {args.patience} epochs)."
+            )
+            stop = True
+        if stop:
+            break
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    final_val = evaluate(model, val_groups, device)
-    final_train = evaluate(model, train_groups, device)
+    final_val = evaluate(model, val_eval, device)
+    final_train = evaluate(model, train_eval, device)
     print(f"Best val top-1 {final_val:.1%} (train {final_train:.1%}).")
 
     # Export to ONNX (input [N, D] -> output [N, 1]) with a dynamic batch dim.
@@ -258,18 +336,28 @@ def main():
 
 
 def export_onnx(model, out_path):
+    """Export the scorer to ONNX (input `x:[N,D]` -> output `[N,1]` logits).
+
+    We force the legacy TorchScript-based exporter (`dynamo=False`). It produces a
+    minimal Gemm/Relu graph at opset 13 that the pure-Rust `tract-onnx` runtime
+    loads without needing the `onnxscript` package the new dynamo exporter pulls
+    in. Dropout layers are no-ops in eval mode, so they don't appear in the graph.
+    """
     model.eval()
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     dummy = torch.zeros((1, FEATURE_DIM), dtype=torch.float32)
-    torch.onnx.export(
-        model,
-        dummy,
-        out_path,
+    export_kwargs = dict(
         input_names=["x"],
         output_names=["score"],
         dynamic_axes={"x": {0: "N"}, "score": {0: "N"}},
         opset_version=13,
     )
+    try:
+        # PyTorch >= 2.x: explicitly select the legacy exporter.
+        torch.onnx.export(model, dummy, out_path, dynamo=False, **export_kwargs)
+    except TypeError:
+        # Older PyTorch without a `dynamo` kwarg: the legacy path is the default.
+        torch.onnx.export(model, dummy, out_path, **export_kwargs)
 
 
 if __name__ == "__main__":

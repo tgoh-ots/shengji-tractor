@@ -49,14 +49,20 @@
 
 use std::sync::OnceLock;
 
-use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Trump};
+use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Suit, Trump};
 
+use crate::bot::determinize::Knowledge;
 use crate::bot::heuristics::{self};
 use crate::game_state::play_phase::PlayPhase;
 
 /// The fixed length of the per-candidate feature vector. Must match the training
 /// script's input dimension exactly. If you change the encoding, retrain.
-pub const FEATURE_DIM: usize = 28;
+///
+/// Indices 0..=27 are the original compact encoding; 28..=35 are the richer
+/// honest "card-memory" features derived from [`Knowledge::from_play_view`]
+/// (remaining unseen trumps / points, per-seat voids of the seats still to act,
+/// seat position). Adding these raised the distillation ceiling above Hard.
+pub const FEATURE_DIM: usize = 36;
 
 /// The embedded ONNX model (a small MLP scoring one candidate's features to a
 /// scalar logit). If training has not produced a model yet, this file may be a
@@ -108,13 +114,43 @@ fn load_model() -> tract_onnx::prelude::TractResult<Model> {
     Ok(model)
 }
 
+/// Score an explicit set of candidate plays with the learned Expert net,
+/// returning one logit per candidate (higher = the net likes it more), or `None`
+/// if the model is unavailable / failed to run / the input is empty.
+///
+/// This is the shared net-policy primitive: both the single-shot
+/// [`choose_play_expert`] and the net-guided determinized search
+/// ([`crate::bot::search`]) call it so the *same* honest features and the *same*
+/// model drive candidate priors, pruning, and rollout moves.
+///
+/// `p` MUST be the redacted per-player view (the honesty invariant): every
+/// feature is computed from observable information only. The caller owns
+/// candidate generation, so this never reads hidden hands.
+pub fn score_candidates_net(
+    p: &PlayPhase,
+    me: PlayerID,
+    candidates: &[Vec<Card>],
+) -> Option<Vec<f32>> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let model = model()?;
+
+    // Build a [N, FEATURE_DIM] batch and score it in one inference call.
+    let n = candidates.len();
+    let mut flat: Vec<f32> = Vec::with_capacity(n * FEATURE_DIM);
+    for cand in candidates {
+        flat.extend_from_slice(&candidate_features(p, me, cand));
+    }
+    run_model(model, &flat, n)
+}
+
 /// Choose the best legal play for `me` using the learned Expert net, or `None`
 /// if the model is unavailable / produced nothing (caller falls back to Hard).
 ///
 /// `p` MUST be the redacted per-player view (the honesty invariant): every
 /// feature is computed from observable information only.
 pub fn choose_play_expert(p: &PlayPhase, me: PlayerID) -> Option<Vec<Card>> {
-    let model = model()?;
     let leading = p.trick().played_cards().is_empty();
 
     // Generate legal candidates with the SAME generators the heuristic uses.
@@ -130,14 +166,7 @@ pub fn choose_play_expert(p: &PlayPhase, me: PlayerID) -> Option<Vec<Card>> {
         return Some(candidates.into_iter().next().unwrap());
     }
 
-    // Build a [N, FEATURE_DIM] batch and score it in one inference call.
-    let n = candidates.len();
-    let mut flat: Vec<f32> = Vec::with_capacity(n * FEATURE_DIM);
-    for cand in &candidates {
-        flat.extend_from_slice(&candidate_features(p, me, cand));
-    }
-
-    let scores = run_model(model, &flat, n)?;
+    let scores = score_candidates_net(p, me, &candidates)?;
 
     // Argmax over the candidate logits; ties break toward the earlier candidate
     // (candidates are heuristic-ordered-ish via the generators).
@@ -224,6 +253,24 @@ fn norm_strength(s: i32) -> f32 {
 /// Heuristic prior:
 /// * 26 — the heuristic score for this candidate, squashed via tanh
 /// * 27 — bias term (always 1.0) so a tiny linear model still has an intercept
+///
+/// Honest card-memory features (from [`Knowledge::from_play_view`], all derived
+/// from the redacted view + public play history — never hidden hands):
+/// * 28 — fraction of all trumps still UNSEEN by me (in opponents' hidden hands
+///         or the kitty) / total trumps; high ⇒ over-trumping is a real risk
+/// * 29 — my trumps as a share of all still-live (unseen + mine) trumps; high ⇒
+///         I dominate the trump suit and my trumps/leads are safer
+/// * 30 — fraction of the next-to-act opponents that are KNOWN void in the led
+///         suit (0 if leading / nobody known void); informs whether a side-suit
+///         winner is safe or will be trumped
+/// * 31 — at least one opponent yet to act is known void in the led suit (0/1)
+/// * 32 — points still unseen (in hidden hands + kitty) / 100; how much is left
+///         to fight over in the rest of the hand
+/// * 33 — my seat position in the trick: seats that have already acted / 3
+///         (0 = I lead, ~1 = I act last); pairs with f12 (am-I-last)
+/// * 34 — this candidate's max card is a GUARANTEED current winner given what I
+///         can see (no unseen card can beat it in its suit) (0/1)
+/// * 35 — game progress: cards already played this hand / deck size (0=start)
 pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; FEATURE_DIM] {
     let mut f = [0.0f32; FEATURE_DIM];
     let trump = p.trick().trump();
@@ -395,7 +442,180 @@ pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; 
     f[26] = (heur as f32 / 10.0).tanh();
     f[27] = 1.0; // bias
 
+    // --- Honest card-memory features (Knowledge from the redacted view) ---
+    // `Knowledge` reconstructs, purely from observable info, which cards I have
+    // seen (my hand + table + last trick), per-seat established voids, and how
+    // many hidden cards each seat holds. We derive a few high-signal aggregates.
+    let k = Knowledge::from_play_view(p, me);
+
+    // Trump accounting: total trumps in the deck, how many I can see (mine +
+    // played), and therefore how many remain unseen in hidden hands / kitty.
+    let decks = k.num_decks.max(1);
+    let seen_trumps: usize = k
+        .seen
+        .iter()
+        .filter(|(c, _)| trump.effective_suit(**c) == EffectiveSuit::Trump)
+        .map(|(_, &n)| n)
+        .sum();
+    // The full deck has `num_decks` copies of every distinct card. The trump
+    // universe (jokers + trump-number cards + the trump suit's ranks) times the
+    // deck count is the total number of trumps in play.
+    let total_trumps = trump_universe_size(trump) * decks;
+    let unseen_trumps = total_trumps.saturating_sub(seen_trumps);
+    f[28] = if total_trumps > 0 {
+        (unseen_trumps as f32 / total_trumps as f32).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    // My share of all still-live trumps (mine + unseen). High ⇒ I control trump.
+    let my_trumps = f[19] * 14.0; // recover the raw count we stored above
+    let my_trumps = my_trumps.round() as usize;
+    let live_trumps = my_trumps + unseen_trumps;
+    f[29] = if live_trumps > 0 {
+        (my_trumps as f32 / live_trumps as f32).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    // Void awareness for the seats still to act AFTER me in this trick.
+    let led_suit_eff = led_suit;
+    let mut yet_to_act: Vec<PlayerID> = trick.player_queue().collect();
+    // `player_queue` includes me as the head; drop me so we look at opponents
+    // that will respond to this candidate.
+    if yet_to_act.first() == Some(&me) {
+        yet_to_act.remove(0);
+    }
+    let n_after = yet_to_act.len();
+    if let Some(ls) = led_suit_eff {
+        let void_after = yet_to_act
+            .iter()
+            .filter(|pid| k.voids.get(pid).map(|vs| vs.contains(&ls)).unwrap_or(false))
+            .count();
+        f[30] = if n_after > 0 {
+            (void_after as f32 / n_after as f32).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        f[31] = if void_after > 0 { 1.0 } else { 0.0 };
+    }
+
+    // Points still unseen (in hidden hands + kitty): total deck points minus the
+    // points I have already seen on the table / in my hand / last trick.
+    let total_points = 100 * decks; // 100 points per 54-card deck (5/10/K × …)
+    let mut seen_points = 0usize;
+    for (card, &seen) in &k.seen {
+        if let Some(pts) = card.points() {
+            seen_points += pts * seen;
+        }
+    }
+    let unseen_points = total_points.saturating_sub(seen_points);
+    f[32] = (unseen_points as f32 / 100.0).min(1.0);
+
+    // Seat position: how many seats already acted this trick (0 = I lead).
+    let acted = trick.played_cards().len();
+    f[33] = (acted as f32 / 3.0).min(1.0);
+
+    // Guaranteed winner: this candidate's strongest card cannot be beaten in its
+    // effective suit by any card I have NOT seen (so it is currently uncatchable
+    // by a same-suit response). Only meaningful when leading or following suit.
+    let strongest = cards
+        .iter()
+        .max_by_key(|c| card_strength_pub(trump, **c))
+        .copied();
+    f[34] = strongest
+        .map(|c| is_guaranteed_top(&k, trump, c))
+        .map(|g| if g { 1.0 } else { 0.0 })
+        .unwrap_or(0.0);
+
+    // Game progress: roughly how much of the hand has been revealed in play.
+    // `k.seen` counts my hand + the table + the last trick; subtracting my own
+    // hand gives a proxy for cards already played, normalized by the deck size.
+    let seen_total: usize = k.seen.values().sum();
+    let my_hand = (f[18] * 27.0).round() as usize;
+    let revealed = seen_total.saturating_sub(my_hand);
+    let deck_size = 54 * decks;
+    f[35] = (revealed as f32 / deck_size as f32).clamp(0.0, 1.0);
+
     f
+}
+
+/// Number of distinct-position trump cards in a SINGLE deck for `trump`:
+/// 2 jokers + the trump-number cards + the 13 ranks of the trump suit (when
+/// there is a trump suit). For NoTrump the trump set is just the two jokers plus
+/// the four trump-number cards.
+fn trump_universe_size(trump: Trump) -> usize {
+    match trump {
+        Trump::NoTrump { number } => {
+            // jokers (2) + the four number cards of that rank (one per suit).
+            let number_cards = if number.is_some() { 4 } else { 0 };
+            2 + number_cards
+        }
+        Trump::Standard { number: _, suit: _ } => {
+            // jokers (2) + 13 ranks of the trump suit + 3 off-suit number cards
+            // (the trump-suit number card is already counted in the 13).
+            2 + 13 + 3
+        }
+    }
+}
+
+/// Whether `card` cannot be beaten, within its own effective suit, by any card
+/// the acting player has NOT yet seen. Jokers and the trump-suit trump-number
+/// card are always guaranteed; otherwise we check no higher same-suit card
+/// remains unseen. This is an HONEST upper-bound (it only uses `k.seen`).
+fn is_guaranteed_top(k: &Knowledge, trump: Trump, card: Card) -> bool {
+    let s = card_strength_pub(trump, card);
+    // The big joker (and a trump-suit trump-number when no joker outranks it) are
+    // unconditional tops.
+    if s >= 1000 {
+        return true;
+    }
+    let eff = trump.effective_suit(card);
+    // Scan the unseen pool for a same-effective-suit card that outranks `card`.
+    let decks = k.num_decks.max(1);
+    for higher in stronger_cards_in_suit(trump, eff, s) {
+        let total = decks;
+        let seen = k.seen.get(&higher).copied().unwrap_or(0);
+        if total > seen {
+            // At least one copy of a stronger same-suit card is still unseen.
+            return false;
+        }
+    }
+    true
+}
+
+/// Enumerate the cards in effective-suit `eff` whose strength strictly exceeds
+/// `floor` (used to test whether a card is the uncatchable top of its suit).
+fn stronger_cards_in_suit(trump: Trump, eff: EffectiveSuit, floor: i32) -> Vec<Card> {
+    let mut out: Vec<Card> = Vec::new();
+    let mut consider = |c: Card| {
+        if trump.effective_suit(c) == eff && card_strength_pub(trump, c) > floor {
+            out.push(c);
+        }
+    };
+    consider(Card::BigJoker);
+    consider(Card::SmallJoker);
+    let suits = [Suit::Clubs, Suit::Diamonds, Suit::Hearts, Suit::Spades];
+    let numbers = [
+        Number::Two,
+        Number::Three,
+        Number::Four,
+        Number::Five,
+        Number::Six,
+        Number::Seven,
+        Number::Eight,
+        Number::Nine,
+        Number::Ten,
+        Number::Jack,
+        Number::Queen,
+        Number::King,
+        Number::Ace,
+    ];
+    for suit in suits {
+        for number in numbers {
+            consider(Card::Suited { number, suit });
+        }
+    }
+    out
 }
 
 /// Public re-export of the heuristic's card-strength metric so this module's

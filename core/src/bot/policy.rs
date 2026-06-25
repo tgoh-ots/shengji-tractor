@@ -34,7 +34,7 @@ use shengji_mechanics::trick::{TractorRequirements, TrickUnit};
 use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Rank, Suit, Trump};
 
 use crate::bot::heuristics::{self, ScoredPlay};
-use crate::bot::search::{search_play, search_play_perfect_info, SearchConfig};
+use crate::bot::search::{search_play, search_play_perfect_info, Policy, SearchConfig};
 use crate::bot::BotDifficulty;
 use crate::game_state::play_phase::PlayPhase;
 use crate::game_state::GameState;
@@ -213,34 +213,50 @@ fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Ca
             max_candidates: knobs.search_candidates,
             rollout_tricks: knobs.rollout_tricks,
             seed: rng.gen(),
+            policy: Policy::Heuristic,
+            rollout_policy: Policy::Heuristic,
         };
         if let Some(cards) = search_play_perfect_info(p, me, config) {
             return cards;
         }
     }
 
-    // Expert (learned net): score every legal candidate with the distilled MLP
-    // over HONEST per-candidate features and take the best. This is the sole
-    // perfect-info-approximating path; it reads ONLY the redacted view `p`. If
-    // the model can't run (failed to load, no candidates, etc.) we fall through
-    // to the Hard determinized search below, so Expert is never illegal/None.
-    if matches!(difficulty, BotDifficulty::Expert) {
-        if let Some(cards) = crate::bot::expert::choose_play_expert(p, me) {
-            return cards;
-        }
-    }
-
-    // Hard / Expert-fallback: time-boxed determinized search. The wall-clock budget
-    // defaults to 1000ms but can be lowered via `SHENGJI_BOT_BUDGET_MS` (used by
-    // the self-play eval harness to keep large runs fast). The cap guarantees a
-    // slow CPU degrades to fewer simulations rather than hanging.
+    // Hard / Expert: time-boxed determinized search over sampled worlds. Both
+    // tiers share the SAME search machinery (determinizer + world sampling +
+    // rollouts + the static leaf evaluator); the ONLY difference is the POLICY
+    // that supplies the candidate prior (root pruning):
+    //
+    //   * Hard   → `Policy::Heuristic` prior + heuristic rollouts (the classic
+    //              hand-written backbone search).
+    //   * Expert → `Policy::Net` PRIOR (the distilled learned net ranks/prunes the
+    //              root candidates) + heuristic rollouts. The net is a far better
+    //              *root prior* than it is a cheap deep-rollout policy, so we use
+    //              it where it pays off (choosing which candidates to search) and
+    //              keep the fast heuristic for the many rollout plies. This is
+    //              AlphaZero-lite: search + a learned policy prior, static leaf
+    //              value unchanged. If the net can't run, the prior transparently
+    //              falls back to the heuristic, so Expert is never illegal/None.
+    //
+    // The wall-clock budget defaults to 1000ms but can be lowered via
+    // `SHENGJI_BOT_BUDGET_MS` (used by the self-play eval harness to keep large
+    // runs fast). The cap guarantees a slow CPU degrades to fewer simulations
+    // rather than hanging. Both honest tiers read ONLY the redacted view `p`.
     if knobs.search_worlds > 0 {
+        let prior = if matches!(difficulty, BotDifficulty::Expert) {
+            Policy::Net
+        } else {
+            Policy::Heuristic
+        };
         let config = SearchConfig {
             time_budget: Duration::from_millis(search_budget_ms()),
             max_worlds: knobs.search_worlds,
             max_candidates: knobs.search_candidates.max(1),
             rollout_tricks: knobs.rollout_tricks,
             seed: rng.gen(),
+            policy: prior,
+            // Rollouts always use the cheap heuristic default policy (see the
+            // `rollout_policy` doc on `SearchConfig`).
+            rollout_policy: Policy::Heuristic,
         };
         if let Some(cards) = search_play(p, me, config) {
             return cards;
