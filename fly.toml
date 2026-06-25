@@ -32,11 +32,14 @@ primary_region = "iad"   # pick one near your players: https://fly.io/docs/refer
 [http_service]
   internal_port = 3030
   force_https = true
-  # Pay-per-use: stop the machine when idle, start it on the next request.
-  # Wake is ~1-2s; the game's reconnect-by-name already covers the brief gap,
-  # so mid-game wakes are seamless. Set min_machines_running = 1 for always-on
-  # (no cold start) at slightly higher cost.
-  auto_stop_machines = "stop"
+  # Pay-per-use, but SUSPEND (not stop) when idle so the machine's RAM — and
+  # therefore the in-memory game rooms — survive the idle->wake cycle. With
+  # "stop" the process was killed and every room lost, so a player who dropped
+  # mid-game could not rejoin (the room no longer existed). "suspend" snapshots
+  # RAM and restores it on wake, so reconnect-by-name actually has a room to
+  # rejoin. NOTE: a full redeploy (new image) still resets all rooms; set
+  # min_machines_running = 1 for always-on if even that must be avoided.
+  auto_stop_machines = "suspend"
   auto_start_machines = true
   min_machines_running = 0
   # WebSocket-friendly: a single concurrent-request soft/hard cap that comfortably
