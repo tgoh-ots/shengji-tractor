@@ -30,6 +30,9 @@ const en: Dict = {
   "common.you": "You",
   "common.rank": "rank",
 
+  // Brand / navigation
+  "brand.home": "Leave room and return to the home screen",
+
   // Language / settings toggles
   "toolbar.language": "中文",
   "toolbar.settings": "Settings",
@@ -163,6 +166,8 @@ const zh: Dict = {
     "出现了错误，请尝试刷新页面！如果仍未解决，请使用最新版本的 Firefox 或 Chrome 浏览器。",
   "common.you": "你",
   "common.rank": "级",
+
+  "brand.home": "离开房间并返回主页",
 
   "toolbar.language": "English",
   "toolbar.settings": "设置",

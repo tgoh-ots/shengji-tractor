@@ -19,22 +19,48 @@ import type { JSX } from "react";
 
 const Confetti = React.lazy(async () => await import("./Confetti"));
 
-const Brand = (): JSX.Element => (
-  <h1 className="m-0 max-w-[min(100%,11rem)] text-xl font-bold leading-tight tracking-tight text-[var(--text-on-felt)] sm:max-w-none sm:text-3xl">
-    升级 <span className="text-[var(--accent)]">Tractor</span>
-    <span className="mx-2 hidden text-[var(--text-on-felt-soft)] sm:inline">
-      ·
-    </span>
-    <span className="hidden sm:inline">
-      找朋友 <span className="text-[var(--accent)]">Finding Friends</span>
-    </span>
-  </h1>
-);
+const Brand = ({ onGoHome }: { onGoHome: () => void }): JSX.Element => {
+  const { t } = useTranslation();
+  return (
+    <h1 className="m-0 max-w-[min(100%,11rem)] text-xl font-bold leading-tight tracking-tight sm:max-w-none sm:text-3xl">
+      <button
+        type="button"
+        onClick={onGoHome}
+        title={t("brand.home")}
+        aria-label={t("brand.home")}
+        className="m-0 cursor-pointer border-0 bg-transparent p-0 text-left font-bold leading-tight tracking-tight text-[var(--text-on-felt)] transition-opacity hover:opacity-80 focus-visible:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-transparent"
+      >
+        升级 <span className="text-[var(--accent)]">Tractor</span>
+        <span className="mx-2 hidden text-[var(--text-on-felt-soft)] sm:inline">
+          ·
+        </span>
+        <span className="hidden sm:inline">
+          找朋友 <span className="text-[var(--accent)]">Finding Friends</span>
+        </span>
+      </button>
+    </h1>
+  );
+};
 
 const Root = (): JSX.Element => {
   const { state, updateState } = React.useContext(AppStateContext);
   const timerContext = React.useContext(TimerContext);
   const { t } = useTranslation();
+
+  // Leave the current room and return to the JoinRoom landing screen.
+  //
+  // The server permanently binds a WebSocket to a single room (see
+  // shengji_handler::handle_user_connected, which subscribes the socket to one
+  // room for the life of the connection). There is no "leave room" protocol on
+  // the same socket, so the clean way to drop out of a room and start fresh is
+  // to clear the room from the URL hash and reload: the page boots a brand-new
+  // WebSocket that lands on JoinRoom (gameState === null), with no dangling
+  // socket left behind. This mirrors the existing hash-based navigation used by
+  // ResetButton / Initialize.
+  const goHome = (): void => {
+    window.location.hash = "";
+    window.location.reload();
+  };
 
   const [previousHeaderMessages, setPreviousHeaderMessages] = React.useState<
     string[]
@@ -74,7 +100,7 @@ const Root = (): JSX.Element => {
           {headerMessages}
           <Errors errors={state.errors} />
           <div className="mx-auto w-full max-w-3xl px-4 py-8 sm:py-12">
-            <Brand />
+            <Brand onGoHome={goHome} />
             <div className="sj-panel mt-6 p-5 sm:p-7">
               <JoinRoom
                 name={state.name}
@@ -112,6 +138,9 @@ const Root = (): JSX.Element => {
             </React.Suspense>
           ) : null}
           <div className="sj-table-shell mx-auto w-full max-w-[1200px] px-3 pb-24 pt-3 sm:px-5">
+            <div className="mb-3">
+              <Brand onGoHome={goHome} />
+            </div>
             <div className="game">
               {"Initialize" in state.gameState ? null : (
                 <ResetButton state={state.gameState} name={state.name} />
@@ -169,7 +198,7 @@ const Root = (): JSX.Element => {
       <div className="min-h-[100dvh]">
         <Toolbar />
         <div className="mx-auto w-full max-w-3xl px-4 py-12">
-          <Brand />
+          <Brand onGoHome={goHome} />
           <div className="sj-panel mt-6 p-6 text-[var(--text-primary)]">
             <p>{t("app.welcome")}</p>
             <p>{t("app.connecting")}</p>
