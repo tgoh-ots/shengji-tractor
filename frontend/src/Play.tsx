@@ -338,6 +338,7 @@ const Play = (props: IProps): JSX.Element => {
         bots={playPhase.propagated.bots}
         landlord={playPhase.landlord}
         landlordsTeam={playPhase.landlords_team}
+        gameMode={playPhase.game_mode}
         next={nextPlayer}
         selfId={currentPlayer.id}
         status={

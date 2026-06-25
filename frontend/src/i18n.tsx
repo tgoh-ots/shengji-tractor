@@ -108,6 +108,23 @@ const en: Dict = {
   "play.seat.right": "Right",
   "play.waitingTurn": "Waiting for other players...",
 
+  // Team / allegiance roles on the table
+  "team.you": "You",
+  "team.declarer": "Declarer",
+  "team.declarerTitle": "Declarer — set the trump suit",
+  "team.teammate": "Declarer's team",
+  "team.teammateTitle": "On the declarer's team",
+  "team.opponent": "Opponents",
+  "team.opponentTitle": "On the opposing team",
+  "team.unknown": "Unknown",
+  "team.unknownTitle":
+    "Allegiance not yet revealed — could be a friend or an opponent",
+  "team.legend.declarerSide": "Declarer's side",
+  "team.legend.opponents": "Opponents",
+  "team.legend.unknown": "Unknown",
+  "team.youAreDeclarerSide": "You're on the declarer's side",
+  "team.youAreOpponents": "You're on the opposing side",
+
   // Trump display
   "trump.suitIs": "The trump suit is",
   "trump.rank": "rank",
@@ -234,6 +251,22 @@ const zh: Dict = {
   "play.seat.across": "对家",
   "play.seat.right": "右家",
   "play.waitingTurn": "等待其他玩家…",
+
+  // Team / allegiance roles on the table
+  "team.you": "你",
+  "team.declarer": "庄家",
+  "team.declarerTitle": "庄家 — 定下了主牌花色",
+  "team.teammate": "庄家方",
+  "team.teammateTitle": "属于庄家一方",
+  "team.opponent": "对方",
+  "team.opponentTitle": "属于对方（闲家）一方",
+  "team.unknown": "未知",
+  "team.unknownTitle": "身份尚未亮明 — 可能是朋友也可能是对方",
+  "team.legend.declarerSide": "庄家方",
+  "team.legend.opponents": "对方",
+  "team.legend.unknown": "未知",
+  "team.youAreDeclarerSide": "你属于庄家方",
+  "team.youAreOpponents": "你属于对方",
 
   "trump.suitIs": "主牌花色为",
   "trump.rank": "级",

@@ -1,6 +1,6 @@
 import * as React from "react";
 import classNames from "classnames";
-import { Player, BotRegistration } from "./gen-types";
+import { Player, BotRegistration, GameMode } from "./gen-types";
 import { useTranslation } from "./i18n";
 
 import type { JSX } from "react";
@@ -13,15 +13,31 @@ import type { JSX } from "react";
  * fill the left / top (across) / right seats. On portrait/mobile the grid
  * reflows so the opponents become a compact top strip and the hand stays at
  * the bottom (see .sj-table in style.css).
+ *
+ * Each seat is color-coded by team allegiance so players can tell at a glance
+ * who is on whose side (see TeamRole / seatTeamRole below):
+ *   - "declarer"  — the landlord who set trump (amber team color + 👑)
+ *   - "teammate"  — a revealed member of the landlord's team (amber team color)
+ *   - "opponent"  — a known member of the opposing team (cool cyan color)
+ *   - "unknown"   — allegiance not yet revealed (FindingFriends only; neutral)
  */
 
 export type SeatKey = "bottom" | "left" | "top" | "right";
+
+/** A player's allegiance, as far as it can be known right now. */
+type TeamRole = "declarer" | "teammate" | "opponent" | "unknown";
 
 interface IProps {
   players: Player[];
   bots?: BotRegistration[];
   landlord?: number | null;
   landlordsTeam?: number[];
+  /**
+   * The active game mode. In fixed-partnership "Tractor" every player not on
+   * the landlord's team is a *known* opponent. In FindingFriends, friends are
+   * revealed over the hand, so an unrevealed player has unknown allegiance.
+   */
+  gameMode?: GameMode;
   next?: number | null;
   /** The local player's id (-1 if spectating). */
   selfId: number;
@@ -39,10 +55,43 @@ const SEAT_CLASS: Record<SeatKey, string> = {
   right: "sj-seat-right",
 };
 
+const ROLE_CLASS: Record<TeamRole, string> = {
+  declarer: "is-team-declarer",
+  teammate: "is-team-declarer",
+  opponent: "is-team-opponent",
+  unknown: "is-team-unknown",
+};
+
+/**
+ * Determine a player's team role given the current game state.
+ *
+ * Pure presentation — does not change any game logic.
+ */
+const seatTeamRole = (
+  id: number,
+  landlord: number | null | undefined,
+  landlordsTeam: number[] | undefined,
+  gameMode: GameMode | undefined,
+): TeamRole => {
+  if (landlord !== undefined && landlord !== null && id === landlord) {
+    return "declarer";
+  }
+  if (landlordsTeam?.includes(id) ?? false) {
+    return "teammate";
+  }
+  // Not on the landlord's team. In fixed-partnership Tractor this player is a
+  // definitively-known opponent. In FindingFriends a player who isn't (yet) on
+  // the landlord's team could be an unrevealed friend OR an opponent, so we
+  // mark them as unknown until they're revealed.
+  const isFindingFriends = gameMode !== undefined && gameMode !== "Tractor";
+  return isFindingFriends ? "unknown" : "opponent";
+};
+
 const Seat = (props: {
   player: Player | null;
   seat: SeatKey;
-  isLandlord: boolean;
+  role: TeamRole;
+  isSelf: boolean;
   isTurn: boolean;
   bot?: BotRegistration;
 }): JSX.Element | null => {
@@ -59,36 +108,68 @@ const Seat = (props: {
           ? "play.seat.across"
           : "play.seat.right";
 
+  const role = props.role;
+  const roleLabelKey =
+    role === "declarer"
+      ? "team.declarer"
+      : role === "teammate"
+        ? "team.teammate"
+        : role === "opponent"
+          ? "team.opponent"
+          : "team.unknown";
+  const roleTitleKey =
+    role === "declarer"
+      ? "team.declarerTitle"
+      : role === "teammate"
+        ? "team.teammateTitle"
+        : role === "opponent"
+          ? "team.opponentTitle"
+          : "team.unknownTitle";
+
   return (
     <div className={classNames("sj-seat", SEAT_CLASS[props.seat])}>
       <span
-        className={classNames("sj-seat-name", {
-          "is-landlord": props.isLandlord,
+        className={classNames("sj-seat-name", ROLE_CLASS[role], {
+          "is-self": props.isSelf,
           "is-turn": props.isTurn,
         })}
-        title={`${props.player.name} · ${t(seatLabelKey)}`}
+        title={`${props.player.name} · ${t(seatLabelKey)} · ${t(roleTitleKey)}`}
       >
         {props.bot !== undefined && <span aria-hidden="true">🤖</span>}
         <span className="overflow-hidden text-ellipsis">
           {props.player.name}
         </span>
-        {props.isLandlord && (
+        {role === "declarer" && (
           <span aria-hidden="true" title={t("term.banker")}>
             👑
           </span>
         )}
       </span>
-      {props.bot !== undefined && (
-        <span className="sj-seat-badge">
-          {t(`ai.difficulty.${props.bot.difficulty}`)}
+      <span className="sj-seat-tags">
+        {props.isSelf && (
+          <span className="sj-seat-tag sj-seat-tag-you">{t("team.you")}</span>
+        )}
+        <span
+          className={classNames("sj-seat-tag", "sj-seat-tag-role", {
+            [`sj-seat-tag-${role}`]: true,
+          })}
+        >
+          {t(roleLabelKey)}
+          {role === "unknown" && "?"}
         </span>
-      )}
+        {props.bot !== undefined && (
+          <span className="sj-seat-tag sj-seat-badge">
+            {t(`ai.difficulty.${props.bot.difficulty}`)}
+          </span>
+        )}
+      </span>
       {props.isTurn && <span className="sr-only">{t("rail.yourTurn")}</span>}
     </div>
   );
 };
 
 const Table = (props: IProps): JSX.Element => {
+  const { t } = useTranslation();
   const botById = React.useMemo(() => {
     const m: Record<number, BotRegistration> = {};
     (props.bots ?? []).forEach((b) => {
@@ -122,8 +203,26 @@ const Table = (props: IProps): JSX.Element => {
     }));
   }, [props.players, props.selfId]);
 
-  const isLandlord = (id: number): boolean =>
-    id === props.landlord || (props.landlordsTeam?.includes(id) ?? false);
+  const roleOf = (id: number): TeamRole =>
+    seatTeamRole(id, props.landlord, props.landlordsTeam, props.gameMode);
+
+  // Which side is the local player on? Drives the "you're on the X side"
+  // emphasis banner. Spectators / unknown don't get a side callout.
+  const selfRole =
+    props.selfId >= 0 && props.players.some((p) => p.id === props.selfId)
+      ? roleOf(props.selfId)
+      : null;
+  const selfSideKey =
+    selfRole === "declarer" || selfRole === "teammate"
+      ? "team.youAreDeclarerSide"
+      : selfRole === "opponent"
+        ? "team.youAreOpponents"
+        : null;
+
+  // A neutral allegiance only exists in FindingFriends.
+  const hasUnknownSeats = seatAssignments.some(
+    ({ player }) => roleOf(player.id) === "unknown",
+  );
 
   return (
     <div className="sj-table" role="group" aria-label="game table">
@@ -135,12 +234,40 @@ const Table = (props: IProps): JSX.Element => {
           key={player.id}
           player={player}
           seat={seat}
-          isLandlord={isLandlord(player.id)}
+          role={roleOf(player.id)}
+          isSelf={player.id === props.selfId}
           isTurn={player.id === props.next}
           bot={botById[player.id]}
         />
       ))}
       <div className="sj-center">{props.center}</div>
+      <div className="sj-team-legend" aria-hidden="true">
+        {selfSideKey !== null && (
+          <span
+            className={classNames("sj-team-legend-self", {
+              "is-declarer-side":
+                selfRole === "declarer" || selfRole === "teammate",
+              "is-opponent-side": selfRole === "opponent",
+            })}
+          >
+            {t(selfSideKey)}
+          </span>
+        )}
+        <span className="sj-team-legend-key">
+          <span className="sj-team-swatch sj-team-swatch-declarer" />
+          {t("team.legend.declarerSide")}
+        </span>
+        <span className="sj-team-legend-key">
+          <span className="sj-team-swatch sj-team-swatch-opponent" />
+          {t("team.legend.opponents")}
+        </span>
+        {hasUnknownSeats && (
+          <span className="sj-team-legend-key">
+            <span className="sj-team-swatch sj-team-swatch-unknown" />
+            {t("team.legend.unknown")}
+          </span>
+        )}
+      </div>
     </div>
   );
 };
