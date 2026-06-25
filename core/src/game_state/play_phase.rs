@@ -696,6 +696,12 @@ impl PlayPhase {
         None
     }
 
+    /// The player (if any) who has an outstanding, unconfirmed reset request.
+    /// A reset only completes once a *second*, distinct player also requests it.
+    pub fn player_requested_reset(&self) -> Option<PlayerID> {
+        self.player_requested_reset
+    }
+
     fn return_to_initialize(&self) -> Result<(InitializePhase, Vec<MessageVariant>), Error> {
         let mut msgs = vec![MessageVariant::ResettingGame];
 

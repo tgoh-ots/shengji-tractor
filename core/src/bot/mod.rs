@@ -125,6 +125,28 @@ pub fn advance_bots(
 fn next_bot_action(game: &mut InteractiveGame) -> Result<Option<(PlayerID, Action)>, Error> {
     let state = game.dump_state()?;
 
+    // A reset is a two-player confirmation vote: the first `Action::ResetGame`
+    // only records the requester and stays in-phase, and the reset completes
+    // only when a SECOND, distinct player also requests it. Bots never request a
+    // reset on their own, so in a human+bots room a human's request would hang
+    // forever ("Waiting for confirmation..."). If a request is pending, have an
+    // eligible bot (any bot seat that is NOT the requester) CONFIRM it. This is
+    // strictly a confirmation of an already-pending request — a bot never
+    // spontaneously starts a reset — and it takes priority over normal play so
+    // the table returns to the lobby promptly. After it completes the game is
+    // back in Initialize, where this function returns `None` (no auto-start).
+    if let Some(requester) = state.player_requested_reset() {
+        if let Some(confirmer) = state
+            .propagated()
+            .players()
+            .iter()
+            .map(|p| p.id)
+            .find(|id| *id != requester && bot_for(&state, *id).is_some())
+        {
+            return Ok(Some((confirmer, Action::ResetGame)));
+        }
+    }
+
     match &state {
         GameState::Initialize(_) => Ok(None),
         GameState::Draw(p) => {

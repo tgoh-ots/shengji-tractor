@@ -47,6 +47,20 @@ impl GameState {
         }
     }
 
+    /// The player (if any) who has an outstanding, unconfirmed reset request in
+    /// the current phase. A reset is a two-player confirmation vote: it only
+    /// completes once a *second*, distinct player also issues `Action::ResetGame`
+    /// (see the per-phase `request_reset`). The lobby (Initialize) phase has no
+    /// pending-reset concept.
+    pub fn player_requested_reset(&self) -> Option<PlayerID> {
+        match self {
+            GameState::Initialize(_) => None,
+            GameState::Draw(p) => p.player_requested_reset(),
+            GameState::Exchange(p) => p.player_requested_reset(),
+            GameState::Play(p) => p.player_requested_reset(),
+        }
+    }
+
     pub fn is_player(&self, id: PlayerID) -> bool {
         self.propagated().players.iter().any(|p| p.id == id)
     }

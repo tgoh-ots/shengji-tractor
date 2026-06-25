@@ -733,3 +733,143 @@ fn test_omniscient_self_play_runs_to_finished_hand() {
         }
     }
 }
+
+// ===========================================================================
+// Reset-with-bots regression.
+//
+// Production bug: requesting a game reset in a room that has AI bots freezes.
+// A reset is a TWO-player confirmation vote: the FIRST `Action::ResetGame`
+// records `player_requested_reset = Some(requester)` and stays in-phase; the
+// reset only completes when a SECOND, DIFFERENT player requests it. Bots never
+// send `Action::ResetGame`, so with one human + bots the request can never be
+// confirmed and the human is stuck on "Waiting for confirmation..." forever.
+//
+// The fix lets bots AUTO-CONFIRM an already-pending reset from inside
+// `advance_bots`. These tests reproduce the exact handler sequence (human
+// action -> advance_bots) and assert the reset terminates quickly and yields a
+// clean, playable lobby with the bots still seated.
+// ===========================================================================
+
+/// Build a 1-human + 3-bot Tractor game and drive it (exactly as the backend
+/// handler does: human action then `advance_bots`) until it reaches a mid-Play
+/// state where it is the human's turn. Returns the game, the human id, and all
+/// four seated ids (host first, then the three bots).
+fn human_plus_bots_in_play(
+    logger: &Logger,
+    difficulty: BotDifficulty,
+) -> (InteractiveGame, PlayerID, Vec<PlayerID>) {
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".to_string()).unwrap();
+    let mut bot_ids = vec![];
+    for _ in 0..3 {
+        let msgs = game
+            .interact(Action::AddAIPlayer { difficulty }, host, logger)
+            .unwrap();
+        bot_ids.push(added_bot_id(&msgs));
+    }
+    game.interact(Action::StartGame, host, logger).unwrap();
+
+    let mut all_ids = vec![host];
+    all_ids.extend(bot_ids.iter().copied());
+
+    for _ in 0..5000 {
+        advance_bots(&mut game, logger).unwrap();
+        match &game.dump_state().unwrap() {
+            GameState::Play(p) if !p.game_finished() && !p.hands().is_empty() => {
+                if p.next_player().map(|n| n == host).unwrap_or(false) {
+                    return (game, host, all_ids);
+                }
+                if game.interact(Action::EndTrick, host, logger).is_err() {
+                    break;
+                }
+            }
+            GameState::Draw(p)
+                if !p.done_drawing() && p.next_player().map(|n| n == host).unwrap_or(false) =>
+            {
+                let _ = game.interact(Action::DrawCard, host, logger);
+            }
+            _ => {}
+        }
+    }
+    panic!("game never reached a mid-Play state on the human's turn");
+}
+
+/// The handler applies a human action and then drives bots within one locked
+/// operation; mirror that here. `advance_bots` carries a bounded-iteration
+/// guard, so a genuine hang surfaces as a test failure rather than a wall-clock
+/// timeout.
+fn apply_human_action(game: &mut InteractiveGame, action: Action, who: PlayerID, logger: &Logger) {
+    game.interact(action, who, logger).unwrap();
+    advance_bots(game, logger).unwrap();
+}
+
+/// Regression: a single human requesting a reset in a room full of bots must
+/// return the table to a clean, playable lobby. Before the fix the reset
+/// required a confirmation from a second human, which never arrived, so the
+/// reset stayed pending forever and the UI hung on "Waiting for
+/// confirmation...".
+#[test]
+fn test_reset_with_bots_returns_to_lobby() {
+    let logger = null_logger();
+    let (mut game, host, all_ids) = human_plus_bots_in_play(&logger, BotDifficulty::Easy);
+
+    // The human clicks "Reset game". This is the only human at the table; the
+    // bots must confirm it for the reset to complete.
+    apply_human_action(&mut game, Action::ResetGame, host, &logger);
+
+    // The table must be back in the lobby, ready to start again.
+    let state = game.dump_state().unwrap();
+    match &state {
+        GameState::Initialize(_) => {}
+        other => panic!(
+            "reset with bots did not return to the lobby; got {:?}",
+            other
+        ),
+    }
+
+    // All four seats (host + three bots) are still seated, and the bots are
+    // still registered as bots.
+    let players = state.propagated().players();
+    assert_eq!(players.len(), 4, "all four seats should remain after reset");
+    for id in &all_ids {
+        assert!(
+            players.iter().any(|p| p.id == *id),
+            "seat {:?} should still be present after reset",
+            id
+        );
+    }
+    let bot_count = all_ids
+        .iter()
+        .filter(|id| state.propagated().is_bot(**id).is_some())
+        .count();
+    assert_eq!(bot_count, 3, "the three bots must still be registered");
+    assert_eq!(
+        state.propagated().is_bot(host),
+        None,
+        "the human must not be a bot"
+    );
+
+    // The lobby is playable again: starting the game and driving the bots makes
+    // forward progress (and `advance_bots` must NOT auto-start anything itself).
+    apply_human_action(&mut game, Action::StartGame, host, &logger);
+    match game.dump_state().unwrap() {
+        GameState::Draw(_) | GameState::Exchange(_) | GameState::Play(_) => {}
+        other => panic!("game did not start cleanly after reset; got {:?}", other),
+    }
+}
+
+/// The same reset must terminate quickly even at a heavier (search-backed) tier,
+/// proving `advance_bots` never spins when a reset is pending.
+#[test]
+fn test_reset_with_bots_terminates_for_hard_tier() {
+    std::env::set_var("SHENGJI_BOT_BUDGET_MS", "5");
+    let logger = null_logger();
+    let (mut game, host, _all_ids) = human_plus_bots_in_play(&logger, BotDifficulty::Hard);
+
+    apply_human_action(&mut game, Action::ResetGame, host, &logger);
+
+    assert!(
+        matches!(game.dump_state().unwrap(), GameState::Initialize(_)),
+        "reset with Hard bots must return to the lobby and not hang"
+    );
+}
