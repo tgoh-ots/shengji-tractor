@@ -41,7 +41,7 @@ const PublicRoomsPane = (props: IProps): JSX.Element => {
         <button
           type="button"
           onClick={loadPublicRooms}
-          className="sj-btn !min-h-[36px] !px-3 !py-1 !text-sm"
+          className="sj-btn !min-h-[44px] !px-3 !py-1 !text-sm"
         >
           Refresh
         </button>
