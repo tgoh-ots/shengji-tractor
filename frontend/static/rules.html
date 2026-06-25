@@ -1,1344 +1,2277 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
-    <head>
-        <title>升级 / 找朋友 Rules</title>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <link rel="stylesheet" type="text/css" href="style.css">
-        <style>
-          /*
-           * Standalone rules page styling. The app's style.css supplies the
-           * design tokens and the load-bearing card/suit classes; this block
-           * lays the long-form rules text out for readability on the dark
-           * theme: a centered, comfortably-wide reading column, a clear
-           * heading hierarchy, sensible spacing, and styled tables/lists.
-           */
-          :root {
-            color-scheme: dark;
-          }
+<html lang="en">
+  <head>
+    <title>升级 / 找朋友 Rules</title>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" type="text/css" href="style.css" />
+    <style>
+      /*
+       * Standalone rules page styling.
+       *
+       * The app's style.css supplies the load-bearing suit-color classes
+       * (.♢ .♡ .♤ .♧ .🃟 .🃏) and the big `.rules .card` font-size used to
+       * render the unicode playing-card glyphs. Everything below lays the
+       * long-form rules text out as a CLEAN LIGHT DOCUMENT: a centered,
+       * comfortably-wide reading column on a light background with dark text,
+       * a clear heading hierarchy, legible tables/lists, and card examples
+       * presented on crisp white card faces so the suit + rank read clearly.
+       *
+       * We deliberately do NOT inherit the app's dark felt theme here —
+       * legibility of a long reference document wins over theme-matching.
+       */
+      :root {
+        color-scheme: light;
+        --rules-bg: #f5f3ee;
+        --rules-surface: #ffffff;
+        --rules-ink: #1c2530;
+        --rules-ink-soft: #4a5763;
+        --rules-line: #d9d3c7;
+        --rules-line-strong: #c4bcab;
+        --rules-accent: #b45309;
+        --rules-accent-soft: #fef3e2;
+      }
 
-          body.rules {
-            margin: 0;
-            padding: 2.5rem 1.25rem 4rem;
-            color: var(--text-on-felt, #eef6f3);
-            line-height: 1.7;
-            font-size: 1.0625rem;
-          }
+      html,
+      body.rules {
+        background: var(--rules-bg);
+      }
 
-          /* Center every direct child into a readable column (~70ch). */
-          body.rules > * {
-            max-width: 70ch;
-            margin-left: auto;
-            margin-right: auto;
-          }
+      body.rules {
+        margin: 0;
+        padding: 2.5rem 1.25rem 4rem;
+        color: var(--rules-ink);
+        line-height: 1.7;
+        font-size: 1.0625rem;
+        font-family:
+          "Inter", "Noto Sans SC", system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+        overflow-x: hidden;
+      }
 
-          body.rules h1 {
-            max-width: 70ch;
-            margin: 0 auto 1.5rem;
-            font-size: clamp(1.9rem, 4vw, 2.6rem);
-            font-weight: 800;
-            line-height: 1.2;
-            letter-spacing: -0.01em;
-            text-align: center;
-            color: #fff;
-          }
+      /* Center every direct child into a readable column (~70ch). */
+      body.rules > * {
+        max-width: 72ch;
+        margin-left: auto;
+        margin-right: auto;
+      }
 
-          body.rules h2 {
-            margin: 2.75rem auto 0.85rem;
-            padding-bottom: 0.4rem;
-            font-size: 1.6rem;
-            font-weight: 700;
-            line-height: 1.25;
-            color: #fff;
-            border-bottom: 2px solid
-              color-mix(in srgb, var(--accent, #fbbf24) 55%, transparent);
-          }
+      body.rules h1 {
+        max-width: 72ch;
+        margin: 0 auto 0.75rem;
+        font-size: clamp(1.9rem, 4vw, 2.6rem);
+        font-weight: 800;
+        line-height: 1.2;
+        letter-spacing: -0.01em;
+        text-align: center;
+        color: var(--rules-ink);
+      }
 
-          body.rules h3 {
-            margin: 2rem auto 0.65rem;
-            font-size: 1.3rem;
-            font-weight: 700;
-            color: var(--accent, #fbbf24);
-          }
+      body.rules h2 {
+        margin: 2.75rem auto 0.85rem;
+        padding-bottom: 0.4rem;
+        font-size: 1.6rem;
+        font-weight: 700;
+        line-height: 1.25;
+        color: var(--rules-ink);
+        border-bottom: 2px solid var(--rules-line-strong);
+        scroll-margin-top: 1rem;
+      }
 
-          body.rules h4 {
-            margin: 1.6rem auto 0.5rem;
-            font-size: 1.12rem;
-            font-weight: 700;
-            color: #fff;
-          }
+      body.rules h3 {
+        margin: 2rem auto 0.65rem;
+        font-size: 1.3rem;
+        font-weight: 700;
+        color: var(--rules-accent);
+      }
 
-          body.rules h5 {
-            margin: 1.4rem auto 0.4rem;
-            font-size: 1rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-            color: var(--text-on-felt-soft, #9fc0b9);
-          }
+      body.rules h4 {
+        margin: 1.6rem auto 0.5rem;
+        font-size: 1.12rem;
+        font-weight: 700;
+        color: var(--rules-ink);
+      }
 
-          body.rules p {
-            margin: 0 auto 1.1rem;
-          }
+      body.rules h5 {
+        margin: 1.4rem auto 0.4rem;
+        font-size: 0.95rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--rules-ink-soft);
+      }
 
-          body.rules a {
-            color: var(--accent, #fbbf24);
-            text-underline-offset: 2px;
-          }
-          body.rules a:hover {
-            text-decoration: none;
-          }
+      body.rules p {
+        margin: 0 auto 1.1rem;
+      }
 
-          body.rules ul,
-          body.rules ol {
-            margin: 0 auto 1.25rem;
-            padding-left: 1.5rem;
-          }
-          body.rules li {
-            margin-bottom: 0.4rem;
-          }
-          body.rules li::marker {
-            color: var(--accent, #fbbf24);
-          }
+      body.rules a {
+        color: var(--rules-accent);
+        text-underline-offset: 2px;
+      }
+      body.rules a:hover {
+        text-decoration: none;
+      }
 
-          /* The four-color toggle reads as a tidy control, not a stray label. */
-          body.rules > label {
-            display: flex;
-            align-items: center;
-            gap: 0.55rem;
-            width: fit-content;
-            margin: 0 auto 2rem;
-            padding: 0.6rem 1rem;
-            border-radius: 999px;
-            background: rgba(8, 22, 21, 0.45);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            font-weight: 600;
-            cursor: pointer;
-          }
-          body.rules > label input {
-            width: 1.05rem;
-            height: 1.05rem;
-            cursor: pointer;
-          }
+      body.rules ul,
+      body.rules ol {
+        margin: 0 auto 1.25rem;
+        padding-left: 1.5rem;
+      }
+      body.rules li {
+        margin-bottom: 0.4rem;
+      }
+      body.rules li::marker {
+        color: var(--rules-accent);
+      }
 
-          /* The round-result deck selector. */
-          body.rules > select {
-            display: block;
-            margin: 0 auto 1rem;
-            padding: 0.45rem 0.7rem;
-            border-radius: 0.6rem;
-            background: var(--color-slate-800, #1c232a);
-            color: var(--text-on-felt, #eef6f3);
-            border: 1px solid rgba(255, 255, 255, 0.18);
-            font-size: 1rem;
-          }
+      /* Lead paragraph below the title. */
+      body.rules .lede {
+        text-align: center;
+        color: var(--rules-ink-soft);
+        font-size: 1.05rem;
+        margin-bottom: 1.5rem;
+      }
 
-          /* Readable, dark-friendly tables. */
-          body.rules table {
-            width: 100%;
-            max-width: 70ch;
-            margin: 0 auto 1.5rem;
-            border-collapse: collapse;
-            background: rgba(8, 22, 21, 0.35);
-            border: 1px solid rgba(255, 255, 255, 0.14) !important;
-            border-radius: 0.6rem;
-            overflow: hidden;
-            font-size: 0.98rem;
-          }
-          body.rules table thead td {
-            background: rgba(8, 22, 21, 0.55);
-            font-weight: 700;
-            color: #fff;
-          }
-          body.rules table td {
-            padding: 0.55rem 0.85rem;
-            border: 1px solid rgba(255, 255, 255, 0.12) !important;
-            text-align: left;
-            vertical-align: top;
-          }
-          body.rules table tbody tr:nth-child(even) td {
-            background: rgba(255, 255, 255, 0.03);
-          }
+      /* --- Game-mode tab switcher (Tractor vs Finding Friends) --- */
+      .rules-tabs {
+        display: flex;
+        justify-content: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin: 0 auto 1.5rem;
+        padding: 0.35rem;
+        width: fit-content;
+        max-width: 100%;
+        border-radius: 999px;
+        background: var(--rules-surface);
+        border: 1px solid var(--rules-line);
+        box-shadow: 0 1px 2px rgba(28, 37, 48, 0.06);
+      }
+      .rules-tab {
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: var(--rules-ink-soft);
+        font-family: inherit;
+        font-size: 0.98rem;
+        font-weight: 700;
+        line-height: 1.2;
+        padding: 0.55rem 1.1rem;
+        border-radius: 999px;
+        cursor: pointer;
+        transition:
+          background 120ms ease,
+          color 120ms ease;
+      }
+      .rules-tab:hover {
+        color: var(--rules-ink);
+      }
+      .rules-tab[aria-selected="true"] {
+        background: var(--rules-accent);
+        color: #fff;
+      }
 
-          /* Card-example panels: present each labelled play as a tidy card. */
-          body.rules .labeled-play {
-            display: inline-block;
-            vertical-align: top;
-            margin: 0 0.75rem 1rem 0;
-            padding: 0.5rem 0.75rem 0.65rem;
-            background: rgba(8, 22, 21, 0.35);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 0.75rem;
-            max-width: none;
-          }
-          body.rules .labeled-play .label {
-            margin-top: 0.35rem;
-            color: var(--text-on-felt-soft, #9fc0b9);
-            font-weight: 600;
-            font-size: 0.92rem;
-          }
+      /*
+       * Finding-Friends-specific content is wrapped in `.ff-only` blocks. The
+       * Tractor tab hides them; the Finding Friends tab reveals them with a
+       * distinct callout treatment so the reader always knows which game the
+       * material belongs to.
+       */
+      body.mode-tractor .ff-only {
+        display: none;
+      }
+      .ff-section {
+        margin: 2rem auto;
+        padding: 1.25rem 1.5rem 0.4rem;
+        border: 1px solid var(--rules-line-strong);
+        border-left: 5px solid var(--rules-accent);
+        border-radius: 0.75rem;
+        background: var(--rules-accent-soft);
+      }
+      .ff-section h3,
+      .ff-section h4 {
+        margin-top: 0.4rem;
+      }
+      .ff-section .ff-badge {
+        display: inline-block;
+        margin-bottom: 0.5rem;
+        padding: 0.15rem 0.7rem;
+        border-radius: 999px;
+        background: var(--rules-accent);
+        color: #fff;
+        font-size: 0.78rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
 
-          /* Card glyphs render large; keep them on a light face for contrast. */
-          body.rules .card {
-            background: #fff;
-            height: inherit;
-            border-radius: 6px;
-          }
-        </style>
-    </head>
-  <body id="body" class="rules">
-    <h1>Rules for 升级 and 找朋友</h1>
-    
-    <p>
-      Ben Zhang has written another introduction
-      <a href="https://benzhang.io/tractor" target="_blank">here</a>
-      that might also be worth reading
+      /* The round-result deck selector. */
+      body.rules select {
+        display: block;
+        margin: 0 auto 1rem;
+        padding: 0.45rem 0.7rem;
+        border-radius: 0.6rem;
+        background: var(--rules-surface);
+        color: var(--rules-ink);
+        border: 1px solid var(--rules-line-strong);
+        font-size: 1rem;
+        font-family: inherit;
+      }
+
+      /* Readable tables. */
+      body.rules table {
+        width: 100%;
+        max-width: 72ch;
+        margin: 0 auto 1.5rem;
+        border-collapse: collapse;
+        background: var(--rules-surface);
+        border: 1px solid var(--rules-line-strong) !important;
+        border-radius: 0.6rem;
+        overflow: hidden;
+        font-size: 0.98rem;
+      }
+      body.rules table thead td {
+        background: #efeae0;
+        font-weight: 700;
+        color: var(--rules-ink);
+      }
+      body.rules table td {
+        padding: 0.55rem 0.85rem;
+        border: 1px solid var(--rules-line) !important;
+        text-align: left;
+        vertical-align: top;
+      }
+      body.rules table tbody tr:nth-child(even) td {
+        background: #faf8f3;
+      }
+
+      /* Card-example panels: present each labelled play as a tidy card. */
+      body.rules .labeled-play {
+        display: inline-block;
+        vertical-align: top;
+        margin: 0 0.75rem 1rem 0;
+        padding: 0.6rem 0.85rem 0.7rem;
+        background: var(--rules-surface);
+        border: 1px solid var(--rules-line);
+        border-radius: 0.75rem;
+        box-shadow: 0 1px 2px rgba(28, 37, 48, 0.05);
+        max-width: none;
+      }
+      body.rules .labeled-play .play {
+        /* Lay the card glyphs out in a neat, wrapping row. */
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.3rem;
+        align-items: flex-end;
+      }
+      body.rules .labeled-play .label {
+        margin-top: 0.5rem;
+        color: var(--rules-ink-soft);
+        font-weight: 600;
+        font-size: 0.92rem;
+      }
+
+      /*
+       * Card glyphs: the unicode playing-card characters are drawn large via
+       * `.rules .card { font-size: 8em }` (from style.css). On this light page
+       * they're dark-on-light and clearly legible. We override the legacy
+       * negative right-margin (which overlapped cards into an unreadable strip)
+       * so every card in an example sits on its own face. Each glyph gets a
+       * crisp white rounded card background with a thin border + soft shadow so
+       * the suit and rank always read against the page.
+       */
+      body.rules .card {
+        font-size: 6.5em;
+        margin: 0;
+        line-height: 1;
+        background: #fff;
+        border-radius: 8px;
+        box-shadow: 0 1px 3px rgba(28, 37, 48, 0.18);
+      }
+      /* The glyph already includes the card outline; keep a hairline frame
+         only as a fallback so a clipped glyph never floats with no edge. */
+      @media (max-width: 520px) {
+        body.rules .card {
+          font-size: 5em;
+        }
+      }
+
+      /*
+       * Inline TEXT references to suits/jokers (e.g. "small joker", "diamonds
+       * (♢)", "4♤") must stay legible. We do NOT let the near-black joker /
+       * spade glyph colors wash out the descriptive text — instead these inline
+       * spans use a readable accented weight while keeping the four-color hue
+       * for the suit symbol. The bare suit-color classes still drive the big
+       * card-glyph fills (Card.tsx reads them via getComputedStyle in-app), but
+       * here, inside running prose, we re-color them for contrast.
+       */
+      body.rules p .♢,
+      body.rules p .♡,
+      body.rules p .♤,
+      body.rules p .♧,
+      body.rules p .🃟,
+      body.rules p .🃏,
+      body.rules li .♢,
+      body.rules li .♡,
+      body.rules li .♤,
+      body.rules li .♧,
+      body.rules li .🃟,
+      body.rules li .🃏,
+      body.rules .label .♢,
+      body.rules .label .♡,
+      body.rules .label .♤,
+      body.rules .label .♧,
+      body.rules .label .🃟,
+      body.rules .label .🃏 {
+        font-weight: 700;
+        white-space: nowrap;
+      }
+      /* Four-color hues for the inline suit/term references. */
+      body.rules p .♢,
+      body.rules li .♢,
+      body.rules .label .♢ {
+        color: #1933f9;
+      }
+      body.rules p .♡,
+      body.rules li .♡,
+      body.rules .label .♡,
+      body.rules p .🃏,
+      body.rules li .🃏,
+      body.rules .label .🃏 {
+        color: #bb0313;
+      }
+      body.rules p .♧,
+      body.rules li .♧,
+      body.rules .label .♧ {
+        color: #2f7d22;
+      }
+      body.rules p .♤,
+      body.rules li .♤,
+      body.rules .label .♤,
+      body.rules p .🃟,
+      body.rules li .🃟,
+      body.rules .label .🃟 {
+        color: var(--rules-ink);
+      }
+
+      /* --- Language switching (?lang=en|zh) --- */
+      body.lang-en .lang-zh {
+        display: none;
+      }
+      body.lang-zh .lang-en {
+        display: none;
+      }
+    </style>
+  </head>
+  <body id="body" class="rules lang-en mode-tractor four-color">
+    <h1>
+      <span class="lang-zh">升级 与 找朋友 规则</span>
+      <span class="lang-en">Tractor &amp; Finding Friends Rules</span>
+    </h1>
+    <p class="lede">
+      <span class="lang-zh"
+        >升级（拖拉机）与 找朋友 ——
+        一类流行于中国的接牌游戏的在线玩法说明。</span
+      >
+      <span class="lang-en"
+        >Tractor and Finding Friends — a guide to the popular Chinese
+        trick-taking card game played on this site.</span
+      >
     </p>
 
-    <label>
-      Show cards with a four-color deck
-      <input type="checkbox" id="four-color-toggle" />
-    </label>
+    <div class="rules-tabs" role="tablist" aria-label="Rule set">
+      <button class="rules-tab" id="tab-tractor" role="tab" aria-selected="true">
+        <span class="lang-zh">升级（拖拉机）</span>
+        <span class="lang-en">Tractor</span>
+      </button>
+      <button
+        class="rules-tab"
+        id="tab-friends"
+        role="tab"
+        aria-selected="false"
+      >
+        <span class="lang-zh">找朋友</span>
+        <span class="lang-en">Finding Friends</span>
+      </button>
+    </div>
 
     <p>
-      升级 is a family of trick-taking card games popular in China. It's also
-      known as tractor (拖拉机), 40 points (四十分), 80 points (八十分),
-      playing for 100 points (打百分), finding friends (找朋友), among
-      others. You can <a target="_blank" href="../">play online here</a>.
-    </p>
-    <p>
-      This online 升级 and 找朋友 implementation uses a fairly standard rule
-      set. There are a wide variety of house rules that aren't implemented;
-      but could be -- feel free to propose new functionality on
-      <a target="_blank" href="https://github.com/tgoh-ots/shengji-tractor">GitHub</a>.
+      <span class="lang-en"
+        >Ben Zhang has written another introduction
+        <a href="https://benzhang.io/tractor" target="_blank" rel="noreferrer"
+          >here</a
+        >
+        that might also be worth reading.</span
+      >
+      <span class="lang-zh"
+        >Ben Zhang 还写了一篇介绍，见
+        <a href="https://benzhang.io/tractor" target="_blank" rel="noreferrer"
+          >这里</a
+        >，也值得一读。</span
+      >
     </p>
 
-    <h2>Deck</h2>
     <p>
-      There are 54 cards per deck (13 cards per suit, plus a <span class="🃟">small joker</span> and
-      a <span class="🃏">big joker</span>). Aces (A) are treated as
-      higher-valued than Kings (K). Usually, a deck is added for every two
-      players in the game (so 4 players and 5 players play with 2 decks, but
-      6 players play with 3).
+      <span class="lang-en"
+        >升级 is a family of trick-taking card games popular in China. It's also
+        known as tractor (拖拉机), 40 points (四十分), 80 points (八十分),
+        playing for 100 points (打百分), finding friends (找朋友), among others.
+        You can <a target="_blank" href="../">play online here</a>.</span
+      >
+      <span class="lang-zh"
+        >升级 是一类流行于中国的接牌游戏，又称
+        拖拉机、四十分、八十分、打百分、找朋友 等。你可以<a
+          target="_blank"
+          href="../"
+          >在此在线游玩</a
+        >。</span
+      >
     </p>
     <p>
-      Kings, tens, and fives are valuable cards and have point values. Kings
-      and tens are worth ten points each. Fives are worth five points each.
+      <span class="lang-en"
+        >This online implementation uses a fairly standard rule set. There are a
+        wide variety of house rules that aren't implemented; but could be — feel
+        free to propose new functionality on
+        <a
+          target="_blank"
+          rel="noreferrer"
+          href="https://github.com/tgoh-ots/shengji-tractor"
+          >GitHub</a
+        >.</span
+      >
+      <span class="lang-zh"
+        >本在线实现使用一套相当标准的规则。还有很多家庭规则尚未实现，但都可以加入——欢迎在
+        <a
+          target="_blank"
+          rel="noreferrer"
+          href="https://github.com/tgoh-ots/shengji-tractor"
+          >GitHub</a
+        >
+        上提出新的功能建议。</span
+      >
+    </p>
+
+    <h2>
+      <span class="lang-en">Deck</span><span class="lang-zh">牌组</span>
+    </h2>
+    <p>
+      <span class="lang-en"
+        >There are 54 cards per deck (13 cards per suit, plus a
+        <span class="🃟">small joker</span> and a
+        <span class="🃏">big joker</span>). Aces (A) are treated as higher-valued
+        than Kings (K). Usually, a deck is added for every two players in the
+        game (so 4 players and 5 players play with 2 decks, but 6 players play
+        with 3).</span
+      >
+      <span class="lang-zh"
+        >每副牌有 54 张（每门花色 13 张，外加一张<span class="🃟">小王</span
+        >和一张<span class="🃏">大王</span>）。A 比 K
+        大。通常每两名玩家增加一副牌（因此 4 人和 5 人用 2 副牌，6 人用 3
+        副牌）。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >Kings, tens, and fives are valuable cards and have point values. Kings
+        and tens are worth ten points each. Fives are worth five points
+        each.</span
+      >
+      <span class="lang-zh"
+        >K、10 和 5 是分牌，具有分值。K 和 10 每张值 10 分，5 每张值 5
+        分。</span
+      >
     </p>
     <div class="labeled-play">
       <div class="play" id="diamonds"></div>
       <div class="label">
-        Diamonds
+        <span class="lang-en">Diamonds</span><span class="lang-zh">方块</span>
       </div>
     </div>
     <div class="labeled-play">
       <div class="play" id="clubs"></div>
       <div class="label">
-        Clubs
+        <span class="lang-en">Clubs</span><span class="lang-zh">梅花</span>
       </div>
     </div>
     <div class="labeled-play">
       <div class="play" id="hearts"></div>
       <div class="label">
-        Hearts
+        <span class="lang-en">Hearts</span><span class="lang-zh">红桃</span>
       </div>
     </div>
     <div class="labeled-play">
       <div class="play" id="spades"></div>
       <div class="label">
-        Spades
+        <span class="lang-en">Spades</span><span class="lang-zh">黑桃</span>
       </div>
     </div>
     <p>
-      The two jokers are ordered, with the uncolored joker having a lower
-      value than the colored joker.
+      <span class="lang-en"
+        >The two jokers are ordered, with the uncolored joker having a lower
+        value than the colored joker.</span
+      >
+      <span class="lang-zh">两张王有顺序：小王（黑白）小于大王（彩色）。</span>
     </p>
     <div class="labeled-play">
       <div class="play" id="jokers"></div>
       <div class="label">
-        Jokers
+        <span class="lang-en">Jokers</span><span class="lang-zh">王</span>
       </div>
     </div>
 
-    <h2>Scoring</h2>
+    <h2>
+      <span class="lang-en">Scoring</span><span class="lang-zh">计分</span>
+    </h2>
     <p>
-      Scoring in each round of the game is determined by "point" cards. Only
-      fives, tens, and kings have points&mdash; all other cards do not count
-      for scoring.  Point scores are pooled within a team.
+      <span class="lang-en"
+        >Scoring in each round of the game is determined by "point" cards. Only
+        fives, tens, and kings have points — all other cards do not count for
+        scoring. Point scores are pooled within a team.</span
+      >
+      <span class="lang-zh"
+        >每局的得分由“分牌”决定。只有 5、10 和 K 有分，其余牌不计分。分数在队伍内汇总。</span
+      >
     </p>
     <table border="1">
       <thead>
-        <tr><td>Card number</td><td>Point value</td></tr>
+        <tr>
+          <td>
+            <span class="lang-en">Card number</span
+            ><span class="lang-zh">牌面</span>
+          </td>
+          <td>
+            <span class="lang-en">Point value</span
+            ><span class="lang-zh">分值</span>
+          </td>
+        </tr>
       </thead>
       <tbody>
-          <tr><td>5</td><td>5</td></tr>
-          <tr><td>10</td><td>10</td></tr>
-          <tr><td>K</td><td>10</td></tr>
-        </tbody>
-      </table>
-      <p>
-        Each deck has a total of 100 points (25 per suit). However, as cards of
+        <tr>
+          <td>5</td>
+          <td>5</td>
+        </tr>
+        <tr>
+          <td>10</td>
+          <td>10</td>
+        </tr>
+        <tr>
+          <td>K</td>
+          <td>10</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      <span class="lang-en"
+        >Each deck has a total of 100 points (25 per suit). However, as cards of
         the trump rank are part of the trump suit, the trump suit will have a
-        disproportionately large number of points when the trump rank is 5,
-        10, or K.
-      </p>
-      <div class="labeled-play">
-        <div class="play" id="points-d"></div>
-        <div class="label">
-          Point cards in <span class="♢">diamonds (♢)</span>
-        </div>
+        disproportionately large number of points when the trump rank is 5, 10,
+        or K.</span
+      >
+      <span class="lang-zh"
+        >每副牌共 100 分（每门花色 25
+        分）。但由于级牌属于主牌花色，当级牌为 5、10 或 K
+        时，主牌花色的分数会异常地多。</span
+      >
+    </p>
+    <div class="labeled-play">
+      <div class="play" id="points-d"></div>
+      <div class="label">
+        <span class="lang-en">Point cards in </span
+        ><span class="lang-zh">分牌（</span><span class="♢">diamonds (♢)</span
+        ><span class="lang-zh">方块）</span>
       </div>
-      <div class="labeled-play">
-        <div class="play" id="points-c"></div>
-        <div class="label">
-          Point cards in <span class="♧">clubs (♧)</span>
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play" id="points-c"></div>
+      <div class="label">
+        <span class="lang-en">Point cards in </span
+        ><span class="lang-zh">分牌（</span><span class="♧">clubs (♧)</span
+        ><span class="lang-zh">梅花）</span>
       </div>
-      <div class="labeled-play">
-        <div class="play" id="points-h"></div>
-        <div class="label">
-          Point cards in <span class="♡">hearts (♡)</span>
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play" id="points-h"></div>
+      <div class="label">
+        <span class="lang-en">Point cards in </span
+        ><span class="lang-zh">分牌（</span><span class="♡">hearts (♡)</span
+        ><span class="lang-zh">红桃）</span>
       </div>
-      <div class="labeled-play">
-        <div class="play" id="points-s"></div>
-        <div class="label">
-          Point cards in <span class="♤">spades (♤)</span>
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play" id="points-s"></div>
+      <div class="label">
+        <span class="lang-en">Point cards in </span
+        ><span class="lang-zh">分牌（</span><span class="♤">spades (♤)</span
+        ><span class="lang-zh">黑桃）</span>
       </div>
+    </div>
 
-      <h3>Player ranks</h3>
-      <p>
-        Each player in the game has a rank, starting at 2 and going to A. If
-        they win rounds, their rank may increase. The rank of the leading
-        player for a round determines the trump rank for that round.
-      </p>
-      <p>
-        The game ends when a player successfully defends a round at the A
-        rank.
-      </p>
+    <h3>
+      <span class="lang-en">Player ranks</span
+      ><span class="lang-zh">玩家级别</span>
+    </h3>
+    <p>
+      <span class="lang-en"
+        >Each player in the game has a rank, starting at 2 and going to A. If
+        they win rounds, their rank may increase. The rank of the leading player
+        for a round determines the trump rank for that round.</span
+      >
+      <span class="lang-zh"
+        >每名玩家都有一个级别，从 2 开始一直到
+        A。赢得局后级别可能上升。某局庄家的级别决定了该局的级牌。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >The game ends when a player successfully defends a round at the A
+        rank.</span
+      >
+      <span class="lang-zh">当某名玩家在 A 级别成功守庄后，游戏结束。</span>
+    </p>
 
-      <h2>Trumps and Suits</h2>
-      <p>
-        In each round, there is a trump specification which determines what
-        cards are part of the trump suit. The trump specification always
-        includes a trump rank, but doesn't necessarily include a specific suit.
-        Jokers are always a part of the trump suit.
-      </p>
-      <h3>Trump with a specified suit</h3>
-      <p>
-        For example, if the trump rank is 4 and the specified suit is spades
+    <h2>
+      <span class="lang-en">Trumps and Suits</span
+      ><span class="lang-zh">主牌与花色</span>
+    </h2>
+    <p>
+      <span class="lang-en"
+        >In each round, there is a trump specification which determines what
+        cards are part of the trump suit. The trump specification always includes
+        a trump rank, but doesn't necessarily include a specific suit. Jokers are
+        always a part of the trump suit.</span
+      >
+      <span class="lang-zh"
+        >每局都有一个主牌设定，决定哪些牌属于主牌花色。主牌设定一定包含级牌，但不一定指定具体花色。王始终属于主牌花色。</span
+      >
+    </p>
+    <h3>
+      <span class="lang-en">Trump with a specified suit</span
+      ><span class="lang-zh">指定花色的主牌</span>
+    </h3>
+    <p>
+      <span class="lang-en"
+        >For example, if the trump rank is 4 and the specified suit is spades
         (<span class="♤">♤</span>), the trump suit consists of all 4s, all
         jokers, and all spades. A card can only be a part of one suit, so the
-        <span class="♡">4♡</span> is no longer considered to be a members of
-        the hearts (<span class="♡">♡</span>) suit.
-      </p>
-      <div class="labeled-play">
-        <div class="play" id="trump-4s"></div>
-        <div class="label">
-          Trump suit when specification is <span class="♤">4♤</span>
-        </div>
+        <span class="♡">4♡</span> is no longer considered to be a member of the
+        hearts (<span class="♡">♡</span>) suit.</span
+      >
+      <span class="lang-zh"
+        >例如，若级牌为 4 且指定花色为黑桃（<span class="♤">♤</span>），则主牌花色由所有
+        4、所有王和所有黑桃组成。一张牌只能属于一门花色，因此
+        <span class="♡">4♡</span> 不再属于红桃（<span class="♡">♡</span>）花色。</span
+      >
+    </p>
+    <div class="labeled-play">
+      <div class="play" id="trump-4s"></div>
+      <div class="label">
+        <span class="lang-en">Trump suit when specification is </span
+        ><span class="lang-zh">主牌花色（设定为 </span
+        ><span class="♤">4♤</span><span class="lang-zh">）</span>
       </div>
-      <div class="labeled-play">
-        <div class="play" id="trump-4s-hearts"></div>
-        <div class="label">
-          Hearts suit when specification is <span class="♤">4♤</span>
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play" id="trump-4s-hearts"></div>
+      <div class="label">
+        <span class="lang-en">Hearts suit when specification is </span
+        ><span class="lang-zh">红桃花色（设定为 </span
+        ><span class="♤">4♤</span><span class="lang-zh">）</span>
       </div>
-      <p>In all suits, the 3 and the 5 are now considered to be adjacent.</p>
-      <p>
-        The order of the trump suit is as follows (highest to lowest):
-      </p>
-      <ul>
-        <li>All jokers, in their normal order</li>
-        <li>Cards of the trump rank in the specified suit</li>
-        <li>Cards of the trump rank, but not of the specified suit. Note:
-          these are considered to have equal value to one another</li>
-        <li>All non-trump-rank numbered cards of the specified suit, in their
-          normal order</li>
-      </ul>
-      <p>
-        In the case of the trump specification of <span class="♤">4♤</span>,
-        the ordering from highest to lowest is
-        <span class="🃏">big joker</span> &gt;
-        <span class="🃟">small joker</span> &gt;
-        <span class="♤">4♤</span> &gt; 
-        [
-          <span class="♡">4♡</span> =
-          <span class="♢">4♢</span> =
-          <span class="♧">4♧</span>
-        ] &gt; 
-        <span class="♤">A♤</span> &gt; 
-        <span class="♤">K♤</span> &gt; 
-        <span class="♤">Q♤</span> &gt; 
-        <span class="♤">J♤</span> &gt; 
-        <span class="♤">10♤</span> &gt; 
-        <span class="♤">9♤</span> &gt; 
-        <span class="♤">8♤</span> &gt; 
-        <span class="♤">7♤</span> &gt; 
-        <span class="♤">6♤</span> &gt; 
-        <span class="♤">5♤</span> &gt; 
-        <span class="♤">3♤</span> &gt; 
-        <span class="♤">2♤</span>.
-      </p>
+    </div>
+    <p>
+      <span class="lang-en"
+        >In all suits, the 3 and the 5 are now considered to be adjacent.</span
+      >
+      <span class="lang-zh">在所有花色中，3 和 5 现在被视为相邻。</span>
+    </p>
+    <p>
+      <span class="lang-en"
+        >The order of the trump suit is as follows (highest to lowest):</span
+      >
+      <span class="lang-zh">主牌花色的顺序如下（从高到低）：</span>
+    </p>
+    <ul>
+      <li>
+        <span class="lang-en">All jokers, in their normal order</span
+        ><span class="lang-zh">所有王，按其常规顺序</span>
+      </li>
+      <li>
+        <span class="lang-en"
+          >Cards of the trump rank in the specified suit</span
+        ><span class="lang-zh">指定花色中的级牌</span>
+      </li>
+      <li>
+        <span class="lang-en"
+          >Cards of the trump rank, but not of the specified suit. Note: these
+          are considered to have equal value to one another</span
+        ><span class="lang-zh"
+          >非指定花色的级牌。注意：它们彼此等值</span
+        >
+      </li>
+      <li>
+        <span class="lang-en"
+          >All non-trump-rank numbered cards of the specified suit, in their
+          normal order</span
+        ><span class="lang-zh">指定花色中所有非级牌，按其常规顺序</span>
+      </li>
+    </ul>
+    <p>
+      <span class="lang-en"
+        >In the case of the trump specification of <span class="♤">4♤</span>, the
+        ordering from highest to lowest is</span
+      ><span class="lang-zh"
+        >当主牌设定为 <span class="♤">4♤</span> 时，从高到低的顺序为</span
+      >
+      <span class="🃏">big joker</span> &gt; <span class="🃟">small joker</span>
+      &gt; <span class="♤">4♤</span> &gt; [ <span class="♡">4♡</span> =
+      <span class="♢">4♢</span> = <span class="♧">4♧</span> ] &gt;
+      <span class="♤">A♤</span> &gt; <span class="♤">K♤</span> &gt;
+      <span class="♤">Q♤</span> &gt; <span class="♤">J♤</span> &gt;
+      <span class="♤">10♤</span> &gt; <span class="♤">9♤</span> &gt;
+      <span class="♤">8♤</span> &gt; <span class="♤">7♤</span> &gt;
+      <span class="♤">6♤</span> &gt; <span class="♤">5♤</span> &gt;
+      <span class="♤">3♤</span> &gt; <span class="♤">2♤</span>.
+    </p>
 
-      <h3>Trump with no specified suit</h3>
-      <p>
-        If only a trump rank is specified (and no suit), the only trumps are
+    <h3>
+      <span class="lang-en">Trump with no specified suit</span
+      ><span class="lang-zh">无指定花色的主牌（无主）</span>
+    </h3>
+    <p>
+      <span class="lang-en"
+        >If only a trump rank is specified (and no suit), the only trumps are
         cards of the trump rank, and jokers. This is referred to as "no trump",
-        and there are five distinct suits (as opposed to the usual four).
-      </p>
-      <div class="labeled-play">
-        <div class="play" id="trump-4nt"></div>
-        <div class="label">
-          Trump suit when specification is 4NT
-        </div>
+        and there are five distinct suits (as opposed to the usual four).</span
+      >
+      <span class="lang-zh"
+        >若只指定级牌（不指定花色），则主牌只有级牌和王。这称为“无主”，此时有五门不同的花色（而非通常的四门）。</span
+      >
+    </p>
+    <div class="labeled-play">
+      <div class="play" id="trump-4nt"></div>
+      <div class="label">
+        <span class="lang-en">Trump suit when specification is 4NT</span
+        ><span class="lang-zh">主牌花色（设定为 4 无主）</span>
       </div>
-      <div class="labeled-play">
-        <div class="play" id="trump-4nt-hearts"></div>
-        <div class="label">
-          Hearts suit when specification is 4NT
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play" id="trump-4nt-hearts"></div>
+      <div class="label">
+        <span class="lang-en">Hearts suit when specification is 4NT</span
+        ><span class="lang-zh">红桃花色（设定为 4 无主）</span>
       </div>
-      <p>In all suits, the 3 and the 5 are now considered to be adjacent.</p>
-      <p>
-        The order of the trump suit is as follows:
-      </p>
-      <ul>
-        <li>Cards of the trump rank. Note: these are considered to have equal
-          value to one another</li>
-        <li>All jokers, in their normal order</li>
-      </ul>
-      <p>
-        In the case of the trump specification of 4NT,
-        the ordering from highest to lowest is
-        <span class="🃏">big joker</span> &gt;
-        <span class="🃟">small joker</span> &gt;
-        [
-          <span class="♤">4♤</span> =
-          <span class="♡">4♡</span> =
-          <span class="♢">4♢</span> =
-          <span class="♧">4♧</span>
-        ].
-      </p>
+    </div>
+    <p>
+      <span class="lang-en"
+        >In all suits, the 3 and the 5 are now considered to be adjacent.</span
+      >
+      <span class="lang-zh">在所有花色中，3 和 5 现在被视为相邻。</span>
+    </p>
+    <p>
+      <span class="lang-en">The order of the trump suit is as follows:</span
+      ><span class="lang-zh">主牌花色的顺序如下：</span>
+    </p>
+    <ul>
+      <li>
+        <span class="lang-en"
+          >Cards of the trump rank. Note: these are considered to have equal
+          value to one another</span
+        ><span class="lang-zh">级牌。注意：它们彼此等值</span>
+      </li>
+      <li>
+        <span class="lang-en">All jokers, in their normal order</span
+        ><span class="lang-zh">所有王，按其常规顺序</span>
+      </li>
+    </ul>
+    <p>
+      <span class="lang-en"
+        >In the case of the trump specification of 4NT, the ordering from highest
+        to lowest is</span
+      ><span class="lang-zh">当主牌设定为 4 无主时，从高到低的顺序为</span>
+      <span class="🃏">big joker</span> &gt; <span class="🃟">small joker</span>
+      &gt; [ <span class="♤">4♤</span> = <span class="♡">4♡</span> =
+      <span class="♢">4♢</span> = <span class="♧">4♧</span> ].
+    </p>
 
-      <h2>Teams</h2>
-      <p>
-        There are two fundamental teams in the game: one team is trying to
+    <h2>
+      <span class="lang-en">Teams</span><span class="lang-zh">队伍</span>
+    </h2>
+    <p>
+      <span class="lang-en"
+        >There are two fundamental teams in the game: one team is trying to
         acquire points, while the other team is trying to discard them.
-        Colloquially, the team trying to acquiring points is "attacking", and
-        the other team is "defending".
-      </p>
-      <p>
-        The defending team is determined by a designated leader of the team
-        (当庄). In 升级, the teams are fixed and the leader rotates among the
-        winning team. In 找朋友, the leader rotates among the team that won the
-        previous round, but the teams are fluid and change from round-to-round.
-      </p>
-      <p>
-        The leader (whomever is 当庄) of the team gets an additional advantage
-        at the beginning of the game: they can see the extra "bottom cards"
-        (底牌) and exchange them for cards in their hand. Otherwise, all
-        players are the same, and teams only matter for scoring.
-      </p>
+        Colloquially, the team trying to acquire points is "attacking", and the
+        other team is "defending".</span
+      >
+      <span class="lang-zh"
+        >游戏中有两个基本队伍：一队设法获取分数，另一队设法甩掉分数。通常，争取分数的一队称为“进攻方”，另一队称为“防守方”。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >The defending team is determined by a designated leader of the team
+        (当庄). In Tractor, the teams are fixed and the leader rotates among the
+        winning team. In Finding Friends, the leader rotates among the team that
+        won the previous round, but the teams are fluid and change from
+        round-to-round.</span
+      >
+      <span class="lang-zh"
+        >防守方由该队的指定庄家（当庄）决定。在
+        升级 中，队伍固定，庄家在获胜队伍内轮换。在 找朋友
+        中，庄家在上局获胜的一方内轮换，但队伍是流动的，每局都会变化。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >The leader (whoever is 当庄) of the team gets an additional advantage at
+        the beginning of the game: they can see the extra "bottom cards" (the
+        bottom / 底牌) and exchange them for cards in their hand. Otherwise, all
+        players are the same, and teams only matter for scoring.</span
+      >
+      <span class="lang-zh"
+        >庄家（当庄）在开局时有一项额外优势：他们可以看到额外的“底牌”，并用手牌进行交换。除此之外，所有玩家都一样，队伍只在计分时起作用。</span
+      >
+    </p>
 
-      <h2>Gameplay</h2>
-      <h3>Bidding for trump</h3>
-      <p>
-        The game begins by players drawing cards one at a time. Like most
-        Chinese card games, cards are drawn in counter-clockwise order.
-      </p>
-      <p>
-        At any point, a player may "bid" for the trump by showing valid bids
-        out of their hand. The highest bid determines the trump specification
-        for the game. However, once a player has made a bid, they can only
-        "reinforce" it by adding more of the same card, or wait for another
-        player to displace them as the highest bidder.
-      </p>
-      <p>
-        Valid bids must be made up of identical cards (i.e. same card-face).
-        The bids can be either cards of the current trump rank or jokers. The
-        current trump rank corresponds to the rank of the leader of the
-        defending team. Each game starts with all players at rank 2. Joker bids
-        represent "no trump" bids. A single joker cannot be used as a bid.
-      </p>
-      <p>
-        Each bid made must be greater than all of the previous bids. This is
+    <h2>
+      <span class="lang-en">Gameplay</span><span class="lang-zh">游戏流程</span>
+    </h2>
+    <h3>
+      <span class="lang-en">Bidding for trump</span
+      ><span class="lang-zh">叫主</span>
+    </h3>
+    <p>
+      <span class="lang-en"
+        >The game begins by players drawing cards one at a time. Like most
+        Chinese card games, cards are drawn in counter-clockwise order.</span
+      >
+      <span class="lang-zh"
+        >游戏开始时，玩家逐张摸牌。与大多数中国纸牌游戏一样，摸牌按逆时针顺序进行。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >At any point, a player may "bid" for the trump by showing valid bids out
+        of their hand. The highest bid determines the trump specification for the
+        game. However, once a player has made a bid, they can only "reinforce" it
+        by adding more of the same card, or wait for another player to displace
+        them as the highest bidder.</span
+      >
+      <span class="lang-zh"
+        >任何时候，玩家都可以亮出手牌中合法的叫牌来“叫主”。最高的叫牌决定该局的主牌设定。但玩家一旦叫牌，就只能通过加亮更多相同的牌来“加固”，或等待其他玩家把自己挤下最高叫牌的位置。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >Valid bids must be made up of identical cards (i.e. same card-face). The
+        bids can be either cards of the current trump rank or jokers. The current
+        trump rank corresponds to the rank of the leader of the defending team.
+        Each game starts with all players at rank 2. Joker bids represent "no
+        trump" bids. A single joker cannot be used as a bid.</span
+      >
+      <span class="lang-zh"
+        >合法的叫牌必须由相同的牌组成（即同一张牌面）。叫牌可以是当前级牌的牌或王。当前级牌对应防守方庄家的级别。每局开始时所有玩家都在
+        2 级。王的叫牌代表“无主”叫牌。单张王不能用于叫牌。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >Each bid made must be greater than all of the previous bids. This is
         determined first by the number of cards (more is higher), and then by
-        card values (following the "no trump" ordering of card values).
-      </p>
-      <p>
-        The final trump specification is determined by the winning bid. If the
-        winning bid is made up of jokers, the trump specification is "no
-        trump"; otherwise, it is the suit of the winning bid. All cards in this
-        suit and jokers are considered trumps..
-      </p>
+        card values (following the "no trump" ordering of card values).</span
+      >
+      <span class="lang-zh"
+        >每次叫牌都必须高于之前所有的叫牌。先比较张数（多者为高），再比较牌的大小（按“无主”的牌值顺序）。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >The final trump specification is determined by the winning bid. If the
+        winning bid is made up of jokers, the trump specification is "no trump";
+        otherwise, it is the suit of the winning bid. All cards in this suit and
+        jokers are considered trumps.</span
+      >
+      <span class="lang-zh"
+        >最终的主牌设定由获胜的叫牌决定。若获胜叫牌由王组成，则主牌设定为“无主”；否则为获胜叫牌的花色。该花色的所有牌以及王都被视为主牌。</span
+      >
+    </p>
 
-      <p>Example with trump rank of 2:</p>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂢</span>
-        </div>
-        <div class="label">
-          Player 1's bid
-        </div>
+    <p>
+      <span class="lang-en">Example with trump rank of 2:</span
+      ><span class="lang-zh">级牌为 2 的示例：</span>
+    </p>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂢</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♢">🃂</span>
-          <span class="card ♢">🃂</span>
-        </div>
-        <div class="label">
-          Player 3's bid
-        </div>
+      <div class="label">
+        <span class="lang-en">Player 1's bid</span
+        ><span class="lang-zh">玩家 1 的叫牌</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card 🃟">🃟</span>
-          <span class="card 🃟">🃟</span>
-        </div>
-        <div class="label">
-          Player 1's second bid
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♢">🃂</span>
+        <span class="card ♢">🃂</span>
       </div>
-      <p>Result: 2NT trump specification, player 1 wins the bid.</p>
+      <div class="label">
+        <span class="lang-en">Player 3's bid</span
+        ><span class="lang-zh">玩家 3 的叫牌</span>
+      </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card 🃟">🃟</span>
+        <span class="card 🃟">🃟</span>
+      </div>
+      <div class="label">
+        <span class="lang-en">Player 1's second bid</span
+        ><span class="lang-zh">玩家 1 的第二次叫牌</span>
+      </div>
+    </div>
+    <p>
+      <span class="lang-en"
+        >Result: 2NT trump specification, player 1 wins the bid.</span
+      ><span class="lang-zh">结果：2 无主的主牌设定，玩家 1 获得叫牌。</span>
+    </p>
 
-      <p>
-        If this is the first round being played, the winner of the bid is also
-        the leader of the defending team (当庄). Otherwise, the only
-        consequence of the bidding process is setting the trump specification.
-      </p>
+    <p>
+      <span class="lang-en"
+        >If this is the first round being played, the winner of the bid is also
+        the leader of the defending team (当庄). Otherwise, the only consequence
+        of the bidding process is setting the trump specification.</span
+      >
+      <span class="lang-zh"
+        >如果这是第一局，叫牌获胜者也是防守方的庄家（当庄）。否则，叫牌过程的唯一作用就是确定主牌设定。</span
+      >
+    </p>
 
-
-      <h3>Exchanging cards with the bottom (底牌)</h3>
-      <p>
-        After the drawing phase is completed, 4 to 8 cards are left in the
-        bottom of the draw pile and become the 底牌. For example, in a
-        four-player game, there will be 8 cards left; in a five-player game,
-        there will be 6. These cards are made available for the leader of the
-        defending team (当庄) to pick up.
-      </p>
-      <p>
-      <p>
-        The leader may choose to swap some, all, or none of the cards in the
+    <h3>
+      <span class="lang-en">Exchanging cards with the bottom</span
+      ><span class="lang-zh">与底牌交换</span>
+    </h3>
+    <p>
+      <span class="lang-en"
+        >After the drawing phase is completed, 4 to 8 cards are left in the bottom
+        of the draw pile and become the bottom cards (底牌). For example, in a
+        four-player game, there will be 8 cards left; in a five-player game, there
+        will be 6. These cards are made available for the leader of the defending
+        team (当庄) to pick up.</span
+      >
+      <span class="lang-zh"
+        >摸牌阶段结束后，牌堆底部会剩下 4 到 8 张牌，成为底牌。例如，四人局会剩
+        8 张，五人局会剩 6 张。这些牌供防守方庄家（当庄）拿取。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >The leader may choose to swap some, all, or none of the cards in the
         bottom for cards in their hand. The number of cards in the bottom must
-        remain constant.
-      </p>
-      <p>
-        There is a potential penalty for hiding points in the bottom, since
-        other players can't see them. This is surfaced as a multiplier on the
-        number of points left in the bottom, which are treated as if they are
-        attached to the last trick in the game.
-      </p>
-      <table border="1">
-        <thead>
-          <tr><td>Length of the last trick-format</td><td>Point multiplier</td></tr>
-        </thead>
-        <tbody>
-          <tr><td>1</td><td>2</td></tr>
-          <tr><td>2 (e.g. pair)</td><td>4</td></tr>
-          <tr><td>3 (e.g. triple)</td><td>6</td></tr>
-          <tr><td>4 (e.g. tractor)</td><td>8</td></tr>
-        </tbody>
-      </table>
-      <p>
-        The multiplier can be generalized to arbitrarily large trick-formats.
-        In the case of the last trick-format being a "throw", or a set of the
-        highest possible individual trick-formats, the length of the longest
-        trick-format within the group should be used for the multiplier.
-      </p>
+        remain constant.</span
+      >
+      <span class="lang-zh"
+        >庄家可以选择用手牌交换底牌中的部分、全部或不交换任何牌。底牌的张数必须保持不变。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >There is a potential penalty for hiding points in the bottom, since other
+        players can't see them. This is surfaced as a multiplier on the number of
+        points left in the bottom, which are treated as if they are attached to
+        the last trick in the game.</span
+      >
+      <span class="lang-zh"
+        >把分藏在底牌里有潜在的惩罚，因为其他玩家看不到。这体现为底牌中剩余分数的一个倍数，并被视为附加在游戏最后一轮上。</span
+      >
+    </p>
+    <table border="1">
+      <thead>
+        <tr>
+          <td>
+            <span class="lang-en">Length of the last trick-format</span
+            ><span class="lang-zh">最后一轮牌型的长度</span>
+          </td>
+          <td>
+            <span class="lang-en">Point multiplier</span
+            ><span class="lang-zh">分数倍数</span>
+          </td>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>1</td>
+          <td>2</td>
+        </tr>
+        <tr>
+          <td>
+            2 <span class="lang-en">(e.g. pair)</span
+            ><span class="lang-zh">（如对子）</span>
+          </td>
+          <td>4</td>
+        </tr>
+        <tr>
+          <td>
+            3 <span class="lang-en">(e.g. triple)</span
+            ><span class="lang-zh">（如三张）</span>
+          </td>
+          <td>6</td>
+        </tr>
+        <tr>
+          <td>
+            4 <span class="lang-en">(e.g. tractor)</span
+            ><span class="lang-zh">（如拖拉机）</span>
+          </td>
+          <td>8</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      <span class="lang-en"
+        >The multiplier can be generalized to arbitrarily large trick-formats. In
+        the case of the last trick-format being a "throw", or a set of the highest
+        possible individual trick-formats, the length of the longest trick-format
+        within the group should be used for the multiplier.</span
+      >
+      <span class="lang-zh"
+        >该倍数可推广到任意大的牌型。若最后一轮的牌型是“甩牌”，即一组各花色中最高的单个牌型，则应使用该组中最长牌型的长度来计算倍数。</span
+      >
+    </p>
 
-      <h4>Declaring friends in 找朋友</h4>
+    <div class="ff-only ff-section">
+      <span class="ff-badge"
+        ><span class="lang-en">Finding Friends only</span
+        ><span class="lang-zh">仅限 找朋友</span></span
+      >
+      <h4>
+        <span class="lang-en">Declaring friends in Finding Friends</span
+        ><span class="lang-zh">在 找朋友 中宣布朋友</span>
+      </h4>
       <p>
-        In addition to exchanging cards with the bottom of the deck, in games
-        of 找朋友, the leader also specifies which cards identify their
-        "friends" (i.e. members of the defending team). These must be committed
-        to at the beginning of the game, and the leader is allowed to become
-        their own friend (intentionally or unintentionally).
+        <span class="lang-en"
+          >In addition to exchanging cards with the bottom of the deck, in games
+          of Finding Friends, the leader also specifies which cards identify
+          their "friends" (i.e. members of the defending team). These must be
+          committed to at the beginning of the game, and the leader is allowed to
+          become their own friend (intentionally or unintentionally).</span
+        >
+        <span class="lang-zh"
+          >在 找朋友
+          中，除了与底牌交换外，庄家还要指定哪些牌用来确认其“朋友”（即防守方的成员）。这些必须在开局时确定，且庄家可以成为自己的朋友（有意或无意）。</span
+        >
       </p>
       <p>
-        The number of friends is determined by the number of players&mdash; the
-        defending team should never be larger than the attacking team.
+        <span class="lang-en"
+          >The number of friends is determined by the number of players — the
+          defending team should never be larger than the attacking team.</span
+        >
+        <span class="lang-zh"
+          >朋友的数量由玩家人数决定——防守方绝不应大于进攻方。</span
+        >
       </p>
       <p>
-        A friend is declared as a combination of a specific card (suit/number)
-        and an ordinal. For example, one could declare that the "first person
-        to play an <span class="♤">A♤</span>" is their friend. They could also
-        declare that the third person to play the card is their friend.
+        <span class="lang-en"
+          >A friend is declared as a combination of a specific card (suit/number)
+          and an ordinal. For example, one could declare that the "first person
+          to play an <span class="♤">A♤</span>" is their friend. They could also
+          declare that the third person to play the card is their friend.</span
+        >
+        <span class="lang-zh"
+          >朋友以“一张具体的牌（花色/点数）+ 一个序数”来宣布。例如，可以宣布“第一个打出
+          <span class="♤">A♤</span> 的人”是自己的朋友，也可以宣布第三个打出该牌的人是朋友。</span
+        >
       </p>
       <p>
-        Cards above the value of A cannot be declared as friends. That is,
-        cards of the trump rank and jokers are not legal friend cards.
+        <span class="lang-en"
+          >Cards above the value of A cannot be declared as friends. That is,
+          cards of the trump rank and jokers are not legal friend cards.</span
+        >
+        <span class="lang-zh"
+          >大于 A 的牌不能宣布为朋友。也就是说，级牌和王都不是合法的朋友牌。</span
+        >
       </p>
       <p>
-        In many cases, this results in the leader and the other players not
-        knowing who the friends are. Once a trick has been completed in which a
-        person has played the friend card, they join the defending team and
-        bring their points with them.
+        <span class="lang-en"
+          >In many cases, this results in the leader and the other players not
+          knowing who the friends are. Once a trick has been completed in which a
+          person has played the friend card, they join the defending team and
+          bring their points with them.</span
+        >
+        <span class="lang-zh"
+          >很多情况下，这会导致庄家和其他玩家都不知道谁是朋友。一旦某人打出朋友牌的那一轮结束，他们就加入防守方，并带着自己的分数一起加入。</span
+        >
       </p>
+    </div>
 
-      <h3>Playing tricks</h3>
+    <h3>
+      <span class="lang-en">Playing tricks</span
+      ><span class="lang-zh">出牌（每轮）</span>
+    </h3>
 
-      <h4>Trick formats</h4>
-      <p>
-        All cards in a trick format must be in the same suit. Any winning play
+    <h4>
+      <span class="lang-en">Trick formats</span
+      ><span class="lang-zh">牌型</span>
+    </h4>
+    <p>
+      <span class="lang-en"
+        >All cards in a trick format must be in the same suit. Any winning play
         (whether it is setting the format or not) must be made up of a single
         suit; that suit will match either the initial format or be made up of
-        trumps.
-      </p>
-      <p>
-        There are three basic trick formats in the game: single cards,
-        identical cards, and sequences of identical cards. A set of the highest
-        possible plays in a single suit can be played simultaneously as a
-        "throw", which makes it potentially harder to trump.
-      </p>
-      <p>
-        In general, players must attempt to match the format to the best of
-        their ability using cards in the same suit. If the player has no
-        remaining cards in the suit (i.e. they are void in the suit), there are
-        no requirements on what cards they can play.
-      </p>
+        trumps.</span
+      >
+      <span class="lang-zh"
+        >一个牌型中的所有牌必须同花色。任何获胜的出牌（无论是否设定牌型）都必须由单一花色组成；该花色要么与初始牌型一致，要么由主牌组成。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >There are three basic trick formats in the game: single cards, identical
+        cards, and sequences of identical cards. A set of the highest possible
+        plays in a single suit can be played simultaneously as a "throw", which
+        makes it potentially harder to trump.</span
+      >
+      <span class="lang-zh"
+        >游戏中有三种基本牌型：单张、相同的牌、以及相同牌的连续序列。某一花色中一组最高的牌可以同时打出作为“甩牌”，这可能会更难被吃掉。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >In general, players must attempt to match the format to the best of their
+        ability using cards in the same suit. If the player has no remaining cards
+        in the suit (i.e. they are void in the suit), there are no requirements on
+        what cards they can play.</span
+      >
+      <span class="lang-zh"
+        >一般来说，玩家必须尽力用同花色的牌去匹配牌型。如果某花色已无剩牌（即在该花色缺门），则对其出什么牌没有要求。</span
+      >
+    </p>
 
-      <h5>Single cards</h5>
-      <p>
-        Any single card can always lead a trick. Other players are required to
+    <h5>
+      <span class="lang-en">Single cards</span
+      ><span class="lang-zh">单张</span>
+    </h5>
+    <p>
+      <span class="lang-en"
+        >Any single card can always lead a trick. Other players are required to
         play a card in the same suit if they have one; otherwise, any card can be
-        played.
-      </p>
-      <p>
-        If a trump card is played, the highest trump card wins the trick.
+        played.</span
+      >
+      <span class="lang-zh"
+        >任何单张都可以领出一轮。其他玩家若有同花色的牌则必须出，否则可以出任意牌。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >If a trump card is played, the highest trump card wins the trick.
         Otherwise, the highest card in the original suit wins the trick. If the
         same card is played by multiple players, the first one to play has
-        precedence.
-      </p>
-      <p>Example:</p>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂢</span>
-        </div>
-        <div class="label">
-          Player 1
-        </div>
+        precedence.</span
+      >
+      <span class="lang-zh"
+        >若有主牌打出，则最大的主牌赢得该轮。否则，原花色中最大的牌赢得该轮。若多名玩家打出相同的牌，先打者优先。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en">Example:</span><span class="lang-zh">示例：</span>
+    </p>
+    <div class="labeled-play">
+      <div class="play"><span class="card ♤">🂢</span></div>
+      <div class="label">
+        <span class="lang-en">Player 1</span><span class="lang-zh">玩家 1</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂭</span>
-        </div>
-        <div class="label">
-          Player 2
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play"><span class="card ♤">🂭</span></div>
+      <div class="label">
+        <span class="lang-en">Player 2</span><span class="lang-zh">玩家 2</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂡</span>
-        </div>
-        <div class="label">
-          Player 3
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play"><span class="card ♤">🂡</span></div>
+      <div class="label">
+        <span class="lang-en">Player 3</span><span class="lang-zh">玩家 3</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂡</span>
-        </div>
-        <div class="label">
-          Player 4
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play"><span class="card ♤">🂡</span></div>
+      <div class="label">
+        <span class="lang-en">Player 4</span><span class="lang-zh">玩家 4</span>
       </div>
-      <p>
-        Player 3 wins this trick, because they played the highest card in the
-        same suit (<span class="♤">A♤</span>) first.
-      </p>
-      <p>Example 2:</p>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂢</span>
-        </div>
-        <div class="label">
-          Player 1
-        </div>
+    </div>
+    <p>
+      <span class="lang-en"
+        >Player 3 wins this trick, because they played the highest card in the
+        same suit (<span class="♤">A♤</span>) first.</span
+      >
+      <span class="lang-zh"
+        >玩家 3 赢得这一轮，因为他们最先打出了同花色中最大的牌（<span
+          class="♤"
+          >A♤</span
+        >）。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en">Example 2:</span
+      ><span class="lang-zh">示例 2：</span>
+    </p>
+    <div class="labeled-play">
+      <div class="play"><span class="card ♤">🂢</span></div>
+      <div class="label">
+        <span class="lang-en">Player 1</span><span class="lang-zh">玩家 1</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card 🃏">🃟</span>
-        </div>
-        <div class="label">
-          Player 2
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play"><span class="card 🃏">🃟</span></div>
+      <div class="label">
+        <span class="lang-en">Player 2</span><span class="lang-zh">玩家 2</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♢">🃇</span>
-        </div>
-        <div class="label">
-          Player 3
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play"><span class="card ♢">🃇</span></div>
+      <div class="label">
+        <span class="lang-en">Player 3</span><span class="lang-zh">玩家 3</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂡</span>
-        </div>
-        <div class="label">
-          Player 4
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play"><span class="card ♤">🂡</span></div>
+      <div class="label">
+        <span class="lang-en">Player 4</span><span class="lang-zh">玩家 4</span>
       </div>
-      <p>
-        Player 2 wins this trick, because they played the highest trump card
+    </div>
+    <p>
+      <span class="lang-en"
+        >Player 2 wins this trick, because they played the highest trump card
         (<span class="🃏">big joker</span>). Note that Player 3 is also void in
-        spades (<span class="♤">♤</span>), but did not play a trump card
-        and so cannot win the trick.
-      </p>
+        spades (<span class="♤">♤</span>), but did not play a trump card and so
+        cannot win the trick.</span
+      >
+      <span class="lang-zh"
+        >玩家 2 赢得这一轮，因为他们打出了最大的主牌（<span class="🃏"
+          >大王</span
+        >）。注意玩家 3 同样在黑桃（<span class="♤">♤</span
+        >）上缺门，但没有打出主牌，因此不能赢得该轮。</span
+      >
+    </p>
 
-      <h5>Identical cards (doubles, triples, four-of-a-kind, ...)</h5>
-      <p>
-        Sets of identical cards can always lead a trick. Other players are
-        obligated to match the set as best they can within the suit.
-      </p>
-      <p>
-        Note: cards of equal value are not necessarily identical; they have to
-        have the exact same card face.
-      </p>
-      <p>Examples:</p>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂡</span>
-          <span class="card ♤">🂡</span>
-        </div>
-        <div class="label">
-          A pair
-        </div>
+    <h5>
+      <span class="lang-en"
+        >Identical cards (doubles, triples, four-of-a-kind, ...)</span
+      ><span class="lang-zh">相同的牌（对子、三张、四张……）</span>
+    </h5>
+    <p>
+      <span class="lang-en"
+        >Sets of identical cards can always lead a trick. Other players are
+        obligated to match the set as best they can within the suit.</span
+      >
+      <span class="lang-zh"
+        >相同牌的组合都可以领出一轮。其他玩家有义务在该花色内尽量匹配。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >Note: cards of equal value are not necessarily identical; they have to
+        have the exact same card face.</span
+      >
+      <span class="lang-zh"
+        >注意：等值的牌不一定相同；它们必须是完全相同的牌面。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en">Examples:</span><span class="lang-zh">示例：</span>
+    </p>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂡</span>
+        <span class="card ♤">🂡</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♢">🃇</span>
-          <span class="card ♢">🃇</span>
-          <span class="card ♢">🃇</span>
-        </div>
-        <div class="label">
-          A triple
-        </div>
+      <div class="label">
+        <span class="lang-en">A pair</span><span class="lang-zh">一对</span>
       </div>
-      <div class="labeled-play">
-        <div class="play" id="jokers2"></div>
-        <div class="label">
-          Not identical / not a pair
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♢">🃇</span>
+        <span class="card ♢">🃇</span>
+        <span class="card ♢">🃇</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card 🃟">🃟</span>
-          <span class="card 🃟">🃟</span>
-        </div>
-        <div class="label">
-          A pair
-        </div>
+      <div class="label">
+        <span class="lang-en">A triple</span><span class="lang-zh">三张</span>
       </div>
-      <p>
-        For example, if the trick-format is triples, the ordering of required plays is:
-      </p>
-      <ol>
-        <li>Triples in the same suit (note: triples which are part of a four-of-a-kind or other type of play are not special or protected)</li>
-        <li>Doubles in the same suit, along with another card in the same suit</li>
-        <li>Three cards in the same suit</li>
-        <li>Two cards in the same suit, along with a card in any other suit</li>
-        <li>One card in the same suit, along with two cards in any other suit</li>
-        <li>Any three cards</li>
-      </ol>
-      <p>
-        Only plays which match the trick-format (either in the original suit,
-        or in trump) are eligible to win the trick. As with the single-card
-        format, the first player to play an identical play has precedence.
-      </p>
-      <p>Example:</p>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂢</span>
-        </div>
-        <div class="label">
-          Player 1
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play" id="jokers2"></div>
+      <div class="label">
+        <span class="lang-en">Not identical / not a pair</span
+        ><span class="lang-zh">不相同／不是一对</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂭</span>
-          <span class="card ♤">🂤</span>
-        </div>
-        <div class="label">
-          Player 2
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card 🃟">🃟</span>
+        <span class="card 🃟">🃟</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂡</span>
-          <span class="card ♤">🂦</span>
-        </div>
-        <div class="label">
-          Player 3
-        </div>
+      <div class="label">
+        <span class="lang-en">A pair</span><span class="lang-zh">一对</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂣</span>
-          <span class="card ♤">🂣</span>
-        </div>
-        <div class="label">
-          Player 4
-        </div>
+    </div>
+    <p>
+      <span class="lang-en"
+        >For example, if the trick-format is triples, the ordering of required
+        plays is:</span
+      ><span class="lang-zh">例如，若牌型是三张，则要求出牌的优先顺序为：</span>
+    </p>
+    <ol>
+      <li>
+        <span class="lang-en"
+          >Triples in the same suit (note: triples which are part of a
+          four-of-a-kind or other type of play are not special or protected)</span
+        ><span class="lang-zh"
+          >同花色的三张（注意：属于四张或其他牌型的三张并不特殊，也不受保护）</span
+        >
+      </li>
+      <li>
+        <span class="lang-en"
+          >Doubles in the same suit, along with another card in the same suit</span
+        ><span class="lang-zh">同花色的一对，再加一张同花色的牌</span>
+      </li>
+      <li>
+        <span class="lang-en">Three cards in the same suit</span
+        ><span class="lang-zh">同花色的三张牌</span>
+      </li>
+      <li>
+        <span class="lang-en"
+          >Two cards in the same suit, along with a card in any other suit</span
+        ><span class="lang-zh">同花色的两张牌，再加任意其他花色的一张</span>
+      </li>
+      <li>
+        <span class="lang-en"
+          >One card in the same suit, along with two cards in any other suit</span
+        ><span class="lang-zh">同花色的一张牌，再加任意其他花色的两张</span>
+      </li>
+      <li>
+        <span class="lang-en">Any three cards</span
+        ><span class="lang-zh">任意三张牌</span>
+      </li>
+    </ol>
+    <p>
+      <span class="lang-en"
+        >Only plays which match the trick-format (either in the original suit, or
+        in trump) are eligible to win the trick. As with the single-card format,
+        the first player to play an identical play has precedence.</span
+      >
+      <span class="lang-zh"
+        >只有匹配牌型的出牌（无论在原花色还是主牌中）才有资格赢得该轮。与单张牌型一样，先打出相同牌型者优先。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en">Example:</span><span class="lang-zh">示例：</span>
+    </p>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂢</span>
       </div>
-      <p>
-        Player 4 wins this trick, because they played the highest pair in the same suit
+      <div class="label">
+        <span class="lang-en">Player 1</span><span class="lang-zh">玩家 1</span>
+      </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂭</span>
+        <span class="card ♤">🂤</span>
+      </div>
+      <div class="label">
+        <span class="lang-en">Player 2</span><span class="lang-zh">玩家 2</span>
+      </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂡</span>
+        <span class="card ♤">🂦</span>
+      </div>
+      <div class="label">
+        <span class="lang-en">Player 3</span><span class="lang-zh">玩家 3</span>
+      </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂣</span>
+        <span class="card ♤">🂣</span>
+      </div>
+      <div class="label">
+        <span class="lang-en">Player 4</span><span class="lang-zh">玩家 4</span>
+      </div>
+    </div>
+    <p>
+      <span class="lang-en"
+        >Player 4 wins this trick, because they played the highest pair in the
         same suit (<span class="♤">3♤3♤</span>). Player 2 and Player 3 did not
         play a pair; therefore, they cannot win this trick, and (by inference)
         cannot have any <span class="♤">spade</span> pairs remaining in their
-        hands.
-      </p>
-      <p>Example 2:</p>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂢</span>
-        </div>
-        <div class="label">
-          Player 1
-        </div>
+        hands.</span
+      >
+      <span class="lang-zh"
+        >玩家 4 赢得这一轮，因为他们打出了同花色中最大的对子（<span class="♤"
+          >3♤3♤</span
+        >）。玩家 2 和玩家 3 没有打出对子；因此他们不能赢得该轮，并且（可以推断）手中不再有<span
+          class="♤"
+          >黑桃</span
+        >对子。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en">Example 2:</span
+      ><span class="lang-zh">示例 2：</span>
+    </p>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂢</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂭</span>
-          <span class="card ♢">🃃</span>
-        </div>
-        <div class="label">
-          Player 2
-        </div>
+      <div class="label">
+        <span class="lang-en">Player 1</span><span class="lang-zh">玩家 1</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card 🃟">🃟</span>
-          <span class="card 🃟">🃟</span>
-        </div>
-        <div class="label">
-          Player 3
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂭</span>
+        <span class="card ♢">🃃</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂣</span>
-          <span class="card ♤">🂣</span>
-        </div>
-        <div class="label">
-          Player 4
-        </div>
+      <div class="label">
+        <span class="lang-en">Player 2</span><span class="lang-zh">玩家 2</span>
       </div>
-      <p>
-        Player 3 wins this trick, because they played a trump pair. Because
-        both Player 2 and Player 3 played non-<span class="♤">spade</span>
-        cards, they must be void in <span class="♤">spades</span>.
-      </p>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card 🃟">🃟</span>
+        <span class="card 🃟">🃟</span>
+      </div>
+      <div class="label">
+        <span class="lang-en">Player 3</span><span class="lang-zh">玩家 3</span>
+      </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂣</span>
+        <span class="card ♤">🂣</span>
+      </div>
+      <div class="label">
+        <span class="lang-en">Player 4</span><span class="lang-zh">玩家 4</span>
+      </div>
+    </div>
+    <p>
+      <span class="lang-en"
+        >Player 3 wins this trick, because they played a trump pair. Because both
+        Player 2 and Player 3 played non-<span class="♤">spade</span> cards, they
+        must be void in <span class="♤">spades</span>.</span
+      >
+      <span class="lang-zh"
+        >玩家 3 赢得这一轮，因为他们打出了一对主牌。由于玩家 2 和玩家 3
+        都打出了非<span class="♤">黑桃</span>的牌，他们一定在<span class="♤"
+          >黑桃</span
+        >上缺门。</span
+      >
+    </p>
 
-      <h5>Tractors (consecutive groups of identical cards)</h5>
-      <p>
-        Consecutive sequences of at least two identical cards of the same size
-        and in the same suit are called tractors, and are a special play-type
-        in and of themselves. They are parameterized by their length and the
-        number of identical cards, both of which are at required to be at least
-        two (the smallest tractor is four cards).
-      </p>
-      <p>Examples:</p>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂣</span>
-          <span class="card ♤">🂣</span>
-        </div>
-        <div class="label">
-          Tractor of two pairs
-        </div>
+    <h5>
+      <span class="lang-en">Tractors (consecutive groups of identical cards)</span
+      ><span class="lang-zh">拖拉机（连续的相同牌组）</span>
+    </h5>
+    <p>
+      <span class="lang-en"
+        >Consecutive sequences of at least two identical cards of the same size
+        and in the same suit are called tractors, and are a special play-type in
+        and of themselves. They are parameterized by their length and the number
+        of identical cards, both of which are required to be at least two (the
+        smallest tractor is four cards).</span
+      >
+      <span class="lang-zh"
+        >同花色、同张数且至少有两组连续的相同牌，称为拖拉机，本身是一种特殊牌型。它们由长度和相同牌的张数两个参数确定，二者都至少为
+        2（最小的拖拉机是四张牌）。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en">Examples:</span><span class="lang-zh">示例：</span>
+    </p>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂣</span>
+        <span class="card ♤">🂣</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂣</span>
-          <span class="card ♤">🂣</span>
-          <span class="card ♤">🂤</span>
-          <span class="card ♤">🂤</span>
-        </div>
-        <div class="label">
-          Tractor of three pairs
-        </div>
+      <div class="label">
+        <span class="lang-en">Tractor of two pairs</span
+        ><span class="lang-zh">两对的拖拉机</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂣</span>
-          <span class="card ♤">🂣</span>
-          <span class="card ♤">🂣</span>
-        </div>
-        <div class="label">
-          Tractor of two triples
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂣</span>
+        <span class="card ♤">🂣</span>
+        <span class="card ♤">🂤</span>
+        <span class="card ♤">🂤</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂣</span>
-          <span class="card ♤">🂣</span>
-        </div>
-        <div class="label">
-          Not a tractor&mdash; there is an extra <span class="♤">2♤</span>. See "Throws", below.
-        </div>
+      <div class="label">
+        <span class="lang-en">Tractor of three pairs</span
+        ><span class="lang-zh">三对的拖拉机</span>
       </div>
-      <p>
-        Whether pairs are sequential depends on the current trump: since cards
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂣</span>
+        <span class="card ♤">🂣</span>
+        <span class="card ♤">🂣</span>
+      </div>
+      <div class="label">
+        <span class="lang-en">Tractor of two triples</span
+        ><span class="lang-zh">两组三张的拖拉机</span>
+      </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂣</span>
+        <span class="card ♤">🂣</span>
+      </div>
+      <div class="label">
+        <span class="lang-en"
+          >Not a tractor — there is an extra <span class="♤">2♤</span>. See
+          "Throws", below.</span
+        ><span class="lang-zh"
+          >不是拖拉机——多了一张 <span class="♤">2♤</span>。见下文“甩牌”。</span
+        >
+      </div>
+    </div>
+    <p>
+      <span class="lang-en"
+        >Whether pairs are sequential depends on the current trump: since cards
         with the trump rank are some of the highest trumps, right below the
-        jokers, their positioning in the overall order has changed.
-      </p>
-      <p>Example of sequential pairs due to trump-number reordering:</p>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂤</span>
-          <span class="card ♤">🂤</span>
-        </div>
-        <div class="label">
-          Tractor if 3 is the trump rank
-        </div>
+        jokers, their positioning in the overall order has changed.</span
+      >
+      <span class="lang-zh"
+        >对子是否连续取决于当前的主牌：由于级牌是仅次于王的最高主牌之一，它们在整体顺序中的位置发生了变化。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >Example of sequential pairs due to trump-number reordering:</span
+      ><span class="lang-zh">因级牌重排而连续的对子示例：</span>
+    </p>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂤</span>
+        <span class="card ♤">🂤</span>
       </div>
-      <p>
-        Additionally, pairs of equal cards don't make tractors.
-      </p>
-      <p>
-        Tractors are relatively uncommon, and tend to win tricks. They are also
+      <div class="label">
+        <span class="lang-en">Tractor if 3 is the trump rank</span
+        ><span class="lang-zh">若级牌为 3，则为拖拉机</span>
+      </div>
+    </div>
+    <p>
+      <span class="lang-en"
+        >Additionally, pairs of equal cards don't make tractors.</span
+      ><span class="lang-zh">此外，等值牌的对子不能组成拖拉机。</span>
+    </p>
+    <p>
+      <span class="lang-en"
+        >Tractors are relatively uncommon, and tend to win tricks. They are also
         strategically good, because matching the tractor format is at least as
-        difficult as matching the equivalent number of identical cards.
-      </p>
-      <p>
-        For example, if the trick-format is tractors made up of three
-        consecutive pairs, the ordering of required plays is:
-      </p>
-      <ol>
-        <li>Three consecutive pairs in the same suit</li>
-        <li>Two consecutive pairs in the same suit, along with another pair in the same suit</li>
-        <li>Three pairs in the same suit</li>
-        <li>Two consecutive pairs in the same suit, along with two other cards in the same suit</li>
-        <li>Two pairs in the same suit, along with two other cards in the same suit</li>
-        <li>One pair in the same suit, along with four other cards in the same suit</li>
-        <li>Six cards in the same suit</li>
-        <li>Five cards in the same suit, along with another card in any other suit</li>
-        <li>Four cards in the same suit, along with two cards in any other suit</li>
-        <li>Three cards in the same suit, along with three cards in any other suit</li>
-        <li>Two cards in the same suit, along with four cards in any other suit</li>
-        <li>One card in the same suit, along five cards in any other suit</li>
-        <li>Any six cards</li>
-      </ol>
-      <p>
-        Only plays which match the trick-format (either in the original suit,
-        or in trump) are eligible to win the trick. As with the single-card and
+        difficult as matching the equivalent number of identical cards.</span
+      >
+      <span class="lang-zh"
+        >拖拉机相对少见，往往能赢得该轮。它们在策略上也很有利，因为匹配拖拉机牌型至少和匹配同等数量的相同牌一样困难。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >For example, if the trick-format is tractors made up of three consecutive
+        pairs, the ordering of required plays is:</span
+      ><span class="lang-zh"
+        >例如，若牌型是由三组连续对子组成的拖拉机，则要求出牌的优先顺序为：</span
+      >
+    </p>
+    <ol>
+      <li>
+        <span class="lang-en">Three consecutive pairs in the same suit</span
+        ><span class="lang-zh">同花色的三组连续对子</span>
+      </li>
+      <li>
+        <span class="lang-en"
+          >Two consecutive pairs in the same suit, along with another pair in the
+          same suit</span
+        ><span class="lang-zh">同花色的两组连续对子，再加同花色的另一对</span>
+      </li>
+      <li>
+        <span class="lang-en">Three pairs in the same suit</span
+        ><span class="lang-zh">同花色的三对</span>
+      </li>
+      <li>
+        <span class="lang-en"
+          >Two consecutive pairs in the same suit, along with two other cards in
+          the same suit</span
+        ><span class="lang-zh"
+          >同花色的两组连续对子，再加同花色的另两张牌</span
+        >
+      </li>
+      <li>
+        <span class="lang-en"
+          >Two pairs in the same suit, along with two other cards in the same
+          suit</span
+        ><span class="lang-zh">同花色的两对，再加同花色的另两张牌</span>
+      </li>
+      <li>
+        <span class="lang-en"
+          >One pair in the same suit, along with four other cards in the same
+          suit</span
+        ><span class="lang-zh">同花色的一对，再加同花色的另四张牌</span>
+      </li>
+      <li>
+        <span class="lang-en">Six cards in the same suit</span
+        ><span class="lang-zh">同花色的六张牌</span>
+      </li>
+      <li>
+        <span class="lang-en"
+          >Five cards in the same suit, along with another card in any other
+          suit</span
+        ><span class="lang-zh">同花色的五张牌，再加任意其他花色的一张</span>
+      </li>
+      <li>
+        <span class="lang-en"
+          >Four cards in the same suit, along with two cards in any other suit</span
+        ><span class="lang-zh">同花色的四张牌，再加任意其他花色的两张</span>
+      </li>
+      <li>
+        <span class="lang-en"
+          >Three cards in the same suit, along with three cards in any other
+          suit</span
+        ><span class="lang-zh">同花色的三张牌，再加任意其他花色的三张</span>
+      </li>
+      <li>
+        <span class="lang-en"
+          >Two cards in the same suit, along with four cards in any other suit</span
+        ><span class="lang-zh">同花色的两张牌，再加任意其他花色的四张</span>
+      </li>
+      <li>
+        <span class="lang-en"
+          >One card in the same suit, along with five cards in any other suit</span
+        ><span class="lang-zh">同花色的一张牌，再加任意其他花色的五张</span>
+      </li>
+      <li>
+        <span class="lang-en">Any six cards</span
+        ><span class="lang-zh">任意六张牌</span>
+      </li>
+    </ol>
+    <p>
+      <span class="lang-en"
+        >Only plays which match the trick-format (either in the original suit, or
+        in trump) are eligible to win the trick. As with the single-card and
         identical-card formats, the first player to play an identical play has
-        precedence.
-      </p>
-      <p>Example:</p>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂣</span>
-          <span class="card ♤">🂣</span>
-        </div>
-        <div class="label">
-          Player 1
-        </div>
+        precedence.</span
+      >
+      <span class="lang-zh"
+        >只有匹配牌型的出牌（无论在原花色还是主牌中）才有资格赢得该轮。与单张和相同牌牌型一样，先打出相同牌型者优先。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en">Example:</span><span class="lang-zh">示例：</span>
+    </p>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂣</span>
+        <span class="card ♤">🂣</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂤</span>
-          <span class="card ♤">🂤</span>
-          <span class="card ♤">🂤</span>
-          <span class="card ♤">🂤</span>
-        </div>
-        <div class="label">
-          Player 2
-        </div>
+      <div class="label">
+        <span class="lang-en">Player 1</span><span class="lang-zh">玩家 1</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂦</span>
-          <span class="card ♤">🂦</span>
-          <span class="card ♤">🂡</span>
-          <span class="card ♤">🂡</span>
-        </div>
-        <div class="label">
-          Player 3
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂤</span>
+        <span class="card ♤">🂤</span>
+        <span class="card ♤">🂤</span>
+        <span class="card ♤">🂤</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂦</span>
-          <span class="card ♤">🂧</span>
-          <span class="card ♡">🂸</span>
-          <span class="card ♡">🂸</span>
-        </div>
-        <div class="label">
-          Player 4
-        </div>
+      <div class="label">
+        <span class="lang-en">Player 2</span><span class="lang-zh">玩家 2</span>
       </div>
-      <p>
-        Player 1 wins this trick, because they are the only player to meet the
-        format. Player 2 and Player 3 played non-consecutive pairs, while
-        Player 4 played cards in a different suit. Since this trick is led with
-        a tractor, all players had to play two pairs in <span
-        class="♤">spades</span> if they had them.
-      </p>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂦</span>
+        <span class="card ♤">🂦</span>
+        <span class="card ♤">🂡</span>
+        <span class="card ♤">🂡</span>
+      </div>
+      <div class="label">
+        <span class="lang-en">Player 3</span><span class="lang-zh">玩家 3</span>
+      </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂦</span>
+        <span class="card ♤">🂧</span>
+        <span class="card ♡">🂸</span>
+        <span class="card ♡">🂸</span>
+      </div>
+      <div class="label">
+        <span class="lang-en">Player 4</span><span class="lang-zh">玩家 4</span>
+      </div>
+    </div>
+    <p>
+      <span class="lang-en"
+        >Player 1 wins this trick, because they are the only player to meet the
+        format. Player 2 and Player 3 played non-consecutive pairs, while Player 4
+        played cards in a different suit. Since this trick is led with a tractor,
+        all players had to play two pairs in <span class="♤">spades</span> if they
+        had them.</span
+      >
+      <span class="lang-zh"
+        >玩家 1 赢得这一轮，因为只有他们符合牌型。玩家 2 和玩家 3
+        打的是不连续的对子，而玩家
+        4 出的是不同花色的牌。由于这一轮以拖拉机领出，所有玩家若有<span
+          class="♤"
+          >黑桃</span
+        >的两对就必须打出。</span
+      >
+    </p>
 
-
-      <h5>Throws (sets of the highest possible individual trick-formats within a suit)</h5>
-      <p>
-        Any set of the highest possible trick-formats in a given suit can be
+    <h5>
+      <span class="lang-en"
+        >Throws (sets of the highest possible individual trick-formats within a
+        suit)</span
+      ><span class="lang-zh">甩牌（某花色中一组最高的单个牌型）</span>
+    </h5>
+    <p>
+      <span class="lang-en"
+        >Any set of the highest possible trick-formats in a given suit can be
         played simultaneously as a "throw". It is expected that the player
-        initiating a throw believes that their play is valid, i.e. that no
-        other player can defeat any component of the throw using cards in the
-        same suit.
-      </p>
-      <p>
-        Once a throw has been played, each player should (in counter-clockwise
+        initiating a throw believes that their play is valid, i.e. that no other
+        player can defeat any component of the throw using cards in the same
+        suit.</span
+      >
+      <span class="lang-zh"
+        >某一花色中一组最高的牌型可以同时打出作为“甩牌”。发起甩牌的玩家应当相信自己的出牌是有效的，即没有其他玩家能用同花色的牌击败该甩牌的任何组成部分。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >Once a throw has been played, each player should (in counter-clockwise
         order) affirm that the throw is valid and that it cannot be defeated
-        within the same suit. If the throw is determined to be invalid, the
-        player which initiated the throw is obligated to lead with the
-        component that can be defeated. In this implementation, no additional
-        penalties are imposed on incorrect throws.
-      </p>
-      <p>
-        Other players are not obligated to ensure that their plays are the
-        highest possible plays within their own suits, though they still need
-        to match each component's trick-format as best they can within the
-        suit.
-      </p>
-      <p>Examples for two decks:</p>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂡</span>
-          <span class="card ♤">🂡</span>
-          <span class="card ♤">🂮</span>
-        </div>
-        <div class="label">
-          Valid throw
-        </div>
+        within the same suit. If the throw is determined to be invalid, the player
+        which initiated the throw is obligated to lead with the component that can
+        be defeated. In this implementation, no additional penalties are imposed
+        on incorrect throws.</span
+      >
+      <span class="lang-zh"
+        >甩牌打出后，每名玩家应（按逆时针顺序）确认该甩牌有效且在同花色内无法被击败。若判定甩牌无效，则发起甩牌的玩家必须改为领出可被击败的那一部分。在本实现中，错误的甩牌不会受到额外惩罚。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >Other players are not obligated to ensure that their plays are the highest
+        possible plays within their own suits, though they still need to match each
+        component's trick-format as best they can within the suit.</span
+      >
+      <span class="lang-zh"
+        >其他玩家无需确保自己的出牌是其花色中最高的，但仍需在花色内尽量匹配每个组成部分的牌型。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en">Examples for two decks:</span
+      ><span class="lang-zh">两副牌的示例：</span>
+    </p>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂡</span>
+        <span class="card ♤">🂡</span>
+        <span class="card ♤">🂮</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂡</span>
-          <span class="card ♤">🂮</span>
-          <span class="card ♤">🂮</span>
-        </div>
-        <div class="label">
-          Valid throw
-        </div>
+      <div class="label">
+        <span class="lang-en">Valid throw</span
+        ><span class="lang-zh">有效的甩牌</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂡</span>
-          <span class="card ♤">🂭</span>
-          <span class="card ♤">🂭</span>
-        </div>
-        <div class="label">
-          Valid if <span class="♤">K♤K♤</span> is unplayable
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂡</span>
+        <span class="card ♤">🂮</span>
+        <span class="card ♤">🂮</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂤</span>
-          <span class="card ♤">🂤</span>
-        </div>
-        <div class="label">
-          Valid if there are no higher <span class="♤">spade</span> pairs
-        </div>
+      <div class="label">
+        <span class="lang-en">Valid throw</span
+        ><span class="lang-zh">有效的甩牌</span>
       </div>
-      <p>
-        In cases of ambiguity between components (e.g. five-of-a-kind vs.
-        tractor), the interpretation with the longest single component is
-        chosen. If there are multiple ambiguous components of the same length,
-        tractors are preferred over identical cards.
-      </p>
-      <p>Example of a throw ambiguity:</p>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂢</span>
-          <span class="card ♤">🂣</span>
-          <span class="card ♤">🂣</span>
-        </div>
-        <div class="label">
-          Tractor with an extra card
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂡</span>
+        <span class="card ♤">🂭</span>
+        <span class="card ♤">🂭</span>
       </div>
-      <p>
-        The above play can be interpreted as either a tractor and a single card
+      <div class="label">
+        <span class="lang-en">Valid if <span class="♤">K♤K♤</span> is unplayable</span
+        ><span class="lang-zh"
+          >若 <span class="♤">K♤K♤</span> 无法打出则有效</span
+        >
+      </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂤</span>
+        <span class="card ♤">🂤</span>
+      </div>
+      <div class="label">
+        <span class="lang-en"
+          >Valid if there are no higher <span class="♤">spade</span> pairs</span
+        ><span class="lang-zh"
+          >若没有更高的<span class="♤">黑桃</span>对子则有效</span
+        >
+      </div>
+    </div>
+    <p>
+      <span class="lang-en"
+        >In cases of ambiguity between components (e.g. five-of-a-kind vs.
+        tractor), the interpretation with the longest single component is chosen.
+        If there are multiple ambiguous components of the same length, tractors
+        are preferred over identical cards.</span
+      >
+      <span class="lang-zh"
+        >当各组成部分存在歧义时（如五张 vs.
+        拖拉机），选择单个组成部分最长的解释。若有多个等长的歧义部分，则拖拉机优先于相同牌。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en">Example of a throw ambiguity:</span
+      ><span class="lang-zh">甩牌歧义示例：</span>
+    </p>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂢</span>
+        <span class="card ♤">🂣</span>
+        <span class="card ♤">🂣</span>
+      </div>
+      <div class="label">
+        <span class="lang-en">Tractor with an extra card</span
+        ><span class="lang-zh">拖拉机加一张牌</span>
+      </div>
+    </div>
+    <p>
+      <span class="lang-en"
+        >The above play can be interpreted as either a tractor and a single card
         ([<span class="♤">2♤2♤3♤3♤</span>] + <span class="♤">2♤</span>), or as a
-        triple and a pair ([<span class="♤">2♤2♤2♤</span>] + [<span class="♤">3♤3♤</span>]).
-        Since the former interpretation has a maximum component length of 4
+        triple and a pair ([<span class="♤">2♤2♤2♤</span>] + [<span class="♤"
+          >3♤3♤</span
+        >]). Since the former interpretation has a maximum component length of 4
         cards, greater than the latter's 3 cards, we interpret this as a tractor
-        and a single card. The "full house" concept from poker does not exist
-        in this game.
-      </p>
-      <p>
-        Only plays which match the trick-format (either in the original suit,
-        or in trump) are eligible to win the trick. As with the other formats,
-        the first player to play an identical play has precedence.
-      </p>
-      <p>
-        Note: in order to defeat a throw, every component of the throw must be
+        and a single card. The "full house" concept from poker does not exist in
+        this game.</span
+      >
+      <span class="lang-zh"
+        >上面的出牌既可解释为一个拖拉机加一张单牌（[<span class="♤"
+          >2♤2♤3♤3♤</span
+        >] + <span class="♤">2♤</span>），也可解释为一个三张加一对（[<span
+          class="♤"
+          >2♤2♤2♤</span
+        >] + [<span class="♤">3♤3♤</span>]）。由于前一种解释的最大组成部分为 4
+        张，大于后者的 3
+        张，因此我们将其解释为拖拉机加一张单牌。扑克中的“葫芦”概念在本游戏中不存在。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >Only plays which match the trick-format (either in the original suit, or
+        in trump) are eligible to win the trick. As with the other formats, the
+        first player to play an identical play has precedence.</span
+      >
+      <span class="lang-zh"
+        >只有匹配牌型的出牌（无论在原花色还是主牌中）才有资格赢得该轮。与其他牌型一样，先打出相同牌型者优先。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >Note: in order to defeat a throw, every component of the throw must be
         individually defeated. Since a throw is only valid if it cannot be
-        defeated within its own suit, this means that a throw can only be
-        defeated by the same pattern of cards in the trump suit.
-      </p>
+        defeated within its own suit, this means that a throw can only be defeated
+        by the same pattern of cards in the trump suit.</span
+      >
+      <span class="lang-zh"
+        >注意：要击败甩牌，必须分别击败其每一个组成部分。由于甩牌只有在同花色内无法被击败时才有效，这意味着甩牌只能被主牌花色中相同形态的牌击败。</span
+      >
+    </p>
 
-      <p>Example:</p>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂡</span>
-          <span class="card ♤">🂡</span>
-          <span class="card ♤">🂭</span>
-          <span class="card ♤">🂭</span>
-        </div>
-        <div class="label">
-          Player 1
-        </div>
+    <p>
+      <span class="lang-en">Example:</span><span class="lang-zh">示例：</span>
+    </p>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂡</span>
+        <span class="card ♤">🂡</span>
+        <span class="card ♤">🂭</span>
+        <span class="card ♤">🂭</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂭</span>
-          <span class="card ♤">🂭</span>
-          <span class="card ♤">🂤</span>
-          <span class="card ♤">🂤</span>
-        </div>
-        <div class="label">
-          Player 2
-        </div>
+      <div class="label">
+        <span class="lang-en">Player 1</span><span class="lang-zh">玩家 1</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂦</span>
-          <span class="card ♤">🂦</span>
-          <span class="card ♤">🂧</span>
-          <span class="card ♤">🂧</span>
-        </div>
-        <div class="label">
-          Player 3
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂭</span>
+        <span class="card ♤">🂭</span>
+        <span class="card ♤">🂤</span>
+        <span class="card ♤">🂤</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂦</span>
-          <span class="card ♤">🂧</span>
-          <span class="card ♡">🂸</span>
-          <span class="card ♡">🂸</span>
-        </div>
-        <div class="label">
-          Player 4
-        </div>
+      <div class="label">
+        <span class="lang-en">Player 2</span><span class="lang-zh">玩家 2</span>
       </div>
-      <p>
-        Player 1 wins this trick, because they are the only player to meet the
-        format. Note: though there exists another pair of <span
-          class="♤">Q♤Q♤</span> played by Player 2, this is a valid throw
-        because no player can show that they have <span class="♤">K♤K♤</span>
-        or <span class="♤">A♤A♤</span>, which are the only two higher pairs.
-        Player 3 is particularly upset, here, because they had a tractor in
-        spades, but it can't win in a trick with a two-pair-throw format.
-        Since this trick is led with a throw of two pairs, all players had to
-        play two pairs in <span class="♤">spades</span> if they had them.
-      </p>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂦</span>
+        <span class="card ♤">🂦</span>
+        <span class="card ♤">🂧</span>
+        <span class="card ♤">🂧</span>
+      </div>
+      <div class="label">
+        <span class="lang-en">Player 3</span><span class="lang-zh">玩家 3</span>
+      </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂦</span>
+        <span class="card ♤">🂧</span>
+        <span class="card ♡">🂸</span>
+        <span class="card ♡">🂸</span>
+      </div>
+      <div class="label">
+        <span class="lang-en">Player 4</span><span class="lang-zh">玩家 4</span>
+      </div>
+    </div>
+    <p>
+      <span class="lang-en"
+        >Player 1 wins this trick, because they are the only player to meet the
+        format. Note: though there exists another pair of <span class="♤"
+          >Q♤Q♤</span
+        > played by Player 2, this is a valid throw because no player can show
+        that they have <span class="♤">K♤K♤</span> or <span class="♤">A♤A♤</span>,
+        which are the only two higher pairs. Player 3 is particularly upset, here,
+        because they had a tractor in spades, but it can't win in a trick with a
+        two-pair-throw format. Since this trick is led with a throw of two pairs,
+        all players had to play two pairs in <span class="♤">spades</span> if they
+        had them.</span
+      >
+      <span class="lang-zh"
+        >玩家 1 赢得这一轮，因为只有他们符合牌型。注意：尽管玩家 2 打出了另一对
+        <span class="♤">Q♤Q♤</span>，但这仍是有效的甩牌，因为没有玩家能证明自己手中有
+        <span class="♤">K♤K♤</span> 或 <span class="♤">A♤A♤</span
+        >，而这是仅有的两对更高的对子。玩家 3
+        尤其郁闷，因为他们手里有黑桃的拖拉机，但在两对甩牌的牌型里它赢不了。由于这一轮以两对的甩牌领出，所有玩家若有<span
+          class="♤"
+          >黑桃</span
+        >的两对就必须打出。</span
+      >
+    </p>
 
-      <p>Example 2: trump is <span class="♢">2♢</span></p>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂡</span>
-          <span class="card ♤">🂡</span>
-          <span class="card ♤">🂮</span>
-        </div>
-        <div class="label">
-          Player 1
-        </div>
+    <p>
+      <span class="lang-en">Example 2: trump is <span class="♢">2♢</span></span
+      ><span class="lang-zh">示例 2：主牌为 <span class="♢">2♢</span></span>
+    </p>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂡</span>
+        <span class="card ♤">🂡</span>
+        <span class="card ♤">🂮</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♢">🃃</span>
-          <span class="card ♢">🃃</span>
-          <span class="card ♢">🃈</span>
-          
-        </div>
-        <div class="label">
-          Player 2
-        </div>
+      <div class="label">
+        <span class="lang-en">Player 1</span><span class="lang-zh">玩家 1</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♢">🃄</span>
-          <span class="card ♢">🃄</span>
-          <span class="card ♢">🃆</span>
-        </div>
-        <div class="label">
-          Player 3
-        </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♢">🃃</span>
+        <span class="card ♢">🃃</span>
+        <span class="card ♢">🃈</span>
       </div>
-      <div class="labeled-play">
-        <div class="play">
-          <span class="card ♤">🂦</span>
-          <span class="card ♤">🂧</span>
-          <span class="card ♡">🂸</span>
-        </div>
-        <div class="label">
-          Player 4
-        </div>
+      <div class="label">
+        <span class="lang-en">Player 2</span><span class="lang-zh">玩家 2</span>
       </div>
-      <p>
-        Player 2 wins this trick (admittedly contrived): both Player 2 and
-        Player 3 played trump cards in the appropriate format. However, though
-        Player 3's pair of <span class="♢">4♢4♢</span> is higher than Player
-        2's <span class="♢">3♢3♢</span>, their <span class="♢">6♢</span> is not
-        higher than Player 2's <span class="♢">8♢</span>, so Player 2 takes
-        precedence.
-      </p>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♢">🃄</span>
+        <span class="card ♢">🃄</span>
+        <span class="card ♢">🃆</span>
+      </div>
+      <div class="label">
+        <span class="lang-en">Player 3</span><span class="lang-zh">玩家 3</span>
+      </div>
+    </div>
+    <div class="labeled-play">
+      <div class="play">
+        <span class="card ♤">🂦</span>
+        <span class="card ♤">🂧</span>
+        <span class="card ♡">🂸</span>
+      </div>
+      <div class="label">
+        <span class="lang-en">Player 4</span><span class="lang-zh">玩家 4</span>
+      </div>
+    </div>
+    <p>
+      <span class="lang-en"
+        >Player 2 wins this trick (admittedly contrived): both Player 2 and Player
+        3 played trump cards in the appropriate format. However, though Player 3's
+        pair of <span class="♢">4♢4♢</span> is higher than Player 2's <span
+          class="♢"
+          >3♢3♢</span
+        >, their <span class="♢">6♢</span> is not higher than Player 2's <span
+          class="♢"
+          >8♢</span
+        >, so Player 2 takes precedence.</span
+      >
+      <span class="lang-zh"
+        >玩家 2 赢得这一轮（不得不说有点刻意）：玩家 2 和玩家 3
+        都按相应的牌型打出了主牌。然而，尽管玩家 3 的一对 <span class="♢"
+          >4♢4♢</span
+        > 高于玩家 2 的 <span class="♢">3♢3♢</span>，他们的 <span class="♢"
+          >6♢</span
+        > 并不高于玩家 2 的 <span class="♢">8♢</span>，因此玩家 2 优先。</span
+      >
+    </p>
 
-      <h4>Trick structure</h4>
-      <p>
-        In each trick, the first cards (also known as the lead cards) denote
-        the format of the trick. Only plays which match the trick's format are
-        eligible to win the trick.
-      </p>
-      <p>
-        Every player contributes the same number of cards to each trick.
-        Therefore, every player runs out of cards at the same time.
-      </p>
-      <p>
-        Players are also obligated to match the trick format to the fullest
-        extent possible: if they are able to match the format within trick's
-        suit, they must play those cards. If they can't match the format but
-        can match a looser variant of the format (e.g. they have a pair in the
-        suit, but the format requires a triple), they are also obligated to
-        play those cards.
-      </p>
-      <p>
-        This implies that a player can only play cards of a different suit than
-        the leading play in a trick if they have no cards in that suit (i.e.
-        they are void in the suit).
-      </p>
-      <p>
-        The winner of the current trick will play the first cards (and set the
-        trick format) for the next trick.
-      </p>
+    <h4>
+      <span class="lang-en">Trick structure</span
+      ><span class="lang-zh">每轮的结构</span>
+    </h4>
+    <p>
+      <span class="lang-en"
+        >In each trick, the first cards (also known as the lead cards) denote the
+        format of the trick. Only plays which match the trick's format are eligible
+        to win the trick.</span
+      >
+      <span class="lang-zh"
+        >每一轮中，最先出的牌（也称领出牌）确定该轮的牌型。只有匹配该轮牌型的出牌才有资格赢得该轮。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >Every player contributes the same number of cards to each trick.
+        Therefore, every player runs out of cards at the same time.</span
+      >
+      <span class="lang-zh"
+        >每名玩家在每一轮中出相同数量的牌。因此，所有玩家同时出完手牌。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >Players are also obligated to match the trick format to the fullest extent
+        possible: if they are able to match the format within trick's suit, they
+        must play those cards. If they can't match the format but can match a
+        looser variant of the format (e.g. they have a pair in the suit, but the
+        format requires a triple), they are also obligated to play those
+        cards.</span
+      >
+      <span class="lang-zh"
+        >玩家还有义务尽最大可能匹配牌型：若能在该轮花色内匹配牌型，就必须打出这些牌。若无法匹配牌型但能匹配较宽松的变体（如该花色有一对，而牌型要求三张），也必须打出这些牌。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >This implies that a player can only play cards of a different suit than
+        the leading play in a trick if they have no cards in that suit (i.e. they
+        are void in the suit).</span
+      >
+      <span class="lang-zh"
+        >这意味着，只有当玩家在领出花色上无牌（即缺门）时，才能在该轮出不同花色的牌。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >The winner of the current trick will play the first cards (and set the
+        trick format) for the next trick.</span
+      >
+      <span class="lang-zh"
+        >本轮的赢家将领出下一轮的牌（并设定下一轮的牌型）。</span
+      >
+    </p>
 
-      <h3>Winning the round and leveling up</h3>
-      <p>
-        The winning team for each round is determined by the number of points
-        the opposing team earned from tricks. If the opposing team won the last
-        trick, the cards hidden in the bottom are revealed. The point value of
-        any valuable cards at the bottom are multiplied by twice the number of
-        cards in the largest component of the last trick's format and awarded
-        to the opposing team. 
-      </p>
+    <h3>
+      <span class="lang-en">Winning the round and leveling up</span
+      ><span class="lang-zh">赢得本局并升级</span>
+    </h3>
+    <p>
+      <span class="lang-en"
+        >The winning team for each round is determined by the number of points the
+        opposing team earned from tricks. If the opposing team won the last trick,
+        the cards hidden in the bottom are revealed. The point value of any
+        valuable cards at the bottom are multiplied by twice the number of cards in
+        the largest component of the last trick's format and awarded to the
+        opposing team.</span
+      >
+      <span class="lang-zh"
+        >每局的获胜队伍由对方从各轮中获得的分数决定。若对方赢得了最后一轮，则揭开底牌。底牌中分牌的分值会乘以最后一轮牌型中最大组成部分张数的两倍，并判给对方。</span
+      >
+    </p>
 
-      <p>
-        There are five possible outcomes depending on the number of decks, as
-        detailed in the following table:
-      </p>
-      <select value="n" id="n-select">
-        <option value="n">n decks</option>
-        <option value="2">2 decks</option>
-        <option value="3">3 decks</option>
-        <option value="4">4 decks</option>
-        <option value="5">5 decks</option>
-        <option value="6">6 decks</option>
-      </select>
-      <table border="1">
-        <thead>
-          <tr><td>Opposing team's points</td><td>Result</td></tr>
-        </thead>
-        <tbody>
-          <tr><td>0</td><td>Defending team wins and goes up three levels</td></tr>
-          <tr><td id="n-1">5 to n-5</td><td>Defending team wins and goes up two levels</td></tr>
-          <tr><td id="n-2">n to 2n-5</td><td>Defending team wins and goes up one level</td></tr>
-          <tr><td id="n-3">2n to 3n-5</td><td>Opposing team wins, but keeps the same level</td></tr>
-          <tr><td id="n-4">3n to 4n-5</td><td>Opposing team wins and goes up one level</td></tr>
-          <tr><td id="n-5">4n to 5n-5</td><td>Opposing team wins and goes up two levels</td></tr>
-          <tr><td id="n-6">5n and above</td><td>Opposing team wins and goes up three levels</td></tr>
-        </tbody>
-      </table>
+    <p>
+      <span class="lang-en"
+        >There are five possible outcomes depending on the number of decks, as
+        detailed in the following table:</span
+      ><span class="lang-zh">根据牌副数，有五种可能的结果，详见下表：</span>
+    </p>
+    <select value="n" id="n-select">
+      <option value="n">n decks</option>
+      <option value="2">2 decks</option>
+      <option value="3">3 decks</option>
+      <option value="4">4 decks</option>
+      <option value="5">5 decks</option>
+      <option value="6">6 decks</option>
+    </select>
+    <table border="1">
+      <thead>
+        <tr>
+          <td>
+            <span class="lang-en">Opposing team's points</span
+            ><span class="lang-zh">对方的分数</span>
+          </td>
+          <td>
+            <span class="lang-en">Result</span><span class="lang-zh">结果</span>
+          </td>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>0</td>
+          <td>
+            <span class="lang-en"
+              >Defending team wins and goes up three levels</span
+            ><span class="lang-zh">防守方获胜，升三级</span>
+          </td>
+        </tr>
+        <tr>
+          <td id="n-1">5 to n-5</td>
+          <td>
+            <span class="lang-en"
+              >Defending team wins and goes up two levels</span
+            ><span class="lang-zh">防守方获胜，升两级</span>
+          </td>
+        </tr>
+        <tr>
+          <td id="n-2">n to 2n-5</td>
+          <td>
+            <span class="lang-en"
+              >Defending team wins and goes up one level</span
+            ><span class="lang-zh">防守方获胜，升一级</span>
+          </td>
+        </tr>
+        <tr>
+          <td id="n-3">2n to 3n-5</td>
+          <td>
+            <span class="lang-en"
+              >Opposing team wins, but keeps the same level</span
+            ><span class="lang-zh">对方获胜，但级别不变</span>
+          </td>
+        </tr>
+        <tr>
+          <td id="n-4">3n to 4n-5</td>
+          <td>
+            <span class="lang-en">Opposing team wins and goes up one level</span
+            ><span class="lang-zh">对方获胜，升一级</span>
+          </td>
+        </tr>
+        <tr>
+          <td id="n-5">4n to 5n-5</td>
+          <td>
+            <span class="lang-en">Opposing team wins and goes up two levels</span
+            ><span class="lang-zh">对方获胜，升两级</span>
+          </td>
+        </tr>
+        <tr>
+          <td id="n-6">5n and above</td>
+          <td>
+            <span class="lang-en"
+              >Opposing team wins and goes up three levels</span
+            ><span class="lang-zh">对方获胜，升三级</span>
+          </td>
+        </tr>
+      </tbody>
+    </table>
 
-      <p>
-        The winning team becomes the defending team in the next round, and the
-        next person counter-clockwise from the current leader is the leader for
-        the next round.
-      </p>
-      <p>
-        The winner of the game is the person who gets to the highest possible
-        rank and successfully defends it first. In this implementation, this
-        is A.
-      </p>
-      <script type="text/javascript">
-        const c = document.createElement("canvas");
-        c.width = 300;
-        c.height = 300;
-        c.style.border = '2px #000 solid';
-        // c.style.display = "none";
-        document.body.appendChild(c);
-        const ctx = c.getContext("2d");
-        ctx.font = "100px solid";
-        const text = "🂠";
-        const textMetrics = ctx.measureText(text);
-        const width =
-          textMetrics.actualBoundingBoxLeft + textMetrics.actualBoundingBoxRight;
-        const height =
-          textMetrics.actualBoundingBoxAscent + textMetrics.actualBoundingBoxDescent;
-        
-        // ctx.textAlign = "center";
-        // ctx.textBaseline = "middle";
-        const x = 150;
-        const y = 150;
-        ctx.fillText(text, x-2, y);
-        ctx.moveTo(0, y - textMetrics.actualBoundingBoxAscent);
-        ctx.lineTo(300, y - textMetrics.actualBoundingBoxAscent);
-        ctx.stroke();
-        ctx.moveTo(0, y + textMetrics.actualBoundingBoxDescent);
-        ctx.lineTo(300, y + textMetrics.actualBoundingBoxDescent);
-        ctx.stroke();
-        ctx.moveTo(x + textMetrics.actualBoundingBoxRight, 0);
-        ctx.lineTo(x + textMetrics.actualBoundingBoxRight, 300);
-        ctx.stroke();
-        ctx.moveTo(x - textMetrics.actualBoundingBoxLeft, 0);
-        ctx.lineTo(x - textMetrics.actualBoundingBoxLeft, 300);
-        ctx.stroke();
-        document.body.removeChild(c);
-      </script>
+    <p>
+      <span class="lang-en"
+        >The winning team becomes the defending team in the next round, and the
+        next person counter-clockwise from the current leader is the leader for the
+        next round.</span
+      >
+      <span class="lang-zh"
+        >获胜队伍成为下一局的防守方，当前庄家逆时针方向的下一个人成为下一局的庄家。</span
+      >
+    </p>
+    <p>
+      <span class="lang-en"
+        >The winner of the game is the person who gets to the highest possible rank
+        and successfully defends it first. In this implementation, this is A.</span
+      >
+      <span class="lang-zh"
+        >游戏的赢家是最先到达最高级别并成功守庄的人。在本实现中，最高级别为
+        A。</span
+      >
+    </p>
 
-      <script type="text/javascript">
+    <script type="text/javascript">
+      // --- Language: read ?lang=en|zh (default en) and toggle body classes. ---
+      (function () {
+        const params = new URLSearchParams(window.location.search);
+        let lang = (params.get("lang") || "en").toLowerCase();
+        if (lang !== "zh") lang = "en";
         const body = document.getElementById("body");
-        function toggleFourColor(evt) {
-          // Keep the `rules` class so the page styling is preserved; only
-          // add/remove the `four-color` modifier.
-          body.classList.toggle("four-color", evt.target.checked);
-        }
-        document.getElementById("four-color-toggle").addEventListener("change", toggleFourColor);
+        body.classList.remove("lang-en", "lang-zh");
+        body.classList.add(lang === "zh" ? "lang-zh" : "lang-en");
+        document.documentElement.setAttribute("lang", lang === "zh" ? "zh" : "en");
+      })();
 
-        function addCards(id, cards) {
-          const el = document.getElementById(id);
-          cards.forEach((c) => {
-            const span = document.createElement("span");
-            span.className = `card ${c.typ}`;
-            span.innerText = c.display_value;
-            el.appendChild(span);
-          });
+      // --- Rule-set tabs: Tractor (base) vs Finding Friends (base + friends). ---
+      (function () {
+        const body = document.getElementById("body");
+        const tabTractor = document.getElementById("tab-tractor");
+        const tabFriends = document.getElementById("tab-friends");
+
+        function selectMode(mode) {
+          const isFriends = mode === "friends";
+          body.classList.toggle("mode-friends", isFriends);
+          body.classList.toggle("mode-tractor", !isFriends);
+          tabFriends.setAttribute("aria-selected", String(isFriends));
+          tabTractor.setAttribute("aria-selected", String(!isFriends));
         }
 
+        tabTractor.addEventListener("click", () => selectMode("tractor"));
+        tabFriends.addEventListener("click", () => selectMode("friends"));
+
+        // Allow ?mode=friends to deep-link the Finding Friends tab.
+        const params = new URLSearchParams(window.location.search);
+        if ((params.get("mode") || "").toLowerCase() === "friends") {
+          selectMode("friends");
+        }
+      })();
+
+      // --- Round-result deck selector: recompute the point thresholds table. ---
+      (function () {
         function setPointThresholds(evt) {
           if (evt.target.value == "n") {
             document.getElementById("n-1").innerText = "5 to n-5";
@@ -1357,39 +2290,114 @@
             document.getElementById("n-6").innerText = `${5 * n} and above`;
           }
         }
+        document
+          .getElementById("n-select")
+          .addEventListener("change", setPointThresholds);
+      })();
 
-        document.getElementById("n-select").addEventListener("change", setPointThresholds);
+      // --- Card examples: fetch the card glyph data and render the dynamic
+      //     example plays (suits, point cards, trump orderings, jokers). ---
+      (function () {
+        function addCards(id, cards) {
+          const el = document.getElementById(id);
+          if (!el) return;
+          cards.forEach((c) => {
+            const span = document.createElement("span");
+            span.className = `card ${c.typ}`;
+            span.innerText = c.display_value;
+            el.appendChild(span);
+          });
+        }
 
-        fetch("cards.json").then((response) => {
-          response.json().then((r) => {
+        fetch("cards.json")
+          .then((response) => response.json())
+          .then((r) => {
             const CARDS = r.cards;
             const REVERSED_CARDS = [...CARDS];
             REVERSED_CARDS.reverse();
 
-            addCards("spades", REVERSED_CARDS.filter((c) => c.typ == '♤'));
-            addCards("hearts", REVERSED_CARDS.filter((c) => c.typ == '♡'));
-            addCards("diamonds", REVERSED_CARDS.filter((c) => c.typ == '♢'));
-            addCards("clubs", REVERSED_CARDS.filter((c) => c.typ == '♧'));
-            addCards("jokers", CARDS.filter((c) => c.value == '🃏' || c.typ == '🃟'));
+            addCards(
+              "spades",
+              REVERSED_CARDS.filter((c) => c.typ == "♤"),
+            );
+            addCards(
+              "hearts",
+              REVERSED_CARDS.filter((c) => c.typ == "♡"),
+            );
+            addCards(
+              "diamonds",
+              REVERSED_CARDS.filter((c) => c.typ == "♢"),
+            );
+            addCards(
+              "clubs",
+              REVERSED_CARDS.filter((c) => c.typ == "♧"),
+            );
+            addCards(
+              "jokers",
+              CARDS.filter((c) => c.value == "🃏" || c.typ == "🃟"),
+            );
 
-            addCards("points-d", REVERSED_CARDS.filter((c) => c.points > 0 && c.typ == '♢'));
-            addCards("points-c", REVERSED_CARDS.filter((c) => c.points > 0 && c.typ == '♧'));
-            addCards("points-h", REVERSED_CARDS.filter((c) => c.points > 0 && c.typ == '♡'));
-            addCards("points-s", REVERSED_CARDS.filter((c) => c.points > 0 && c.typ == '♤'));
+            addCards(
+              "points-d",
+              REVERSED_CARDS.filter((c) => c.points > 0 && c.typ == "♢"),
+            );
+            addCards(
+              "points-c",
+              REVERSED_CARDS.filter((c) => c.points > 0 && c.typ == "♧"),
+            );
+            addCards(
+              "points-h",
+              REVERSED_CARDS.filter((c) => c.points > 0 && c.typ == "♡"),
+            );
+            addCards(
+              "points-s",
+              REVERSED_CARDS.filter((c) => c.points > 0 && c.typ == "♤"),
+            );
 
-            addCards("trump-4s", REVERSED_CARDS.filter((c) => c.typ == '♤' && c.number != '4'));
-            addCards("trump-4s", CARDS.filter((c) => c.typ != '♤' && c.number == '4'));
-            addCards("trump-4s", CARDS.filter((c) => c.typ == '♤' && c.number == '4'));
-            addCards("trump-4s", CARDS.filter((c) => c.value == '🃏' || c.typ == '🃟'));
-            addCards("trump-4s-hearts", REVERSED_CARDS.filter((c) => c.typ == '♡' && c.number != '4'));
+            addCards(
+              "trump-4s",
+              REVERSED_CARDS.filter((c) => c.typ == "♤" && c.number != "4"),
+            );
+            addCards(
+              "trump-4s",
+              CARDS.filter((c) => c.typ != "♤" && c.number == "4"),
+            );
+            addCards(
+              "trump-4s",
+              CARDS.filter((c) => c.typ == "♤" && c.number == "4"),
+            );
+            addCards(
+              "trump-4s",
+              CARDS.filter((c) => c.value == "🃏" || c.typ == "🃟"),
+            );
+            addCards(
+              "trump-4s-hearts",
+              REVERSED_CARDS.filter((c) => c.typ == "♡" && c.number != "4"),
+            );
 
-            addCards("trump-4nt", CARDS.filter((c) => c.number == '4'));
-            addCards("trump-4nt", CARDS.filter((c) => c.value == '🃏' || c.typ == '🃟'));
-            addCards("trump-4nt-hearts", REVERSED_CARDS.filter((c) => c.typ == '♡' && c.number != '4'));
+            addCards(
+              "trump-4nt",
+              CARDS.filter((c) => c.number == "4"),
+            );
+            addCards(
+              "trump-4nt",
+              CARDS.filter((c) => c.value == "🃏" || c.typ == "🃟"),
+            );
+            addCards(
+              "trump-4nt-hearts",
+              REVERSED_CARDS.filter((c) => c.typ == "♡" && c.number != "4"),
+            );
 
-            addCards("jokers2", CARDS.filter((c) => c.value == '🃏' || c.typ == '🃟'));
+            addCards(
+              "jokers2",
+              CARDS.filter((c) => c.value == "🃏" || c.typ == "🃟"),
+            );
+          })
+          .catch(() => {
+            /* If cards.json can't be fetched, the dynamic examples stay empty;
+               the surrounding prose still explains everything. */
           });
-        });
-      </script>
-    </body>
+      })();
+    </script>
+  </body>
 </html>

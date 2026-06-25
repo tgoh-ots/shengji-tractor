@@ -137,7 +137,7 @@ const Root = (): JSX.Element => {
               />
             </React.Suspense>
           ) : null}
-          <div className="sj-table-shell mx-auto w-full max-w-[1200px] px-3 pb-24 pt-3 sm:px-5">
+          <div className="sj-table-shell mx-auto w-full max-w-[1200px] px-3 pb-40 pt-3 sm:px-5">
             <div className="mb-3">
               <Brand onGoHome={goHome} />
             </div>

@@ -22,7 +22,7 @@ const JoinRoom = (props: IProps): JSX.Element => {
   );
   const { send } = React.useContext(WebsocketContext);
   const { setTimeout } = React.useContext(TimerContext);
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
 
   const handleChange = (event: React.ChangeEvent<HTMLInputElement>): void =>
     props.setName(event.target.value.trim());
@@ -133,7 +133,7 @@ const JoinRoom = (props: IProps): JSX.Element => {
         <p>{t("join.intro")}</p>
         <p>
           <a
-            href="rules.html"
+            href={`rules.html?lang=${lang}`}
             target="_blank"
             className="text-[var(--accent)] underline"
           >

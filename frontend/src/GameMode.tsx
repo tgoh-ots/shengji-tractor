@@ -1,5 +1,6 @@
 import * as React from "react";
 import { GameModeSettings, GameMode } from "./gen-types";
+import { useTranslation } from "./i18n";
 
 import type { JSX } from "react";
 
@@ -7,9 +8,10 @@ interface IProps {
   gameMode: GameModeSettings | GameMode;
 }
 const GameModeE = (props: IProps): JSX.Element => {
+  const { lang } = useTranslation();
   const rules = (
     <a
-      href="rules.html"
+      href={`rules.html?lang=${lang}`}
       target="_blank"
       rel="noreferrer"
       className="ml-2 align-middle text-sm font-semibold text-[var(--accent)] underline decoration-[var(--accent)]/40 underline-offset-2"
