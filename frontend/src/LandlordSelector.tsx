@@ -1,5 +1,6 @@
 import * as React from "react";
 import { Player } from "./gen-types";
+import { SettingRow, SettingSelect } from "./SettingsWidgets";
 
 import type { JSX } from "react";
 
@@ -18,22 +19,20 @@ const LandlordSelector = (props: IProps): JSX.Element => {
   };
 
   return (
-    <div className="landlord-picker">
-      <label>
-        Current leader:{" "}
-        <select
-          value={props.landlordId === null ? "" : props.landlordId}
-          onChange={handleChange}
-        >
-          <option value="">determined by the bid</option>
-          {props.players.map((player: Player) => (
-            <option value={player.id} key={player.id}>
-              {player.name}
-            </option>
-          ))}
-        </select>
-      </label>
-    </div>
+    <SettingRow label="Current leader" htmlFor="landlord-selector">
+      <SettingSelect
+        id="landlord-selector"
+        value={props.landlordId === null ? "" : props.landlordId}
+        onChange={handleChange}
+      >
+        <option value="">determined by the bid</option>
+        {props.players.map((player: Player) => (
+          <option value={player.id} key={player.id}>
+            {player.name}
+          </option>
+        ))}
+      </SettingSelect>
+    </SettingRow>
   );
 };
 

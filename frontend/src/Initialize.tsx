@@ -25,6 +25,13 @@ import Players from "./Players";
 import AddAIPlayer from "./AddAIPlayer";
 import { useTranslation } from "./i18n";
 import { GameScoringSettings } from "./ScoringSettings";
+import {
+  SettingsSection,
+  SettingRow,
+  SettingSelect,
+  SettingInput,
+  SettingButton,
+} from "./SettingsWidgets";
 
 import type { JSX } from "react";
 
@@ -48,180 +55,202 @@ const contentStyle: React.CSSProperties = {
   position: "absolute",
   top: "50%",
   left: "50%",
-  width: "80%",
+  width: "min(680px, 92vw)",
   transform: "translate(-50%, -50%)",
+  padding: "0",
 };
+
+interface ISettingsModalProps {
+  title: string;
+  subtitle?: string;
+  isOpen: boolean;
+  onClose: () => void;
+  children: React.ReactNode;
+}
+
+/*
+ * Shared themed wrapper around ReactModal for the "advanced settings" groups.
+ * Gives every settings modal a consistent header, padding, and Done button.
+ */
+const SettingsModal = (props: ISettingsModalProps): JSX.Element => (
+  <ReactModal
+    isOpen={props.isOpen}
+    onRequestClose={props.onClose}
+    shouldCloseOnOverlayClick
+    shouldCloseOnEsc
+    style={{ content: contentStyle }}
+  >
+    <div className="flex max-h-[85dvh] flex-col">
+      <div className="flex items-start justify-between gap-3 border-b border-[var(--border-subtle)] p-4 sm:p-5">
+        <div>
+          <h2 className="m-0 text-lg font-bold tracking-tight text-[var(--text-primary)]">
+            {props.title}
+          </h2>
+          {props.subtitle !== undefined ? (
+            <p className="m-0 mt-1 text-xs text-[var(--text-secondary)]">
+              {props.subtitle}
+            </p>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          aria-label="Close"
+          className="sj-btn sj-btn-ghost !min-h-[36px] !px-3 !text-[var(--text-primary)]"
+          onClick={props.onClose}
+        >
+          ✕
+        </button>
+      </div>
+      <div className="flex flex-col gap-3 overflow-y-auto p-4 sm:p-5">
+        {props.children}
+      </div>
+      <div className="border-t border-[var(--border-subtle)] p-3 text-right sm:p-4">
+        <button
+          type="button"
+          className="sj-btn sj-btn-primary !min-h-[40px]"
+          onClick={props.onClose}
+        >
+          Done
+        </button>
+      </div>
+    </div>
+  </ReactModal>
+);
 
 const DifficultySettings = (props: IDifficultyProps): JSX.Element => {
   const [modalOpen, setModalOpen] = React.useState<boolean>(false);
   const s = (
     <>
-      <div>
-        <label>
-          Friend selection restriction:{" "}
-          <select
-            value={props.state.propagated.friend_selection_policy}
-            onChange={props.setFriendSelectionPolicy}
-          >
-            <option value="Unrestricted">Non-trump cards</option>
-            <option value="TrumpsIncluded">All cards, including trumps</option>
-            <option value="HighestCardNotAllowed">
-              Non-trump cards, except the highest
-            </option>
-            <option value="PointCardNotAllowed">
-              Non-trump, non-point cards (except K when playing A)
-            </option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Multiple joining policy:{" "}
-          <select
-            value={props.state.propagated.multiple_join_policy}
-            onChange={props.setMultipleJoinPolicy}
-          >
-            <option value="Unrestricted">
-              Players can join the defending team multiple times.
-            </option>
-            <option value="NoDoubleJoin">
-              Each player can only join the defending team once.
-            </option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Rank advancement policy:{" "}
-          <select
-            value={props.state.propagated.advancement_policy}
-            onChange={props.setAdvancementPolicy}
-          >
-            <option value="Unrestricted">A must be defended</option>
-            <option value="FullyUnrestricted">Unrestricted</option>
-            <option value="DefendPoints">
-              Points (5, 10, K) and A must be defended
-            </option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Max rank:{" "}
-          <select
-            value={props.state.propagated.max_rank}
-            onChange={props.setMaxRank}
-          >
-            <option value="NT">No trump</option>
-            <option value="A">A</option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Point visibility:{" "}
-          <select
-            value={
-              props.state.propagated.hide_landlord_points ? "hide" : "show"
-            }
-            onChange={props.setHideLandlordsPoints}
-          >
-            <option value="show">Show all players&apos; points</option>
-            <option value="hide">Hide defending team&apos;s points</option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Played card visibility (in chat):{" "}
-          <select
-            value={props.state.propagated.hide_played_cards ? "hide" : "show"}
-            onChange={props.setHidePlayedCards}
-          >
-            <option value="show">Show played cards in chat</option>
-            <option value="hide">Hide played cards in chat</option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Penalty for points left in the bottom:{" "}
-          <select
-            value={props.state.propagated.kitty_penalty}
-            onChange={props.setKittyPenalty}
-          >
-            <option value="Times">Twice the size of the last trick</option>
-            <option value="Power">
-              Two to the power of the size of the last trick
-            </option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Penalty for incorrect throws:{" "}
-          <select
-            value={props.state.propagated.throw_penalty}
-            onChange={props.setThrowPenalty}
-          >
-            <option value="None">No penalty</option>
-            <option value="TenPointsPerAttempt">
-              Ten points per bad throw
-            </option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Play takeback:{" "}
-          <select
-            value={props.state.propagated.play_takeback_policy}
-            onChange={props.setPlayTakebackPolicy}
-          >
-            <option value="AllowPlayTakeback">Allow taking back plays</option>
-            <option value="NoPlayTakeback">Disallow taking back plays</option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Bid takeback:{" "}
-          <select
-            value={props.state.propagated.bid_takeback_policy}
-            onChange={props.setBidTakebackPolicy}
-          >
-            <option value="AllowBidTakeback">Allow bid takeback</option>
-            <option value="NoBidTakeback">No bid takeback</option>
-          </select>
-        </label>
-      </div>
+      <SettingRow label="Friend selection restriction">
+        <SettingSelect
+          value={props.state.propagated.friend_selection_policy}
+          onChange={props.setFriendSelectionPolicy}
+        >
+          <option value="Unrestricted">Non-trump cards</option>
+          <option value="TrumpsIncluded">All cards, including trumps</option>
+          <option value="HighestCardNotAllowed">
+            Non-trump cards, except the highest
+          </option>
+          <option value="PointCardNotAllowed">
+            Non-trump, non-point cards (except K when playing A)
+          </option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Multiple joining policy">
+        <SettingSelect
+          value={props.state.propagated.multiple_join_policy}
+          onChange={props.setMultipleJoinPolicy}
+        >
+          <option value="Unrestricted">
+            Players can join the defending team multiple times.
+          </option>
+          <option value="NoDoubleJoin">
+            Each player can only join the defending team once.
+          </option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Rank advancement policy">
+        <SettingSelect
+          value={props.state.propagated.advancement_policy}
+          onChange={props.setAdvancementPolicy}
+        >
+          <option value="Unrestricted">A must be defended</option>
+          <option value="FullyUnrestricted">Unrestricted</option>
+          <option value="DefendPoints">
+            Points (5, 10, K) and A must be defended
+          </option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Max rank">
+        <SettingSelect
+          value={props.state.propagated.max_rank}
+          onChange={props.setMaxRank}
+        >
+          <option value="NT">No trump</option>
+          <option value="A">A</option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Point visibility">
+        <SettingSelect
+          value={props.state.propagated.hide_landlord_points ? "hide" : "show"}
+          onChange={props.setHideLandlordsPoints}
+        >
+          <option value="show">Show all players&apos; points</option>
+          <option value="hide">Hide defending team&apos;s points</option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Played card visibility (in chat)">
+        <SettingSelect
+          value={props.state.propagated.hide_played_cards ? "hide" : "show"}
+          onChange={props.setHidePlayedCards}
+        >
+          <option value="show">Show played cards in chat</option>
+          <option value="hide">Hide played cards in chat</option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Penalty for points left in the bottom">
+        <SettingSelect
+          value={props.state.propagated.kitty_penalty}
+          onChange={props.setKittyPenalty}
+        >
+          <option value="Times">Twice the size of the last trick</option>
+          <option value="Power">
+            Two to the power of the size of the last trick
+          </option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Penalty for incorrect throws">
+        <SettingSelect
+          value={props.state.propagated.throw_penalty}
+          onChange={props.setThrowPenalty}
+        >
+          <option value="None">No penalty</option>
+          <option value="TenPointsPerAttempt">Ten points per bad throw</option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Play takeback">
+        <SettingSelect
+          value={props.state.propagated.play_takeback_policy}
+          onChange={props.setPlayTakebackPolicy}
+        >
+          <option value="AllowPlayTakeback">Allow taking back plays</option>
+          <option value="NoPlayTakeback">Disallow taking back plays</option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Bid takeback">
+        <SettingSelect
+          value={props.state.propagated.bid_takeback_policy}
+          onChange={props.setBidTakebackPolicy}
+        >
+          <option value="AllowBidTakeback">Allow bid takeback</option>
+          <option value="NoBidTakeback">No bid takeback</option>
+        </SettingSelect>
+      </SettingRow>
     </>
   );
 
   return (
-    <div>
-      <label>
-        Difficulty settings:{" "}
-        <button
-          className="normal"
-          onClick={(evt) => {
-            evt.preventDefault();
-            setModalOpen(true);
-          }}
-        >
-          Open
-        </button>
-        <ReactModal
-          isOpen={modalOpen}
-          onRequestClose={() => setModalOpen(false)}
-          shouldCloseOnOverlayClick
-          shouldCloseOnEsc
-          style={{ content: contentStyle }}
-        >
-          {s}
-        </ReactModal>
-      </label>
-    </div>
+    <SettingRow
+      label="Difficulty settings"
+      hint="Friend selection, rank advancement, penalties and takebacks."
+    >
+      <SettingButton
+        onClick={(evt) => {
+          evt.preventDefault();
+          setModalOpen(true);
+        }}
+      >
+        Open
+      </SettingButton>
+      <SettingsModal
+        title="Difficulty settings"
+        subtitle="Friend selection, rank advancement, point visibility, penalties and takebacks."
+        isOpen={modalOpen}
+        onClose={() => setModalOpen(false)}
+      >
+        {s}
+      </SettingsModal>
+    </SettingRow>
   );
 };
 
@@ -262,24 +291,31 @@ const DeckSettings = (props: IDeckSettings): JSX.Element => {
   ];
 
   const s = (
-    <>
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
       {props.decks.map((d, i) => (
         <div
           key={i}
-          style={{
-            display: "inline-block",
-            border: "1px solid #000",
-            padding: "5px",
-            margin: "5px",
-          }}
+          className="rounded-[var(--radius-xl)] border border-[var(--border-subtle)] bg-[var(--surface-panel-soft)] p-3"
         >
-          Deck {i + 1}
-          {isNotDefault(d) ? " (modified)" : " (standard)"}
-          <form>
-            <label style={{ display: "block" }}>
-              Include HJ (大王){" "}
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-sm font-semibold text-[var(--text-primary)]">
+              Deck {i + 1}
+            </span>
+            <span
+              className={
+                "sj-chip !py-0.5 !text-xs" +
+                (isNotDefault(d) ? " sj-chip-accent" : "")
+              }
+            >
+              {isNotDefault(d) ? "modified" : "standard"}
+            </span>
+          </div>
+          <div className="flex flex-col gap-2">
+            <label className="flex items-center justify-between gap-2 text-sm text-[var(--text-primary)]">
+              <span>Include HJ (大王)</span>
               <input
                 type="checkbox"
+                className="h-4 w-4 accent-[var(--accent)]"
                 checked={!d.exclude_big_joker}
                 onChange={(evt) =>
                   setDeckAtIndex(
@@ -289,10 +325,11 @@ const DeckSettings = (props: IDeckSettings): JSX.Element => {
                 }
               />
             </label>
-            <label style={{ display: "block" }}>
-              Include LJ (小王){" "}
+            <label className="flex items-center justify-between gap-2 text-sm text-[var(--text-primary)]">
+              <span>Include LJ (小王)</span>
               <input
                 type="checkbox"
+                className="h-4 w-4 accent-[var(--accent)]"
                 checked={!d.exclude_small_joker}
                 onChange={(evt) =>
                   setDeckAtIndex(
@@ -302,9 +339,10 @@ const DeckSettings = (props: IDeckSettings): JSX.Element => {
                 }
               />
             </label>
-            <label>
-              Minimum card:{" "}
-              <select
+            <label className="flex items-center justify-between gap-2 text-sm text-[var(--text-primary)]">
+              <span>Minimum card</span>
+              <SettingSelect
+                className="!min-w-[5rem] sm:!min-w-[5rem]"
                 value={d.min}
                 onChange={(evt) =>
                   setDeckAtIndex({ ...d, min: evt.target.value }, i)
@@ -315,38 +353,36 @@ const DeckSettings = (props: IDeckSettings): JSX.Element => {
                     {n}
                   </option>
                 ))}
-              </select>
+              </SettingSelect>
             </label>
-          </form>
+          </div>
         </div>
       ))}
-    </>
+    </div>
   );
 
   return (
-    <div>
-      <label>
-        More deck customization:{" "}
-        <button
-          className="normal"
-          onClick={(evt) => {
-            evt.preventDefault();
-            setModalOpen(true);
-          }}
-        >
-          Open
-        </button>
-        <ReactModal
-          isOpen={modalOpen}
-          onRequestClose={() => setModalOpen(false)}
-          shouldCloseOnOverlayClick
-          shouldCloseOnEsc
-          style={{ content: contentStyle }}
-        >
-          {s}
-        </ReactModal>
-      </label>
-    </div>
+    <SettingRow
+      label="More deck customization"
+      hint="Per-deck jokers and minimum card (short decks)."
+    >
+      <SettingButton
+        onClick={(evt) => {
+          evt.preventDefault();
+          setModalOpen(true);
+        }}
+      >
+        Open
+      </SettingButton>
+      <SettingsModal
+        title="Deck customization"
+        subtitle="Configure jokers and the minimum card for each deck."
+        isOpen={modalOpen}
+        onClose={() => setModalOpen(false)}
+      >
+        {s}
+      </SettingsModal>
+    </SettingRow>
   );
 };
 
@@ -360,37 +396,38 @@ const TractorRequirementsE = (
   props: ITractorRequirementsProps,
 ): JSX.Element => {
   return (
-    <div>
-      <label>Tractor requirements: </label>
-      <input
-        type="number"
-        style={{ width: "3em" }}
-        onChange={(v) =>
-          props.onChange({
-            ...props.tractorRequirements,
-            min_count: v.target.valueAsNumber,
-          })
-        }
-        value={props.tractorRequirements.min_count}
-        min="2"
-        max={props.numDecks}
-      />
-      <label> cards wide by </label>
-      <input
-        type="number"
-        style={{ width: "3em" }}
-        onChange={(v) =>
-          props.onChange({
-            ...props.tractorRequirements,
-            min_length: v.target.valueAsNumber,
-          })
-        }
-        value={props.tractorRequirements.min_length}
-        min="2"
-        max="12"
-      />
-      <label> tuples long</label>
-    </div>
+    <SettingRow label="Tractor requirements">
+      <div className="flex flex-wrap items-center gap-2 text-sm text-[var(--text-primary)]">
+        <SettingInput
+          type="number"
+          className="!w-16"
+          onChange={(v) =>
+            props.onChange({
+              ...props.tractorRequirements,
+              min_count: v.target.valueAsNumber,
+            })
+          }
+          value={props.tractorRequirements.min_count}
+          min="2"
+          max={props.numDecks}
+        />
+        <span>cards wide by</span>
+        <SettingInput
+          type="number"
+          className="!w-16"
+          onChange={(v) =>
+            props.onChange({
+              ...props.tractorRequirements,
+              min_length: v.target.valueAsNumber,
+            })
+          }
+          value={props.tractorRequirements.min_length}
+          min="2"
+          max="12"
+        />
+        <span>tuples long</span>
+      </div>
+    </SettingRow>
   );
 };
 
@@ -401,32 +438,30 @@ interface IScoringSettings {
 const ScoringSettings = (props: IScoringSettings): JSX.Element => {
   const [modalOpen, setModalOpen] = React.useState<boolean>(false);
   return (
-    <div>
-      <label>
-        Scoring settings:{" "}
-        <button
-          className="normal"
-          onClick={(evt) => {
-            evt.preventDefault();
-            setModalOpen(true);
-          }}
-        >
-          Open
-        </button>
-        <ReactModal
-          isOpen={modalOpen}
-          onRequestClose={() => setModalOpen(false)}
-          shouldCloseOnOverlayClick
-          shouldCloseOnEsc
-          style={{ content: contentStyle }}
-        >
-          <GameScoringSettings
-            params={props.state.propagated.game_scoring_parameters!}
-            decks={props.decks}
-          />
-        </ReactModal>
-      </label>
-    </div>
+    <SettingRow
+      label="Scoring settings"
+      hint="Step size, deadzone and level thresholds."
+    >
+      <SettingButton
+        onClick={(evt) => {
+          evt.preventDefault();
+          setModalOpen(true);
+        }}
+      >
+        Open
+      </SettingButton>
+      <SettingsModal
+        title="Scoring settings"
+        subtitle="Tune the point thresholds and how many levels each team gains."
+        isOpen={modalOpen}
+        onClose={() => setModalOpen(false)}
+      >
+        <GameScoringSettings
+          params={props.state.propagated.game_scoring_parameters!}
+          decks={props.decks}
+        />
+      </SettingsModal>
+    </SettingRow>
   );
 };
 
@@ -456,182 +491,158 @@ const UncommonSettings = (props: IUncommonSettings): JSX.Element => {
   const [modalOpen, setModalOpen] = React.useState<boolean>(false);
   const s = (
     <>
-      <div>
-        <label>
-          Game shadowing policy:{" "}
-          <select
-            value={props.state.propagated.game_shadowing_policy}
-            onChange={props.setGameShadowingPolicy}
-          >
-            <option value="AllowMultipleSessions">
-              Allow players to be shadowed by joining with the same name
-            </option>
-            <option value="SingleSessionOnly">
-              Do not allow players to be shadowed
-            </option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Game start policy:{" "}
-          <select
-            value={props.state.propagated.game_start_policy}
-            onChange={props.setGameStartPolicy}
-          >
-            <option value="AllowAnyPlayer">
-              Allow any player to start a game
-            </option>
-            <option value="AllowLandlordOnly">
-              Allow only landlord to start a game
-            </option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Landlord selection from bid:{" "}
-          <select
-            value={props.state.propagated.first_landlord_selection_policy}
-            onChange={props.setFirstLandlordSelectionPolicy}
-          >
-            <option value="ByWinningBid">
-              Winning bid decides both landlord and trump
-            </option>
-            <option value="ByFirstBid">
-              First bid decides landlord, winning bid decides trump
-            </option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Trump policy for cards revealed from the bottom:{" "}
-          <select
-            value={props.state.propagated.kitty_bid_policy}
-            onChange={props.setKittyBidPolicy}
-          >
-            <option value="FirstCard">First card revealed</option>
-            <option value="FirstCardOfLevelOrHighest">
-              First card revealed of the appropriate rank
-            </option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Bid policy:{" "}
-          <select
-            value={props.state.propagated.bid_policy}
-            onChange={props.setBidPolicy}
-          >
-            <option value="JokerOrHigherSuit">
-              Joker or higher suit bids to outbid non-joker bids with the same
-              number of cards
-            </option>
-            <option value="JokerOrGreaterLength">
-              Joker bids to outbid non-joker bids with the same number of cards
-            </option>
-            <option value="GreaterLength">
-              All bids must have more cards than the previous bids
-            </option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Bid reinforcement policy:{" "}
-          <select
-            value={props.state.propagated.bid_reinforcement_policy}
-            onChange={props.setBidReinforcementPolicy}
-          >
-            <option value="ReinforceWhileWinning">
-              The current winning bid can be reinforced
-            </option>
-            <option value="ReinforceWhileEquivalent">
-              A bid can be reinforced after it is overturned
-            </option>
-            <option value="OverturnOrReinforceWhileWinning">
-              The current winning bid can be overturned by the same bidder
-            </option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Joker bid policy:{" "}
-          <select
-            value={props.state.propagated.joker_bid_policy}
-            onChange={props.setJokerBidPolicy}
-          >
-            <option value="BothTwoOrMore">
-              At least two jokers (or number of decks) to bid no trump
-            </option>
-            <option value="BothNumDecks">
-              All the low or high jokers to bid no trump
-            </option>
-            <option value="LJNumDecksHJNumDecksLessOne">
-              All the low jokers or all but one high joker to bid no trump
-            </option>
-            <option value="Disabled">No trump / joker bids disabled</option>
-          </select>
-        </label>
-      </div>
+      <SettingRow label="Game shadowing policy">
+        <SettingSelect
+          value={props.state.propagated.game_shadowing_policy}
+          onChange={props.setGameShadowingPolicy}
+        >
+          <option value="AllowMultipleSessions">
+            Allow players to be shadowed by joining with the same name
+          </option>
+          <option value="SingleSessionOnly">
+            Do not allow players to be shadowed
+          </option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Game start policy">
+        <SettingSelect
+          value={props.state.propagated.game_start_policy}
+          onChange={props.setGameStartPolicy}
+        >
+          <option value="AllowAnyPlayer">
+            Allow any player to start a game
+          </option>
+          <option value="AllowLandlordOnly">
+            Allow only landlord to start a game
+          </option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Landlord selection from bid">
+        <SettingSelect
+          value={props.state.propagated.first_landlord_selection_policy}
+          onChange={props.setFirstLandlordSelectionPolicy}
+        >
+          <option value="ByWinningBid">
+            Winning bid decides both landlord and trump
+          </option>
+          <option value="ByFirstBid">
+            First bid decides landlord, winning bid decides trump
+          </option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Trump policy for cards revealed from the bottom">
+        <SettingSelect
+          value={props.state.propagated.kitty_bid_policy}
+          onChange={props.setKittyBidPolicy}
+        >
+          <option value="FirstCard">First card revealed</option>
+          <option value="FirstCardOfLevelOrHighest">
+            First card revealed of the appropriate rank
+          </option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Bid policy">
+        <SettingSelect
+          value={props.state.propagated.bid_policy}
+          onChange={props.setBidPolicy}
+        >
+          <option value="JokerOrHigherSuit">
+            Joker or higher suit bids to outbid non-joker bids with the same
+            number of cards
+          </option>
+          <option value="JokerOrGreaterLength">
+            Joker bids to outbid non-joker bids with the same number of cards
+          </option>
+          <option value="GreaterLength">
+            All bids must have more cards than the previous bids
+          </option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Bid reinforcement policy">
+        <SettingSelect
+          value={props.state.propagated.bid_reinforcement_policy}
+          onChange={props.setBidReinforcementPolicy}
+        >
+          <option value="ReinforceWhileWinning">
+            The current winning bid can be reinforced
+          </option>
+          <option value="ReinforceWhileEquivalent">
+            A bid can be reinforced after it is overturned
+          </option>
+          <option value="OverturnOrReinforceWhileWinning">
+            The current winning bid can be overturned by the same bidder
+          </option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Joker bid policy">
+        <SettingSelect
+          value={props.state.propagated.joker_bid_policy}
+          onChange={props.setJokerBidPolicy}
+        >
+          <option value="BothTwoOrMore">
+            At least two jokers (or number of decks) to bid no trump
+          </option>
+          <option value="BothNumDecks">
+            All the low or high jokers to bid no trump
+          </option>
+          <option value="LJNumDecksHJNumDecksLessOne">
+            All the low jokers or all but one high joker to bid no trump
+          </option>
+          <option value="Disabled">No trump / joker bids disabled</option>
+        </SettingSelect>
+      </SettingRow>
       <TractorRequirementsE
         tractorRequirements={props.state.propagated.tractor_requirements!}
         numDecks={props.numDecksEffective}
         onChange={(req) => props.setTractorRequirements(req)}
       />
       {props.numDecksEffective >= 4 && (
-        <div>
-          <label>
-            Bomb cards (4+ identical cards beat any play of the same size):{" "}
-            <select
-              value={props.state.propagated.bomb_policy ?? "NoBombs"}
-              onChange={props.setBombPolicy}
-            >
-              <option value="NoBombs">Disabled</option>
-              <option value="AllowBombs">
-                Enabled (any suit, no suit-following required)
-              </option>
-              <option value="AllowBombsSuitFollowing">
-                Enabled (must follow suit)
-              </option>
-            </select>
-          </label>
-        </div>
-      )}
-      <div>
-        <label>
-          Rainbow tricks (same rank across ≥4 suits):{" "}
-          <select
-            value={
-              props.state.propagated.compound_formats?.rainbows != null
-                ? "enabled"
-                : "disabled"
-            }
-            onChange={(evt) => {
-              if (evt.target.value === "enabled") {
-                props.setCompoundFormats({
-                  rainbows:
-                    props.state.propagated.compound_formats?.rainbows ??
-                    (props.state.propagated.num_decks ?? 2) * 2 + 1,
-                });
-              } else {
-                props.setCompoundFormats({ rainbows: null });
-              }
-            }}
+        <SettingRow
+          label="Bomb cards"
+          hint="4+ identical cards beat any play of the same size."
+        >
+          <SettingSelect
+            value={props.state.propagated.bomb_policy ?? "NoBombs"}
+            onChange={props.setBombPolicy}
           >
-            <option value="disabled">Disabled</option>
-            <option value="enabled">Enabled</option>
-          </select>
-        </label>
+            <option value="NoBombs">Disabled</option>
+            <option value="AllowBombs">
+              Enabled (any suit, no suit-following required)
+            </option>
+            <option value="AllowBombsSuitFollowing">
+              Enabled (must follow suit)
+            </option>
+          </SettingSelect>
+        </SettingRow>
+      )}
+      <SettingRow label="Rainbow tricks" hint="Same rank across ≥4 suits.">
+        <SettingSelect
+          value={
+            props.state.propagated.compound_formats?.rainbows != null
+              ? "enabled"
+              : "disabled"
+          }
+          onChange={(evt) => {
+            if (evt.target.value === "enabled") {
+              props.setCompoundFormats({
+                rainbows:
+                  props.state.propagated.compound_formats?.rainbows ??
+                  (props.state.propagated.num_decks ?? 2) * 2 + 1,
+              });
+            } else {
+              props.setCompoundFormats({ rainbows: null });
+            }
+          }}
+        >
+          <option value="disabled">Disabled</option>
+          <option value="enabled">Enabled</option>
+        </SettingSelect>
         {props.state.propagated.compound_formats?.rainbows != null && (
-          <label>
-            {" "}
-            Minimum cards:{" "}
-            <input
+          <label className="flex items-center gap-1.5 text-sm text-[var(--text-secondary)]">
+            Min cards
+            <SettingInput
               type="number"
+              className="!w-16"
               min={4}
               value={props.state.propagated.compound_formats.rainbows}
               onChange={(evt) => {
@@ -643,86 +654,75 @@ const UncommonSettings = (props: IUncommonSettings): JSX.Element => {
             />
           </label>
         )}
-      </div>
-      <div>
-        <label>
-          Should reveal kitty at end of game:{" "}
-          <select
-            value={
-              props.state.propagated.should_reveal_kitty_at_end_of_game
-                ? "show"
-                : "hide"
-            }
-            onChange={props.setShouldRevealKittyAtEndOfGame}
-          >
-            <option value="hide">
-              Do not reveal contents of the kitty at the end of the game in chat
-            </option>
-            <option value="show">
-              Reveal contents of the kitty at the end of the game in chat
-            </option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Show player which defeats throw:{" "}
-          <select
-            value={
-              props.state.propagated.hide_throw_halting_player ? "hide" : "show"
-            }
-            onChange={props.setHideThrowHaltingPlayer}
-          >
-            <option value="hide">
-              Hide the player who defeats a potential throw
-            </option>
-            <option value="show">
-              Show the player who defeats a potential throw
-            </option>
-          </select>
-        </label>
-      </div>
-      <div>
-        <label>
-          Jacks variation:{" "}
-          <select
-            value={props.state.propagated.jack_variation}
-            onChange={props.setJackVariation}
-          >
-            <option value="SingleJack">
-              Winning the last trick with a single J will set the leader's team
-              to rank 2
-            </option>
-            <option value="Disabled">Disable the J variation</option>
-          </select>
-        </label>
-      </div>
+      </SettingRow>
+      <SettingRow label="Should reveal kitty at end of game">
+        <SettingSelect
+          value={
+            props.state.propagated.should_reveal_kitty_at_end_of_game
+              ? "show"
+              : "hide"
+          }
+          onChange={props.setShouldRevealKittyAtEndOfGame}
+        >
+          <option value="hide">
+            Do not reveal contents of the kitty at the end of the game in chat
+          </option>
+          <option value="show">
+            Reveal contents of the kitty at the end of the game in chat
+          </option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Show player which defeats throw">
+        <SettingSelect
+          value={
+            props.state.propagated.hide_throw_halting_player ? "hide" : "show"
+          }
+          onChange={props.setHideThrowHaltingPlayer}
+        >
+          <option value="hide">
+            Hide the player who defeats a potential throw
+          </option>
+          <option value="show">
+            Show the player who defeats a potential throw
+          </option>
+        </SettingSelect>
+      </SettingRow>
+      <SettingRow label="Jacks variation">
+        <SettingSelect
+          value={props.state.propagated.jack_variation}
+          onChange={props.setJackVariation}
+        >
+          <option value="SingleJack">
+            Winning the last trick with a single J will set the leader&apos;s
+            team to rank 2
+          </option>
+          <option value="Disabled">Disable the J variation</option>
+        </SettingSelect>
+      </SettingRow>
     </>
   );
   return (
-    <div>
-      <label>
-        More game settings:{" "}
-        <button
-          className="normal"
-          onClick={(evt) => {
-            evt.preventDefault();
-            setModalOpen(true);
-          }}
-        >
-          Open
-        </button>
-        <ReactModal
-          isOpen={modalOpen}
-          onRequestClose={() => setModalOpen(false)}
-          shouldCloseOnOverlayClick
-          shouldCloseOnEsc
-          style={{ content: contentStyle }}
-        >
-          {s}
-        </ReactModal>
-      </label>
-    </div>
+    <SettingRow
+      label="More game settings"
+      hint="Bidding, kitty, throws, bombs and other rule tweaks."
+    >
+      <SettingButton
+        onClick={(evt) => {
+          evt.preventDefault();
+          setModalOpen(true);
+        }}
+      >
+        Open
+      </SettingButton>
+      <SettingsModal
+        title="More game settings"
+        subtitle="Less common rule tweaks for bidding, the kitty, throws and bombs."
+        isOpen={modalOpen}
+        onClose={() => setModalOpen(false)}
+      >
+        {s}
+      </SettingsModal>
+    </SettingRow>
   );
 };
 
@@ -1291,21 +1291,34 @@ const Initialize = (props: IProps): JSX.Element => {
         />
       </div>
       <div className="game-settings">
-        <h3>Game settings</h3>
-        <div>
-          <label>
-            Game mode:{" "}
-            <select value={modeAsString} onChange={setGameMode}>
+        <h2 className="mb-3 text-xl font-bold tracking-tight text-[var(--text-on-felt)]">
+          Game settings
+        </h2>
+
+        <SettingsSection
+          title="Players & teams"
+          subtitle="Pick the game mode and, for Finding Friends, the team size."
+        >
+          <SettingRow label="Game mode" htmlFor="game-mode-selector">
+            <SettingSelect
+              id="game-mode-selector"
+              value={modeAsString}
+              onChange={setGameMode}
+            >
               <option value="Tractor">升级 / Tractor</option>
               <option value="FindingFriends">找朋友 / Finding Friends</option>
-            </select>
-          </label>
-        </div>
-        <div>
+            </SettingSelect>
+          </SettingRow>
           {props.state.propagated.game_mode !== "Tractor" ? (
-            <label>
-              Number of friends:{" "}
-              <select value={numFriends} onChange={setNumFriends}>
+            <SettingRow
+              label="Number of friends"
+              htmlFor="num-friends-selector"
+            >
+              <SettingSelect
+                id="num-friends-selector"
+                value={numFriends}
+                onChange={setNumFriends}
+              >
                 <option value="">default</option>
                 {ArrayUtils.range(
                   Math.max(
@@ -1318,45 +1331,59 @@ const Initialize = (props: IProps): JSX.Element => {
                     </option>
                   ),
                 )}
-              </select>
-            </label>
+              </SettingSelect>
+            </SettingRow>
           ) : null}
-        </div>
-        <NumDecksSelector
-          numPlayers={props.state.propagated.players.length}
-          numDecks={props.state.propagated.num_decks}
-          onChange={(newNumDecks: number | null) =>
-            send({ Action: { SetNumDecks: newNumDecks } })
-          }
-        />
-        <DeckSettings
-          decks={decks}
-          setSpecialDecks={(d) => send({ Action: { SetSpecialDecks: d } })}
-        />
-        <KittySizeSelector
-          numPlayers={props.state.propagated.players.length}
-          decks={decks}
-          kittySize={props.state.propagated.kitty_size}
-          onChange={(newKittySize: number | null) =>
-            send({ Action: { SetKittySize: newKittySize } })
-          }
-        />
-        <div>
-          <label>
-            Bids after cards are exchanged from the bottom:{" "}
-            <select
+        </SettingsSection>
+
+        <SettingsSection
+          title="Decks & kitty"
+          subtitle="How many decks are in play and how the bottom cards work."
+        >
+          <NumDecksSelector
+            numPlayers={props.state.propagated.players.length}
+            numDecks={props.state.propagated.num_decks}
+            onChange={(newNumDecks: number | null) =>
+              send({ Action: { SetNumDecks: newNumDecks } })
+            }
+          />
+          <DeckSettings
+            decks={decks}
+            setSpecialDecks={(d) => send({ Action: { SetSpecialDecks: d } })}
+          />
+          <KittySizeSelector
+            numPlayers={props.state.propagated.players.length}
+            decks={decks}
+            kittySize={props.state.propagated.kitty_size}
+            onChange={(newKittySize: number | null) =>
+              send({ Action: { SetKittySize: newKittySize } })
+            }
+          />
+          <SettingRow
+            label="Bids after cards are exchanged from the bottom"
+            htmlFor="kitty-theft-selector"
+          >
+            <SettingSelect
+              id="kitty-theft-selector"
               value={props.state.propagated.kitty_theft_policy}
               onChange={setKittyTheftPolicy}
             >
               <option value="AllowKittyTheft">Allowed (炒地皮)</option>
               <option value="NoKittyTheft">Not allowed</option>
-            </select>
-          </label>
-        </div>
-        <div>
-          <label>
-            Card protection policy:{" "}
-            <select
+            </SettingSelect>
+          </SettingRow>
+        </SettingsSection>
+
+        <SettingsSection
+          title="Gameplay rules"
+          subtitle="How tricks, protections and throws are evaluated."
+        >
+          <SettingRow
+            label="Card protection policy"
+            htmlFor="trick-draw-selector"
+          >
+            <SettingSelect
+              id="trick-draw-selector"
               value={props.state.propagated.trick_draw_policy}
               onChange={setTrickDrawPolicy}
             >
@@ -1374,13 +1401,14 @@ const Initialize = (props: IProps): JSX.Element => {
               <option value="NoFormatBasedDraw">
                 No format-based requirements (pairs do not draw pairs)
               </option>
-            </select>
-          </label>
-        </div>
-        <div>
-          <label>
-            Multi-throw evaluation policy:{" "}
-            <select
+            </SettingSelect>
+          </SettingRow>
+          <SettingRow
+            label="Multi-throw evaluation policy"
+            htmlFor="throw-eval-selector"
+          >
+            <SettingSelect
+              id="throw-eval-selector"
               value={props.state.propagated.throw_evaluation_policy}
               onChange={setThrowEvaluationPolicy}
             >
@@ -1393,143 +1421,162 @@ const Initialize = (props: IProps): JSX.Element => {
               <option value="TrickUnitLength">
                 Subsequent throw must beat largest component to win
               </option>
-            </select>
-          </label>
-        </div>
-        <ScoringSettings state={props.state} decks={decks} />
-        <UncommonSettings
-          state={props.state}
-          numDecksEffective={decksEffective}
-          setBidPolicy={setBidPolicy}
-          setBidReinforcementPolicy={setBidReinforcementPolicy}
-          setJokerBidPolicy={setJokerBidPolicy}
-          setShouldRevealKittyAtEndOfGame={setShouldRevealKittyAtEndOfGame}
-          setHideThrowHaltingPlayer={setHideThrowHaltingPlayer}
-          setFirstLandlordSelectionPolicy={setFirstLandlordSelectionPolicy}
-          setGameStartPolicy={setGameStartPolicy}
-          setGameShadowingPolicy={setGameShadowingPolicy}
-          setKittyBidPolicy={setKittyBidPolicy}
-          setJackVariation={setJackVariation}
-          setTractorRequirements={(requirements) =>
-            send({ Action: { SetTractorRequirements: requirements } })
-          }
-          setBombPolicy={setBombPolicy}
-          setCompoundFormats={(formats) =>
-            send({ Action: { SetCompoundFormats: formats } })
-          }
-        />
-        <DifficultySettings
-          state={props.state}
-          setFriendSelectionPolicy={setFriendSelectionPolicy}
-          setMultipleJoinPolicy={setMultipleJoinPolicy}
-          setAdvancementPolicy={setAdvancementPolicy}
-          setMaxRank={setMaxRank}
-          setHideLandlordsPoints={setHideLandlordsPoints}
-          setHidePlayedCards={setHidePlayedCards}
-          setKittyPenalty={setKittyPenalty}
-          setThrowPenalty={setThrowPenalty}
-          setPlayTakebackPolicy={setPlayTakebackPolicy}
-          setBidTakebackPolicy={setBidTakebackPolicy}
-        />
-        <div>
-          <label>
-            Game Visibility{" "}
-            <select
+            </SettingSelect>
+          </SettingRow>
+        </SettingsSection>
+
+        <SettingsSection
+          title="Scoring & advanced"
+          subtitle="Open these panels to fine-tune scoring and less common rules."
+        >
+          <ScoringSettings state={props.state} decks={decks} />
+          <UncommonSettings
+            state={props.state}
+            numDecksEffective={decksEffective}
+            setBidPolicy={setBidPolicy}
+            setBidReinforcementPolicy={setBidReinforcementPolicy}
+            setJokerBidPolicy={setJokerBidPolicy}
+            setShouldRevealKittyAtEndOfGame={setShouldRevealKittyAtEndOfGame}
+            setHideThrowHaltingPlayer={setHideThrowHaltingPlayer}
+            setFirstLandlordSelectionPolicy={setFirstLandlordSelectionPolicy}
+            setGameStartPolicy={setGameStartPolicy}
+            setGameShadowingPolicy={setGameShadowingPolicy}
+            setKittyBidPolicy={setKittyBidPolicy}
+            setJackVariation={setJackVariation}
+            setTractorRequirements={(requirements) =>
+              send({ Action: { SetTractorRequirements: requirements } })
+            }
+            setBombPolicy={setBombPolicy}
+            setCompoundFormats={(formats) =>
+              send({ Action: { SetCompoundFormats: formats } })
+            }
+          />
+          <DifficultySettings
+            state={props.state}
+            setFriendSelectionPolicy={setFriendSelectionPolicy}
+            setMultipleJoinPolicy={setMultipleJoinPolicy}
+            setAdvancementPolicy={setAdvancementPolicy}
+            setMaxRank={setMaxRank}
+            setHideLandlordsPoints={setHideLandlordsPoints}
+            setHidePlayedCards={setHidePlayedCards}
+            setKittyPenalty={setKittyPenalty}
+            setThrowPenalty={setThrowPenalty}
+            setPlayTakebackPolicy={setPlayTakebackPolicy}
+            setBidTakebackPolicy={setBidTakebackPolicy}
+          />
+          <SettingRow
+            label="Game visibility"
+            hint="Public games are listed for anyone to join."
+            htmlFor="visibility-selector"
+          >
+            <SettingSelect
+              id="visibility-selector"
               value={props.state.propagated.game_visibility}
               onChange={setGameVisibility}
             >
               <option value={"Unlisted"}>Unlisted</option>
               <option value={"Public"}>Public</option>
-            </select>
-          </label>
-        </div>
-        <h3>Continuation settings</h3>
-        <LandlordSelector
-          players={props.state.propagated.players}
-          landlordId={props.state.propagated.landlord}
-          onChange={(newLandlord: number | null) =>
-            send({ Action: { SetLandlord: newLandlord } })
-          }
-        />
-        <RankSelector
-          rank={currentPlayer.level}
-          metaRank={currentPlayer.metalevel}
-          onChangeRank={(newRank: string) =>
-            send({ Action: { SetRank: newRank } })
-          }
-          onChangeMetaRank={(newMetaRank: number) =>
-            send({ Action: { SetMetaRank: newMetaRank } })
-          }
-        />
-        <h3>Misc settings</h3>
-        <div>
-          <label>
-            Landlord label:{" "}
-            {props.state.propagated.landlord_emoji !== null &&
-            props.state.propagated.landlord_emoji !== undefined &&
-            props.state.propagated.landlord_emoji !== ""
-              ? props.state.propagated.landlord_emoji
-              : "当庄"}{" "}
-            <button
-              className="normal"
+            </SettingSelect>
+          </SettingRow>
+        </SettingsSection>
+
+        <SettingsSection
+          title="Continuation settings"
+          subtitle="Set the starting leader and your current rank."
+        >
+          <LandlordSelector
+            players={props.state.propagated.players}
+            landlordId={props.state.propagated.landlord}
+            onChange={(newLandlord: number | null) =>
+              send({ Action: { SetLandlord: newLandlord } })
+            }
+          />
+          <RankSelector
+            rank={currentPlayer.level}
+            metaRank={currentPlayer.metalevel}
+            onChangeRank={(newRank: string) =>
+              send({ Action: { SetRank: newRank } })
+            }
+            onChangeMetaRank={(newMetaRank: number) =>
+              send({ Action: { SetMetaRank: newMetaRank } })
+            }
+          />
+        </SettingsSection>
+
+        <SettingsSection
+          title="Misc"
+          subtitle="Cosmetic options and saving / loading settings."
+        >
+          <SettingRow
+            label="Landlord label"
+            hint={
+              <>
+                Currently:{" "}
+                <span className="font-semibold text-[var(--text-primary)]">
+                  {props.state.propagated.landlord_emoji !== null &&
+                  props.state.propagated.landlord_emoji !== undefined &&
+                  props.state.propagated.landlord_emoji !== ""
+                    ? props.state.propagated.landlord_emoji
+                    : "当庄"}
+                </span>
+              </>
+            }
+          >
+            <SettingButton
               onClick={() => {
                 setShowPicker(!showPicker);
               }}
             >
               {showPicker ? "Hide" : "Pick"}
-            </button>
-            <button
-              className="normal"
+            </SettingButton>
+            <SettingButton
               disabled={props.state.propagated.landlord_emoji == null}
               onClick={() => {
                 send({ Action: { SetLandlordEmoji: null } });
               }}
             >
               Default
-            </button>
-            {showPicker ? (
-              <React.Suspense fallback={"..."}>
-                <Picker
-                  onEmojiClick={(ecd) => setEmoji(ecd.emoji)}
-                  emojiStyle={EmojiStyle.NATIVE}
-                />
-              </React.Suspense>
-            ) : null}
-          </label>
-        </div>
-        <div>
-          <label>
-            Setting Management:
-            <button
-              className="normal"
+            </SettingButton>
+          </SettingRow>
+          {showPicker ? (
+            <React.Suspense fallback={"..."}>
+              <Picker
+                onEmojiClick={(ecd) => setEmoji(ecd.emoji)}
+                emojiStyle={EmojiStyle.NATIVE}
+              />
+            </React.Suspense>
+          ) : null}
+          <SettingRow
+            label="Setting management"
+            hint="Save the current settings to your browser, or restore them."
+          >
+            <SettingButton
               data-tooltip-id="saveTip"
               data-tooltip-content="Save game settings"
               onClick={saveGameSettings}
             >
               Save
-            </button>
+            </SettingButton>
             <Tooltip id="saveTip" place="top" />
-            <button
-              className="normal"
+            <SettingButton
               data-tooltip-id="loadTip"
               data-tooltip-content={"Load saved game settings"}
               onClick={loadGameSettings}
             >
               Load
-            </button>
+            </SettingButton>
             <Tooltip id="loadTip" place="top" />
-            <button
-              className="normal"
+            <SettingButton
               data-tooltip-id="resetTip"
               data-tooltip-content="Reset game settings to defaults"
               data-ti="resetTip"
               onClick={resetGameSettings}
             >
               Reset
-            </button>
+            </SettingButton>
             <Tooltip id="resetTip" place="top" />
-          </label>
-        </div>
+          </SettingRow>
+        </SettingsSection>
       </div>
     </div>
   );

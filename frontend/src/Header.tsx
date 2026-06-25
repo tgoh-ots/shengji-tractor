@@ -12,17 +12,25 @@ interface IProps {
 }
 
 const Header = (props: IProps): JSX.Element => (
-  <div>
-    <h1>
-      <GameMode gameMode={props.gameMode} />
-      &nbsp;
-      <SettingsButton />
-      <GameStatisticsButton />
-    </h1>
+  <div className="mb-4">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <h1 className="m-0 text-lg font-bold tracking-tight text-[var(--text-on-felt)] sm:text-xl">
+        <GameMode gameMode={props.gameMode} />
+      </h1>
+      <div className="flex items-center gap-1 text-[var(--text-on-felt)]">
+        <SettingsButton />
+        <GameStatisticsButton />
+      </div>
+    </div>
     {props.chatLink !== undefined && props.chatLink !== null ? (
-      <p>
+      <p className="mt-1 text-sm text-[var(--text-on-felt-soft)]">
         Join the chat at{" "}
-        <a href={props.chatLink} target="_blank" rel="noreferrer">
+        <a
+          href={props.chatLink}
+          target="_blank"
+          rel="noreferrer"
+          className="text-[var(--accent)] underline"
+        >
           {props.chatLink}
         </a>
       </p>

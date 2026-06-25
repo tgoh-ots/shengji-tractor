@@ -7,7 +7,6 @@ import Exchange from "./Exchange";
 import JoinRoom from "./JoinRoom";
 import { AppStateContext } from "./AppStateProvider";
 import { TimerContext } from "./TimerProvider";
-import Credits from "./Credits";
 import Chat from "./Chat";
 import Play from "./Play";
 import DebugInfo from "./DebugInfo";
@@ -83,9 +82,6 @@ const Root = (): JSX.Element => {
                 }}
               />
             </div>
-            <div className="mt-8 text-sm text-[var(--text-on-felt-soft)]">
-              <Credits />
-            </div>
           </div>
           <TitleHandler playerName={state.name} />
         </div>
@@ -150,9 +146,6 @@ const Root = (): JSX.Element => {
               {state.settings.showDebugInfo ? <DebugInfo /> : null}
             </div>
             <Chat messages={state.messages} />
-            <div className="clear-both pt-6 text-sm text-[var(--text-on-felt-soft)]">
-              <Credits />
-            </div>
           </div>
           <TitleHandler playerName={state.name} />
         </div>
@@ -176,9 +169,6 @@ const Root = (): JSX.Element => {
           <div className="sj-panel mt-6 p-6 text-[var(--text-primary)]">
             <p>{t("app.welcome")}</p>
             <p>{t("app.connecting")}</p>
-          </div>
-          <div className="mt-8 text-sm text-[var(--text-on-felt-soft)]">
-            <Credits />
           </div>
         </div>
         <TitleHandler playerName={state.name} />

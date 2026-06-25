@@ -21,7 +21,7 @@ export const RandomizePlayersButton = (props: Props): JSX.Element => {
   };
 
   return (
-    <button className="big" onClick={randomize}>
+    <button type="button" className="sj-btn" onClick={randomize}>
       {props.children}
     </button>
   );

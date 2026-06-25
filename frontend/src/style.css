@@ -355,9 +355,7 @@ label {
 .sj-table-shell {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(220px, 300px);
-  grid-template-areas:
-    "game chat"
-    "footer footer";
+  grid-template-areas: "game chat";
   gap: 18px;
   align-items: start;
 }
@@ -380,11 +378,6 @@ label {
   float: none;
   margin: 0;
   max-height: 80dvh;
-}
-
-.sj-table-shell > .clear-both,
-.sj-table-shell > div:last-child {
-  grid-area: footer;
 }
 
 .chat {
@@ -418,9 +411,7 @@ label {
 /* Hide chat box mode + small screens collapse to one column. */
 .hide-chat-box .sj-table-shell {
   grid-template-columns: minmax(0, 1fr);
-  grid-template-areas:
-    "game"
-    "footer";
+  grid-template-areas: "game";
 }
 
 .hide-chat-box .chat {
@@ -432,8 +423,7 @@ label {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
       "game"
-      "chat"
-      "footer";
+      "chat";
   }
 
   .sj-table-shell .chat {

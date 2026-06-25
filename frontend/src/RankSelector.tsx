@@ -1,4 +1,5 @@
 import * as React from "react";
+import { SettingRow, SettingSelect } from "./SettingsWidgets";
 
 import type { JSX } from "react";
 
@@ -40,33 +41,49 @@ const RankSelector = (props: IProps): JSX.Element => {
   }
 
   return (
-    <div className="rank-picker">
-      <label>
-        Your rank:{" "}
-        <select value={props.rank} onChange={handleChange}>
-          {allRanks.map((rank) => (
-            <option value={rank} key={rank}>
-              {rank}
-            </option>
-          ))}
-        </select>
+    <SettingRow
+      label="Your rank"
+      hint="Tick the box to also set a meta-rank."
+      htmlFor="rank-selector"
+    >
+      <SettingSelect
+        id="rank-selector"
+        className="!min-w-[5rem]"
+        value={props.rank}
+        onChange={handleChange}
+      >
+        {allRanks.map((rank) => (
+          <option value={rank} key={rank}>
+            {rank}
+          </option>
+        ))}
+      </SettingSelect>
+      <label
+        className="flex cursor-pointer items-center gap-1.5 text-sm text-[var(--text-secondary)]"
+        title="show meta-rank"
+      >
         <input
           type="checkbox"
+          className="h-4 w-4 accent-[var(--accent)]"
           checked={showMetaRank}
           onChange={() => setShowMetaRank(!showMetaRank)}
-          title="show meta-rank"
         />
-        {showMetaRank && (
-          <select value={props.metaRank} onChange={handleMetaChange}>
-            {metaranks.map((metarank) => (
-              <option value={metarank} key={metarank}>
-                {metarank}
-              </option>
-            ))}
-          </select>
-        )}
+        meta
       </label>
-    </div>
+      {showMetaRank && (
+        <SettingSelect
+          className="!min-w-[5rem]"
+          value={props.metaRank}
+          onChange={handleMetaChange}
+        >
+          {metaranks.map((metarank) => (
+            <option value={metarank} key={metarank}>
+              {metarank}
+            </option>
+          ))}
+        </SettingSelect>
+      )}
+    </SettingRow>
   );
 };
 

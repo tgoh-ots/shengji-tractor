@@ -1,5 +1,6 @@
 import * as React from "react";
 import ArrayUtils from "./util/array";
+import { SettingRow, SettingSelect } from "./SettingsWidgets";
 
 import type { JSX } from "react";
 
@@ -17,25 +18,23 @@ const NumDecksSelector = (props: IProps): JSX.Element => {
   };
 
   return (
-    <div className="num-decks-picker">
-      <label>
-        Number of decks:{" "}
-        <select
-          value={props.numDecks === null ? "" : props.numDecks}
-          onChange={handleChange}
-        >
-          <option value="">default</option>
-          {ArrayUtils.range(props.numPlayers, (idx) => {
-            const val = idx + 1;
-            return (
-              <option value={val} key={idx}>
-                {val}
-              </option>
-            );
-          })}
-        </select>
-      </label>
-    </div>
+    <SettingRow label="Number of decks" htmlFor="num-decks-selector">
+      <SettingSelect
+        id="num-decks-selector"
+        value={props.numDecks === null ? "" : props.numDecks}
+        onChange={handleChange}
+      >
+        <option value="">default</option>
+        {ArrayUtils.range(props.numPlayers, (idx) => {
+          const val = idx + 1;
+          return (
+            <option value={val} key={idx}>
+              {val}
+            </option>
+          );
+        })}
+      </SettingSelect>
+    </SettingRow>
   );
 };
 

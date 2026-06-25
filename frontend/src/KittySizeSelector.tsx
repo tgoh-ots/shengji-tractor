@@ -2,6 +2,7 @@ import * as React from "react";
 import { Deck } from "./gen-types";
 import ArrayUtils from "./util/array";
 import { useEngine } from "./useEngine";
+import { SettingRow, SettingSelect } from "./SettingsWidgets";
 
 import type { JSX } from "react";
 
@@ -60,41 +61,48 @@ const KittySizeSelector = (props: IProps): JSX.Element => {
   );
 
   if (isLoading) {
-    return <div>Loading kitty size options...</div>;
+    return (
+      <SettingRow label="Number of cards in the bottom">
+        <span className="text-sm text-[var(--text-secondary)]">
+          Loading options…
+        </span>
+      </SettingRow>
+    );
   }
 
   return (
-    <div>
-      <label>
-        Number of cards in the bottom:{" "}
-        <select
-          value={
-            props.kittySize !== undefined && props.kittySize !== null
-              ? props.kittySize
-              : ""
-          }
-          onChange={handleChange}
-        >
-          <optgroup label="Standard">
-            <option value="">default</option>
-            {defaultOptions
-              .filter((v) => v < deckLen - props.numPlayers)
-              .map((v) => (
-                <option value={v} key={v}>
-                  {v} card{v === 1 ? "" : "s"}
-                </option>
-              ))}
-          </optgroup>
-          <optgroup label="Requires removing cards from the deck">
-            {options.map((v) => (
+    <SettingRow
+      label="Number of cards in the bottom"
+      htmlFor="kitty-size-selector"
+    >
+      <SettingSelect
+        id="kitty-size-selector"
+        value={
+          props.kittySize !== undefined && props.kittySize !== null
+            ? props.kittySize
+            : ""
+        }
+        onChange={handleChange}
+      >
+        <optgroup label="Standard">
+          <option value="">default</option>
+          {defaultOptions
+            .filter((v) => v < deckLen - props.numPlayers)
+            .map((v) => (
               <option value={v} key={v}>
                 {v} card{v === 1 ? "" : "s"}
               </option>
             ))}
-          </optgroup>
-        </select>
-      </label>
-    </div>
+        </optgroup>
+        <optgroup label="Requires removing cards from the deck">
+          {options.map((v) => (
+            <option value={v} key={v}>
+              {v} card{v === 1 ? "" : "s"}
+            </option>
+          ))}
+        </optgroup>
+      </SettingSelect>
+    </SettingRow>
   );
 };
 
