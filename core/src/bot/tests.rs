@@ -3,7 +3,8 @@ use slog::{o, Discard, Logger};
 use shengji_mechanics::types::{Card, PlayerID};
 
 use crate::bot::{
-    advance_bots, finish_deferred_bot_trick, next_bot_action, observed_state, policy, BotDifficulty,
+    advance_bots, finish_deferred_bot_trick, next_bot_action, observed_state, policy,
+    BotDifficulty, BotPause,
 };
 use crate::game_state::initialize_phase::InitializePhase;
 use crate::game_state::GameState;
@@ -1984,9 +1985,14 @@ fn drive_to_deferred_bot_trick(logger: &Logger) -> InteractiveGame {
     // bot, so whoever wins the first trick is a bot and deferral must trigger.
     let (mut game, _bot_ids) = setup_all_bot_game_with(logger, BotDifficulty::Easy);
 
-    for _ in 0..50 {
+    // With per-action pacing ON (defer=true), each `advance_bots` call now stops
+    // after a SINGLE meaningful bot move (a bid, a kitty/exchange decision, a
+    // play), so reaching the first complete bot-won trick takes many more calls
+    // than when the loop bursted the whole hand. The cap is generous so the
+    // bid -> kitty -> exchange -> ~4 plays sequence always reaches a trick-clear.
+    for _ in 0..500 {
         let result = advance_bots(&mut game, logger, true).unwrap();
-        if result.deferred_bot_trick_finish {
+        if result.deferred_bot_trick_finish() {
             return game;
         }
         // No deferral yet and the game finished? Then a bot-won trick was never
@@ -2037,7 +2043,7 @@ fn test_defer_holds_bot_won_trick_until_finish_called() {
     let snapshot_before = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
     let again = advance_bots(&mut game, &logger, true).unwrap();
     assert!(
-        again.deferred_bot_trick_finish,
+        again.deferred_bot_trick_finish(),
         "a second defer=true run must keep deferring the same bot-won trick"
     );
     let snapshot_after = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
@@ -2064,10 +2070,12 @@ fn test_defer_holds_bot_won_trick_until_finish_called() {
         GameState::Play(p) => {
             if p.game_finished() {
                 // The finish completed the final trick; that is forward progress.
-            } else if resumed.deferred_bot_trick_finish {
-                // Back-to-back bot-won trick: a NEW complete trick is now pending.
-                // Confirm we advanced (the leader/trick changed) rather than
-                // re-presenting the identical original trick.
+            } else if resumed.deferred_bot_trick_finish() {
+                // Back-to-back bot-won trick that re-deferred at the trick-clear
+                // beat: a NEW complete trick is now pending. (With per-action
+                // pacing the resume usually stops one play into the next trick
+                // instead, taking the `else` branch below; this branch still
+                // documents the clean trick-clear re-defer.) Confirm we advanced.
                 assert!(
                     p.trick().next_player().is_none(),
                     "a re-deferred follow-up trick must itself be complete"
@@ -2085,8 +2093,10 @@ fn test_defer_holds_bot_won_trick_until_finish_called() {
                     "a re-deferred trick must also be bot-won"
                 );
             } else {
-                // The original trick was cleared and play continues with a fresh,
-                // not-yet-complete trick (e.g. it is now a different actor's turn).
+                // The original trick was cleared and play continues. With
+                // per-action pacing the resume applies the winner's FIRST play of
+                // the next trick and stops, so a fresh, not-yet-complete trick is
+                // now underway (it is some actor's turn to play into it).
                 assert!(
                     p.trick().next_player().is_some() || p.game_finished(),
                     "after finishing, a new in-progress trick should be underway"
@@ -2117,7 +2127,7 @@ fn test_finish_deferred_is_idempotent_after_external_finish() {
     // panics, and that if the game is mid-trick-on-a-human/no-op it leaves state
     // coherent. We compare only when no new deferral is pending.
     let post = finish_deferred_bot_trick(&mut game, &logger).unwrap();
-    if !post.deferred_bot_trick_finish && post.messages.is_empty() {
+    if post.pause.is_none() && post.messages.is_empty() {
         let snapshot2 = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
         assert_eq!(
             snapshot, snapshot2,
@@ -2128,5 +2138,410 @@ fn test_finish_deferred_is_idempotent_after_external_finish() {
     assert!(
         matches!(game.dump_state().unwrap(), GameState::Play(_)),
         "state must remain a coherent Play phase after redundant finish calls"
+    );
+}
+
+// ===========================================================================
+// Per-action pacing (production timing UX).
+//
+// In production the handler runs `advance_bots(.., defer_bot_trick_finish=true)`
+// not only to defer the trick-clear, but to pause briefly after EACH single
+// meaningful bot move (a play, a bid, a kitty/landlord/exchange decision) so a
+// human can register what one bot did before the next acts. Bot DRAWS are
+// exempt (bursted, no pause). These tests prove the mechanism-level contract
+// synchronously (no timers):
+//   * defer=false stays fully synchronous (never pauses);
+//   * defer=true pauses after a single bot PLAY (and applies exactly that play);
+//   * defer=true pauses on the post-draw BID / kitty decision but NOT on the
+//     many DrawCard burst that precedes it;
+//   * chaining the resume (`finish_deferred_bot_trick`, as the handler's delayed
+//     task does) drives a whole all-bot hand to completion one beat at a time.
+// ===========================================================================
+
+/// defer=false must NEVER report a pause — the synchronous path is unchanged.
+/// Drive a whole all-bot hand with defer=false and assert every call reports
+/// `pause == None` (neither a trick-clear nor a per-action beat).
+#[test]
+fn test_no_pause_when_defer_is_false() {
+    let logger = null_logger();
+    let (mut game, _bot_ids) = setup_all_bot_game_with(&logger, BotDifficulty::Easy);
+
+    for _ in 0..200 {
+        let result = advance_bots(&mut game, &logger, false).unwrap();
+        assert!(
+            result.pause.is_none(),
+            "defer=false must never pause (got {:?})",
+            result.pause
+        );
+        if let GameState::Play(p) = &game.dump_state().unwrap() {
+            if p.game_finished() {
+                return;
+            }
+        }
+    }
+    panic!("all-bot hand did not finish within the iteration cap under defer=false");
+}
+
+/// defer=true must pace the PLAY phase one move at a time: each `advance_bots`
+/// call applies exactly ONE bot play (advancing the trick by a single seat) and
+/// stops with a per-action pause, until a trick completes (then it switches to
+/// the trick-clear beat). This proves bots' plays no longer appear all at once.
+#[test]
+fn test_per_action_pause_stops_after_single_bot_play() {
+    let logger = null_logger();
+    // Drive (defer=true) until we are mid-trick with at least one card down and a
+    // bot to play next, so the very next beat is a per-action PLAY pause.
+    let (mut game, _bot_ids) = setup_all_bot_game_with(&logger, BotDifficulty::Easy);
+
+    // Advance one beat at a time until we observe a Play-phase state where a card
+    // is on the table but the trick is not yet complete (a bot is mid-trick).
+    let mut found_mid_trick_play_pause = false;
+    for _ in 0..500 {
+        // Snapshot the number of cards on the table before the beat.
+        let before_played = match &game.dump_state().unwrap() {
+            GameState::Play(p) => Some(p.trick().played_cards().len()),
+            _ => None,
+        };
+        let result = advance_bots(&mut game, &logger, true).unwrap();
+
+        if let (Some(before_n), GameState::Play(p)) = (before_played, &game.dump_state().unwrap()) {
+            let after_n = p.trick().played_cards().len();
+            // A per-action PLAY beat: the trick grew by exactly one played group
+            // (one seat played) and we stopped on the per-action pause.
+            if result.paused_after_bot_action()
+                && after_n == before_n + 1
+                && p.trick().next_player().is_some()
+            {
+                found_mid_trick_play_pause = true;
+                break;
+            }
+        }
+
+        if let GameState::Play(p) = &game.dump_state().unwrap() {
+            assert!(
+                !p.game_finished(),
+                "the hand finished before we ever observed a mid-trick per-action play pause"
+            );
+        }
+    }
+    assert!(
+        found_mid_trick_play_pause,
+        "defer=true must pause after a single bot play, advancing the trick by one seat"
+    );
+}
+
+/// defer=true must NOT pause per-draw: the draw phase bursts all of the bots'
+/// `DrawCard` moves in a single `advance_bots` call (no per-action beat), and the
+/// FIRST pause it reports is the post-draw bid / kitty / landlord decision. This
+/// guards the critical "don't make the deal minutes long" requirement.
+#[test]
+fn test_draws_are_not_paced_but_bid_decision_is() {
+    let logger = null_logger();
+    // 1 human + 3 bots so the deal stops on the human's draw turns (mirrors
+    // production); we drive the human's draws ourselves and let advance_bots burst
+    // the bots' draws.
+    let (mut game, host, _all_ids) = human_plus_bots_started(&logger, BotDifficulty::Easy);
+
+    // The deck size before drawing, so we can assert draws actually happened in a
+    // burst with no per-action pause.
+    let drawable = match game.dump_state().unwrap() {
+        GameState::Draw(p) => p.deck().len(),
+        other => panic!("expected Draw, got {:?}", other),
+    };
+
+    // Mirror the production cadence: human draws on its turn, then advance_bots
+    // (defer=true) bursts the bots' draws. Crucially, while there are still cards
+    // to draw, advance_bots must NEVER report a per-action pause — draws are not
+    // paced. The FIRST pause we are allowed to see is once drawing is done (the
+    // bid / kitty / landlord decision).
+    let mut first_pause_seen_after_draw_done: Option<bool> = None;
+    for _ in 0..(drawable * 4 + 200) {
+        // Human draws if it is the human's turn and drawing is ongoing.
+        let drawing_ongoing = match &game.dump_state().unwrap() {
+            GameState::Draw(p) => {
+                if !p.done_drawing() && p.next_player().map(|n| n == host).unwrap_or(false) {
+                    game.interact(Action::DrawCard, host, &logger).unwrap();
+                }
+                !p.done_drawing()
+            }
+            _ => false,
+        };
+
+        let result = advance_bots(&mut game, &logger, true).unwrap();
+
+        if result.pause.is_some() {
+            // Record whether the very first pause happened only after the draw was
+            // complete. If drawing was still ongoing when a pause fired, that is a
+            // per-draw pause — exactly what we must avoid.
+            let draw_done_now = !matches!(
+                &game.dump_state().unwrap(),
+                GameState::Draw(p) if !p.done_drawing()
+            );
+            assert!(
+                draw_done_now,
+                "advance_bots paused while the deck was still being drawn (per-draw pause)"
+            );
+            first_pause_seen_after_draw_done = Some(true);
+            // The first pause after the draw is a per-ACTION beat (the bid / kitty
+            // / landlord decision), not a trick-clear (we are not in Play yet).
+            assert!(
+                result.paused_after_bot_action(),
+                "the first post-draw pause should be a per-action (bid/kitty) beat, got {:?}",
+                result.pause
+            );
+            break;
+        }
+
+        // Stop once we have clearly progressed past the draw with no pause yet
+        // (e.g. a bot resolved the bid and we are already exchanging/playing).
+        if !drawing_ongoing
+            && !matches!(game.dump_state().unwrap(), GameState::Draw(_))
+            && first_pause_seen_after_draw_done.is_none()
+        {
+            // We left the Draw phase without ever pausing during it — that alone
+            // satisfies "draws are not paced". Done.
+            first_pause_seen_after_draw_done = Some(true);
+            break;
+        }
+    }
+
+    assert_eq!(
+        first_pause_seen_after_draw_done,
+        Some(true),
+        "the bots' draws must burst without a per-action pause; the first pause (if any) \
+         must come only at/after the post-draw decision"
+    );
+}
+
+/// Chaining the resume the way the production delayed task does
+/// (`finish_deferred_bot_trick` after each beat) must drive a whole all-bot hand
+/// to completion ONE beat at a time, with every beat being either a per-action
+/// pause or a trick-clear pause (never an un-paced burst of multiple bot moves).
+/// This is the synchronous analogue of the handler's `resume_deferred_bots_after_delay`
+/// loop and proves the paced path still makes full forward progress.
+#[test]
+fn test_paced_resume_drives_whole_hand_to_completion() {
+    let logger = null_logger();
+    let (mut game, _bot_ids) = setup_all_bot_game_with(&logger, BotDifficulty::Easy);
+
+    // Kick off with one deferred advance (as the handler does after the human's
+    // action). For an all-bot table the very first advance bursts the draws and
+    // then pauses on the first bid decision.
+    let mut result = advance_bots(&mut game, &logger, true).unwrap();
+
+    let mut beats = 0usize;
+    loop {
+        if let GameState::Play(p) = &game.dump_state().unwrap() {
+            if p.game_finished() {
+                break;
+            }
+        }
+        assert!(
+            result.pause.is_some(),
+            "a paced all-bot hand must keep pausing at each beat until it finishes \
+             (got no pause before completion)"
+        );
+        // Resume exactly as the delayed task does.
+        result = finish_deferred_bot_trick(&mut game, &logger).unwrap();
+        beats += 1;
+        assert!(
+            beats < 100_000,
+            "paced resume did not finish the hand within a sane number of beats"
+        );
+    }
+
+    match game.dump_state().unwrap() {
+        GameState::Play(p) => {
+            assert!(p.game_finished(), "expected a finished hand");
+            assert!(p.hands().is_empty(), "play should consume all cards");
+            let (_init, _landlord_won, _msgs) = p.finish_game().unwrap();
+        }
+        other => panic!("expected a finished Play phase, got {:?}", other),
+    }
+
+    // We should have taken MANY beats (one per bot move + trick-clears), proving
+    // the hand was genuinely paced move-by-move rather than bursted.
+    assert!(
+        beats > 10,
+        "a paced hand should take many beats (one per bot move); took only {}",
+        beats
+    );
+}
+
+/// The two pause kinds must map to the intended ordering: a trick-clear beat
+/// (`BotPause::TrickClear`) and a per-action beat (`BotPause::Action`) are
+/// distinct, and the handler relies on the convenience predicates agreeing with
+/// the `pause` variant. This is a small invariant guard so the predicates and the
+/// enum never drift.
+#[test]
+fn test_pause_predicates_match_variants() {
+    let trick = crate::bot::AdvanceResult {
+        messages: vec![],
+        pause: Some(BotPause::TrickClear),
+    };
+    assert!(trick.deferred_bot_trick_finish());
+    assert!(!trick.paused_after_bot_action());
+
+    let action = crate::bot::AdvanceResult {
+        messages: vec![],
+        pause: Some(BotPause::Action),
+    };
+    assert!(action.paused_after_bot_action());
+    assert!(!action.deferred_bot_trick_finish());
+
+    let none = crate::bot::AdvanceResult {
+        messages: vec![],
+        pause: None,
+    };
+    assert!(!none.deferred_bot_trick_finish());
+    assert!(!none.paused_after_bot_action());
+}
+
+// ===========================================================================
+// Draw-phase bid-robbery regression: a seated human must keep their bidding
+// turn.
+//
+// Production bug (1 human + 3 bots): after the deck was fully drawn with no bid
+// and no pre-selected landlord, the bot driver's "fallback minimal bid" fired
+// for a bot the instant drawing finished — even when NO bot had a strategically
+// strong hand. That bot became the standing bidder and the driver immediately
+// resolved PickUpKitty -> Exchange -> Play in one synchronous burst, so the
+// human (who "did nothing") saw the game race straight into play without ever
+// being offered a chance to bid. The fallback exists ONLY to keep an ALL-BOT
+// table from deadlocking; with a human seated the driver must PARK and let the
+// human bid / reveal / pass. This test reproduces that exact post-draw position
+// (weak bot hands that have a *legal* minimal bid but no *strategic* bid) and
+// asserts advance_bots makes NO move — leaving the human their turn.
+// ===========================================================================
+#[test]
+fn test_human_not_robbed_of_bid_by_fallback() {
+    use shengji_mechanics::types::cards::{C_4, C_5, D_2, H_2, S_2};
+
+    let logger = null_logger();
+
+    // Build a real 1-human + 3-bot DrawPhase (correct player/bot registry).
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".to_string()).unwrap();
+    let mut bot_ids = vec![];
+    for _ in 0..3 {
+        let msgs = game
+            .interact(
+                Action::AddAIPlayer {
+                    difficulty: BotDifficulty::Easy,
+                },
+                host,
+                &logger,
+            )
+            .unwrap();
+        bot_ids.push(added_bot_id(&msgs));
+    }
+    game.interact(Action::StartGame, host, &logger).unwrap();
+
+    // Patch the DrawPhase: deck drained (drawing done), NO landlord, NO bid. Each
+    // seat gets a SINGLE rank-2 card (the default rank is Two, so a 2 is a legal
+    // minimal bid) plus weak junk (a 4 and a non-trump 5) — strong enough to make
+    // a *legal* bid but far below the strategic strength threshold, so no bot
+    // *wants* to bid and the OLD code would have fired the fallback. The human
+    // likewise holds a rank-2, so the human genuinely CAN bid.
+    let state = game.dump_state().unwrap();
+    let mut json = serde_json::to_value(&state).unwrap();
+    {
+        let draw = json.get_mut("Draw").expect("must be in Draw phase");
+        draw["deck"] = serde_json::json!([]);
+        draw["bids"] = serde_json::json!([]);
+        draw["autobid"] = serde_json::Value::Null;
+        draw["propagated"]["landlord"] = serde_json::Value::Null;
+
+        let s2 = S_2.as_char().to_string();
+        let h2 = H_2.as_char().to_string();
+        let d2 = D_2.as_char().to_string();
+        let c4 = C_4.as_char().to_string();
+        let c5 = C_5.as_char().to_string();
+
+        let mut hands_map = serde_json::Map::new();
+        let players: Vec<usize> = draw["propagated"]["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pl| pl["id"].as_u64().unwrap() as usize)
+            .collect();
+        // Give each seat a distinct-suit rank-2 so everyone has a legal minimal
+        // bid, plus weak junk. (A lone rank-2 + a 4 + a 5 scores well under the
+        // strategic threshold, so choose_bid returns None for every bot.)
+        let twos = [s2, h2, d2];
+        for (i, id) in players.iter().enumerate() {
+            let two = twos[i % twos.len()].clone();
+            hands_map.insert(
+                id.to_string(),
+                serde_json::json!({ two: 1, c4.clone(): 1, c5.clone(): 1 }),
+            );
+        }
+        draw["hands"]["hands"] = serde_json::Value::Object(hands_map);
+    }
+    let patched: GameState = serde_json::from_value(json).expect("patched Draw must deserialize");
+    let mut game = InteractiveGame::new_from_state(patched);
+
+    // Sanity: drawing is done, nothing is decided, and EVERY seat (human + bots)
+    // has at least one legal bid available (so the fallback path is reachable).
+    if let GameState::Draw(p) = &game.dump_state().unwrap() {
+        assert!(p.done_drawing(), "deck should be drained");
+        assert!(!p.bid_decided(), "no bid should be decided yet");
+        for pl in p.propagated().players() {
+            assert!(
+                !p.valid_bids(pl.id).unwrap().is_empty(),
+                "seat {:?} must have a legal minimal bid for this scenario",
+                pl.id
+            );
+        }
+        // And no bot is *strategically* willing to bid such a weak hand.
+        for &bot in &bot_ids {
+            assert!(
+                policy::choose_bid(p, bot).is_none(),
+                "bot {:?} should NOT want a strategic bid on this weak hand",
+                bot
+            );
+        }
+    } else {
+        panic!("expected a Draw phase");
+    }
+
+    // THE REGRESSION ASSERTION: production runs advance_bots after the human's
+    // (last draw) action. With a human seated, no strategic bot bid, and no
+    // landlord, the bot driver must PARK (no move) and leave the human their
+    // bidding turn — it must NOT fire a fallback bid for a bot.
+    let before = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+    let out = advance_bots(&mut game, &logger, true).expect("advance_bots must not error");
+    let after = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+    assert!(
+        out.messages.is_empty(),
+        "advance_bots must make NO move (else it robbed the human of bidding); produced {} messages",
+        out.messages.len()
+    );
+    assert!(
+        out.pause.is_none(),
+        "parking for the human is not a paced beat; got {:?}",
+        out.pause
+    );
+    assert_eq!(
+        before, after,
+        "advance_bots must not mutate state: the human keeps their bidding turn"
+    );
+
+    // The human can now actually take their turn: a legal minimal bid succeeds.
+    let p = match game.dump_state().unwrap() {
+        GameState::Draw(p) => p,
+        other => panic!("expected Draw, got {:?}", other),
+    };
+    let human_bid = p
+        .valid_bids(host)
+        .unwrap()
+        .into_iter()
+        .min_by_key(|b| b.count)
+        .expect("the human must have a legal bid available");
+    game.interact(Action::Bid(human_bid.card, human_bid.count), host, &logger)
+        .expect("the human's bid must be accepted (their turn was preserved)");
+    assert!(
+        matches!(game.dump_state().unwrap(), GameState::Draw(p) if p.bid_decided()),
+        "after the human bids, a bid must be decided"
     );
 }

@@ -76,24 +76,101 @@ impl BotDifficulty {
 /// [`advance_bots`]; this prevents an unexpected state from spinning forever.
 const MAX_BOT_ITERATIONS: usize = 5000;
 
-/// The outcome of an [`advance_bots`] run, bundling the broadcasts produced with
-/// whether the loop stopped early because a bot is about to finish a trick it
-/// won and the caller asked to DEFER that finish (`defer_bot_trick_finish`).
+/// Why an [`advance_bots`] run stopped early to give a human a beat to register
+/// what a bot just did. Only ever produced when the caller opts into deferral
+/// (`defer_bot_trick_finish = true`); a synchronous (`false`) run never sets it.
 ///
-/// When `deferred_bot_trick_finish` is `true`, the just-completed (full,
-/// 4-card) trick has intentionally NOT been cleared: the loop returned without
-/// applying the winning bot's [`Action::EndTrick`] so the completed-trick state
-/// can be published and seen by humans. The caller is responsible for waiting a
-/// short, human-visible beat and then calling [`finish_deferred_bot_trick`] to
-/// clear it and continue. When `false`, the loop ran to a normal stopping point
-/// (human's turn, game over, or no progress) exactly as before.
+/// The two variants carry different human-visible pause lengths (the caller maps
+/// them to its own configurable durations):
+///
+/// * [`BotPause::TrickClear`] — a bot is about to finish (clear) a now-complete,
+///   bot-won 4-card trick. The loop stops *before* applying the winning bot's
+///   [`Action::EndTrick`], leaving the full trick on the table so a human can see
+///   it. This is the LONGER pause; the caller resumes via
+///   [`finish_deferred_bot_trick`].
+/// * [`BotPause::Action`] — a bot just took a single meaningful move (a play, a
+///   bid, a reveal, a kitty/landlord/exchange decision). Unlike `TrickClear`, the
+///   action has ALREADY been applied; the loop stops *after* it so the new state
+///   is published and a SHORT pause lets the human register the one move before
+///   the next bot acts. The caller resumes by simply calling `advance_bots`
+///   (with deferral) again — [`finish_deferred_bot_trick`] handles that too.
+///
+/// Bot draws (`Action::DrawCard`) deliberately produce NO pause: the draw phase
+/// deals ~25 cards per bot, so per-draw pauses would take minutes. Draws are
+/// applied in a burst and paced by the human's own draw cadence; a single
+/// `Action` pause at the post-draw bid/kitty/landlord decision is enough.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BotPause {
+    /// A bot-won complete trick is about to be cleared; stop before clearing it
+    /// (longer, trick-visible pause).
+    TrickClear,
+    /// A bot just applied a single meaningful move; stop after it (short,
+    /// per-action pause).
+    Action,
+}
+
+/// The outcome of an [`advance_bots`] run, bundling the broadcasts produced with
+/// whether (and why) the loop stopped early so a human can follow along.
+///
+/// When `pause` is `Some(..)`, the run stopped early at a human-visible beat (see
+/// [`BotPause`]); the caller publishes the just-produced state, waits the
+/// appropriate beat WITHOUT holding the game lock, and then resumes via
+/// [`finish_deferred_bot_trick`]. When `None`, the loop ran to a normal stopping
+/// point (human's turn, game over, or no progress) exactly as before.
+///
+/// [`deferred_bot_trick_finish`](AdvanceResult::deferred_bot_trick_finish) is a
+/// convenience predicate kept for the trick-clear-specific call sites/tests: it
+/// is `true` iff `pause == Some(BotPause::TrickClear)`.
 #[derive(Debug, Default)]
 pub struct AdvanceResult {
     /// Broadcast messages produced by the bot moves applied during this run.
     pub messages: Vec<(BroadcastMessage, String)>,
-    /// `true` iff the run stopped early specifically because a bot won a
-    /// now-complete trick and the caller requested deferral of the finish.
-    pub deferred_bot_trick_finish: bool,
+    /// `Some(..)` iff the run stopped early at a human-visible beat (and the
+    /// caller opted into deferral); the variant selects the pause length.
+    pub pause: Option<BotPause>,
+}
+
+impl AdvanceResult {
+    /// `true` iff the run stopped specifically because a bot won a now-complete
+    /// trick and the caller requested deferral of the finish (the LONG,
+    /// trick-visible pause). Convenience predicate over [`AdvanceResult::pause`].
+    pub fn deferred_bot_trick_finish(&self) -> bool {
+        matches!(self.pause, Some(BotPause::TrickClear))
+    }
+
+    /// `true` iff the run stopped after applying a single meaningful bot move so
+    /// the human can register it (the SHORT, per-action pause). Convenience
+    /// predicate over [`AdvanceResult::pause`].
+    pub fn paused_after_bot_action(&self) -> bool {
+        matches!(self.pause, Some(BotPause::Action))
+    }
+}
+
+/// Whether a bot [`Action`], when applied by [`advance_bots`] in deferral mode,
+/// is a single "meaningful" move that should be followed by a SHORT human-visible
+/// pause so a human can register what happened. Returns `false` for the actions
+/// that must stay un-paced:
+///
+/// * `DrawCard` — the deal is ~25 draws/bot; per-draw pauses would make the draw
+///   phase minutes long. Draws are bursted and paced by the human's draw cadence
+///   instead (a single pause at the post-draw decision is enough).
+/// * `EndTrick` — handled separately by the LONGER trick-clear deferral, which
+///   stops *before* the action rather than after it.
+/// * `ResetGame` and any lobby/no-op action — kept instant for responsiveness.
+fn is_paceable_bot_action(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Bid(..)
+            | Action::RevealCard
+            | Action::PickUpKitty
+            | Action::PutDownKitty
+            | Action::MoveCardToKitty(..)
+            | Action::MoveCardToHand(..)
+            | Action::SetFriends(..)
+            | Action::BeginPlay
+            | Action::PlayCards(..)
+            | Action::PlayCardsWithHint(..)
+    )
 }
 
 /// Drive any bot players that need to act, applying their moves through the same
@@ -114,20 +191,34 @@ pub struct AdvanceResult {
 ///
 /// # `defer_bot_trick_finish`
 ///
-/// When `false`, the loop is fully synchronous and unchanged: a bot that wins a
-/// completed trick has its [`Action::EndTrick`] applied immediately, so the
-/// trick is cleared and the next one begins within this single call. ALL tests,
-/// the self-play/ladder/dealing harnesses, and the e2e driver use `false` so a
-/// whole hand can be driven without any timing.
+/// When `false`, the loop is fully synchronous and unchanged: every bot move
+/// (including a bot finishing a completed trick) is applied immediately, so a
+/// whole sequence of bot turns runs within this single call. ALL tests, the
+/// self-play/ladder/dealing harnesses, and the e2e driver use `false` so a whole
+/// hand can be driven without any timing.
 ///
-/// When `true` (the production handler), the loop instead STOPS the moment it
-/// would apply a winning bot's `EndTrick` for a now-complete trick: it leaves
-/// the trick un-cleared and returns [`AdvanceResult::deferred_bot_trick_finish`]
-/// `= true`. The caller publishes the completed-trick state (so a human can see
-/// the full 4-card trick), waits a short beat WITHOUT holding the game lock, and
-/// then resumes via [`finish_deferred_bot_trick`]. A HUMAN winning a trick is
-/// unaffected in both modes — `next_bot_action` returns `None` there and we wait
-/// for the human's "Finish trick" button exactly as before.
+/// When `true` (the production handler), the loop instead STOPS at the first
+/// human-visible beat so a human can follow the game one bot move at a time. Two
+/// kinds of beat exist (see [`BotPause`]):
+///
+/// * **Trick-clear** ([`BotPause::TrickClear`]): the moment it would apply a
+///   winning bot's `EndTrick` for a now-complete trick, it stops WITHOUT applying
+///   it, leaving the full 4-card trick on the table. This is the LONGER pause.
+/// * **Per-action** ([`BotPause::Action`]): after applying a SINGLE meaningful
+///   bot move (a play, a bid, a reveal, a kitty/landlord/exchange decision — see
+///   [`is_paceable_bot_action`]), it stops so the one move can be published and a
+///   SHORT pause lets the human register it before the next bot acts.
+///
+/// Bot **draws** are exempt: they are applied in a burst with no pause (the deal
+/// is ~25 draws/bot; per-draw pauses would take minutes), paced instead by the
+/// human's own draw cadence. A reset confirmation is also applied without a
+/// pause so the table returns to the lobby promptly.
+///
+/// In every deferred case the caller publishes the just-produced state, waits the
+/// appropriate beat WITHOUT holding the game lock, and resumes via
+/// [`finish_deferred_bot_trick`] (which handles both pause kinds). A HUMAN's turn
+/// is unaffected in both modes — `next_bot_action` returns `None` there and we
+/// wait for the human exactly as before.
 pub fn advance_bots(
     game: &mut InteractiveGame,
     logger: &Logger,
@@ -144,28 +235,42 @@ pub fn advance_bots(
             None => {
                 return Ok(AdvanceResult {
                     messages: out,
-                    deferred_bot_trick_finish: false,
+                    pause: None,
                 })
             }
         };
 
         let (bot_id, action) = next;
 
-        // Deferral point: if the next bot action is finishing a trick the bot
-        // won, and the caller opted into deferral, stop WITHOUT applying it so
-        // the completed trick stays on the table for a human-visible beat. The
-        // caller resumes via `finish_deferred_bot_trick` after a short delay.
-        // (`next_bot_action` only ever yields `Action::EndTrick` for a complete,
-        // bot-won trick — see its `GameState::Play` arm.)
+        // Trick-clear deferral: if the next bot action is finishing a trick the
+        // bot won, and the caller opted into deferral, stop WITHOUT applying it so
+        // the completed trick stays on the table for a (longer) human-visible
+        // beat. The caller resumes via `finish_deferred_bot_trick` after the
+        // delay. (`next_bot_action` only ever yields `Action::EndTrick` for a
+        // complete, bot-won trick — see its `GameState::Play` arm.)
         if defer_bot_trick_finish && matches!(action, Action::EndTrick) {
             return Ok(AdvanceResult {
                 messages: out,
-                deferred_bot_trick_finish: true,
+                pause: Some(BotPause::TrickClear),
             });
         }
 
+        // Per-action pacing: when deferring, a single meaningful bot move (play,
+        // bid, kitty/landlord/exchange decision) is APPLIED and then we stop so it
+        // can be published and a SHORT pause lets the human register it before the
+        // next bot acts. Draws and the reset confirmation are NOT paced — they
+        // fall through and keep bursting in this same call.
+        let pace_after = defer_bot_trick_finish && is_paceable_bot_action(&action);
+
         let msgs = game.interact(action, bot_id, logger)?;
         out.extend(msgs);
+
+        if pace_after {
+            return Ok(AdvanceResult {
+                messages: out,
+                pause: Some(BotPause::Action),
+            });
+        }
     }
 
     error!(
@@ -174,35 +279,40 @@ pub fn advance_bots(
     );
     Ok(AdvanceResult {
         messages: out,
-        deferred_bot_trick_finish: false,
+        pause: None,
     })
 }
 
-/// Resume after a deferred bot-won trick finish (see `advance_bots` with
+/// Resume after a deferred bot beat (see `advance_bots` with
 /// `defer_bot_trick_finish = true`). This is the lock-held, idempotent,
-/// re-checking second half of the deferral: the caller invokes it after its
-/// (lock-free) delay has elapsed.
+/// re-checking second half of every deferral — both the trick-clear pause
+/// ([`BotPause::TrickClear`]) and the per-action pause ([`BotPause::Action`]).
+/// The caller invokes it after its (lock-free) delay has elapsed.
 ///
 /// It is deliberately SAFE to call even if the world changed during the delay
 /// (a human pressed "Finish trick", a takeback happened, a reset occurred, the
-/// game ended, ...). We re-derive what the bot driver wants to do RIGHT NOW: if
-/// the very next action is still a bot finishing a trick it won, we apply that
-/// single `EndTrick` and then continue driving the bots (again with deferral, so
-/// a back-to-back bot-won trick pauses again). If the next action is anything
-/// else (the trick was already finished, it is a human's turn, the game ended,
-/// etc.) we simply fall through to a normal deferred `advance_bots`, which
-/// applies no stale `EndTrick`. Either way there is no double-finish and no
-/// reliance on the pre-delay snapshot.
+/// game ended, ...). We re-derive what the bot driver wants to do RIGHT NOW:
+///
+/// * If the very next action is still a bot finishing a trick it won, we apply
+///   that single `EndTrick` and then continue driving the bots (again with
+///   deferral, so the next beat — trick-clear or per-action — pauses again).
+/// * Otherwise (the per-action resume, or the world changed) we simply fall
+///   through to a normal deferred `advance_bots`, which applies the next single
+///   meaningful bot move and stops, or makes whatever progress is valid, applying
+///   no stale `EndTrick`.
+///
+/// Either way there is no double-finish, no double-apply, and no reliance on the
+/// pre-delay snapshot.
 pub fn finish_deferred_bot_trick(
     game: &mut InteractiveGame,
     logger: &Logger,
 ) -> Result<AdvanceResult, Error> {
-    // `advance_bots(defer=true)` already does exactly the right thing here: if a
-    // bot still owns a finished trick it will stop again at the deferral point
-    // (re-signalling), and otherwise it makes whatever progress is valid. But we
-    // must actually APPLY this trick's finish to make forward progress, so we
-    // explicitly perform the one pending bot `EndTrick` (if it is still pending
-    // and still bot-won) and only then continue deferring.
+    // The trick-clear pause stops *before* the `EndTrick`, so to make forward
+    // progress we must explicitly apply that one pending bot `EndTrick` (if it is
+    // still pending and still bot-won) and only then continue deferring. The
+    // per-action pause already applied its move before stopping, so there is
+    // nothing to re-apply for it — the fall-through deferred `advance_bots` picks
+    // up the next move on its own.
     if let Some((bot_id, action)) = next_bot_action(game)? {
         if matches!(action, Action::EndTrick) {
             let msgs = game.interact(action, bot_id, logger)?;
@@ -213,8 +323,9 @@ pub fn finish_deferred_bot_trick(
             return Ok(result);
         }
     }
-    // The deferred finish is no longer applicable (world changed during the
-    // delay). Drive the bots normally; no stale EndTrick is applied.
+    // The deferred trick finish is no longer applicable (per-action resume, or the
+    // world changed during the delay). Drive the bots normally (still deferring);
+    // no stale EndTrick is applied.
     advance_bots(game, logger, true)
 }
 
@@ -293,7 +404,26 @@ fn next_bot_action(game: &mut InteractiveGame) -> Result<Option<(PlayerID, Actio
                         }
                     }
                 }
-                // Fallback so an all-bot table never deadlocks: minimal legal bid.
+                // No bot wanted a strategic bid. The minimal legal-bid FALLBACK
+                // below exists ONLY to keep a pure all-bot table from deadlocking
+                // when the deck is drawn but nobody has bid. We must NOT fire it
+                // when a HUMAN is seated: doing so robs the human of their bidding
+                // turn (a bot would force a weak bid and immediately resolve the
+                // landlord, racing the deal into play before the human can bid).
+                // With a human present we instead PARK here (return None) so the
+                // human can bid, reveal the bottom, or pass via the UI. (A
+                // pre-selected landlord or a human bid takes a different branch
+                // above; this branch is reached only when the human can still act.)
+                let any_human_seat = state
+                    .propagated()
+                    .players()
+                    .iter()
+                    .any(|pl| bot_for(&state, pl.id).is_none());
+                if any_human_seat {
+                    return Ok(None);
+                }
+                // All-bot table: fall back to the lowest-count legal bid from the
+                // first able bot so the table never deadlocks.
                 for player in state.propagated().players() {
                     if bot_for(&state, player.id).is_some() {
                         if let Some(bid) =

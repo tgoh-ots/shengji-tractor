@@ -4,6 +4,7 @@ use anyhow::bail;
 use slog::{debug, error, info, o, Logger};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use shengji_core::bot::BotPause;
 use shengji_core::interactive::{Action, InteractiveGame};
 use shengji_mechanics::types::PlayerID;
 use shengji_types::GameMessage;
@@ -513,13 +514,16 @@ async fn handle_user_action<S: Storage<VersionedGame, E> + 'static, E: Send + 's
                 },
                 other => other,
             };
-            // The bot driver may STOP early because a bot just won a now-complete
-            // trick: in production we DEFER clearing that trick so the human can
-            // see the full 4-card trick before the bot leads the next one. The
-            // closure flips this flag when that happens; we read it after the lock
-            // is released (and the completed-trick state has been published).
-            let deferred = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let deferred_in_op = deferred.clone();
+            // The bot driver may STOP early at a human-visible beat so a human can
+            // follow the game one bot move at a time: either a bot just won a
+            // now-complete trick (we DEFER clearing it so the full 4-card trick is
+            // visible) or a bot just made a single meaningful move (play / bid /
+            // kitty / landlord decision) after which we pause briefly. The closure
+            // records WHICH beat it stopped on (if any); we read it after the lock
+            // is released (and the just-produced state has been published).
+            let pause_kind: Arc<std::sync::Mutex<Option<BotPause>>> =
+                Arc::new(std::sync::Mutex::new(None));
+            let pause_in_op = pause_kind.clone();
             let op_logger = logger.clone();
             execute_operation(
                 ws_id,
@@ -530,12 +534,13 @@ async fn handle_user_action<S: Storage<VersionedGame, E> + 'static, E: Send + 's
                     // need to act take their turns. Both happen within this single
                     // locked operation so the moves are applied atomically and the
                     // combined set of broadcasts is published together. We pass
-                    // `defer_bot_trick_finish = true` so a bot finishing a trick it
-                    // won pauses (handled below) instead of clearing it instantly.
+                    // `defer_bot_trick_finish = true` so the bot driver pauses at
+                    // the first human-visible beat (handled below) instead of
+                    // bursting the whole sequence.
                     let mut broadcasts = game.interact(action, caller, &op_logger)?;
                     let result = shengji_core::bot::advance_bots(game, &op_logger, true)?;
-                    if result.deferred_bot_trick_finish {
-                        deferred_in_op.store(true, std::sync::atomic::Ordering::SeqCst);
+                    if let Some(pause) = result.pause {
+                        *pause_in_op.lock().unwrap() = Some(pause);
                     }
                     broadcasts.extend(result.messages);
                     Ok(broadcasts
@@ -547,17 +552,18 @@ async fn handle_user_action<S: Storage<VersionedGame, E> + 'static, E: Send + 's
             )
             .await;
 
-            // If the bot driver paused on a bot-won completed trick, the full
-            // trick has now been published (lock released). Spawn a detached task
-            // that waits a short, human-visible beat WITHOUT holding the lock and
-            // then finishes the trick (and continues the bots, pausing again for
-            // any back-to-back bot-won trick).
-            if deferred.load(std::sync::atomic::Ordering::SeqCst) {
-                tokio::task::spawn(finish_deferred_bot_tricks_after_delay(
+            // If the bot driver paused at a human-visible beat, the just-produced
+            // state has now been published (lock released). Spawn a detached task
+            // that waits the appropriate beat WITHOUT holding the lock and then
+            // resumes the bots (pausing again at each subsequent beat).
+            let initial_pause = *pause_kind.lock().unwrap();
+            if let Some(initial_pause) = initial_pause {
+                tokio::task::spawn(resume_deferred_bots_after_delay(
                     logger,
                     ws_id,
                     room_name.to_string(),
                     backend_storage,
+                    initial_pause,
                 ));
             }
         }
@@ -566,39 +572,56 @@ async fn handle_user_action<S: Storage<VersionedGame, E> + 'static, E: Send + 's
 }
 
 /// Default human-visible pause (milliseconds) before a bot clears a trick it
-/// won, so the human can see the completed 4-card trick. Overridable at runtime
-/// via the `SHENGJI_BOT_TRICK_PAUSE_MS` environment variable.
+/// won, so the human can see the completed 4-card trick. This is the LONGER beat.
+/// Overridable at runtime via the `SHENGJI_BOT_TRICK_PAUSE_MS` environment
+/// variable.
 const DEFAULT_BOT_TRICK_PAUSE_MS: u64 = 2500;
 
-/// Read the configured bot-trick pause, defaulting to
-/// [`DEFAULT_BOT_TRICK_PAUSE_MS`] if the env var is unset or unparseable.
-fn bot_trick_pause() -> std::time::Duration {
-    let ms = std::env::var("SHENGJI_BOT_TRICK_PAUSE_MS")
+/// Default human-visible pause (milliseconds) after a single meaningful bot move
+/// (a play, a bid, a kitty/landlord/exchange decision) so a human can register
+/// what one bot did before the next acts. This is the SHORTER beat. Overridable
+/// at runtime via the `SHENGJI_BOT_ACTION_PAUSE_MS` environment variable.
+const DEFAULT_BOT_ACTION_PAUSE_MS: u64 = 1200;
+
+/// Read the configured pause for the given beat, defaulting to the matching
+/// constant if the env var is unset or unparseable. The trick-clear beat is the
+/// longer pause (so the full 4-card trick is visible); the per-action beat is the
+/// shorter pause (one move at a time).
+fn bot_pause(kind: BotPause) -> std::time::Duration {
+    let (var, default) = match kind {
+        BotPause::TrickClear => ("SHENGJI_BOT_TRICK_PAUSE_MS", DEFAULT_BOT_TRICK_PAUSE_MS),
+        BotPause::Action => ("SHENGJI_BOT_ACTION_PAUSE_MS", DEFAULT_BOT_ACTION_PAUSE_MS),
+    };
+    let ms = std::env::var(var)
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_BOT_TRICK_PAUSE_MS);
+        .unwrap_or(default);
     std::time::Duration::from_millis(ms)
 }
 
-/// Detached task that finishes a deferred bot-won trick after a short delay.
+/// Detached task that resumes the deferred bot driver after a human-visible beat.
 ///
-/// This is the second half of the production trick-finish deferral (see
+/// This is the second half of the production deferral (see
 /// `shengji_core::bot::advance_bots` with `defer_bot_trick_finish = true`). It is
-/// spawned ONLY after the completed-trick state has already been published and
-/// the game lock released, so the human sees the full 4-card trick during the
-/// pause. The sleep happens WITHOUT holding the lock.
+/// spawned ONLY after the just-produced state has already been published and the
+/// game lock released, so the human sees that state during the pause. Every sleep
+/// happens WITHOUT holding the lock.
 ///
-/// It loops because consecutive bot-won tricks each defer: after a trick is
-/// finished, `finish_deferred_bot_trick` keeps driving the bots and may stop
-/// again on the NEXT bot-won trick, in which case we sleep and repeat. The loop
-/// ends as soon as a resume does NOT defer (human's turn, game over, etc.).
+/// It loops because the bot driver pauses at EACH beat: after one resume,
+/// `finish_deferred_bot_trick` keeps driving the bots and may stop again at the
+/// next beat (the next bot move, or the next bot-won trick), reporting WHICH beat
+/// via [`AdvanceResult::pause`]. We sleep for the duration matching the CURRENT
+/// pending beat, resume once, then continue with whatever beat the resume reports
+/// next. The loop ends as soon as a resume reports no further beat (human's turn,
+/// game over, no progress).
 ///
 /// Safety: each resume re-derives, under the lock, what the bot driver wants to
-/// do RIGHT NOW. If a human (or any other event) already finished the trick, or
-/// it is no longer a bot's turn, `finish_deferred_bot_trick` applies no stale
-/// `EndTrick` — so there is no double-finish even if the world changed during the
-/// delay.
-async fn finish_deferred_bot_tricks_after_delay<
+/// do RIGHT NOW. If a human (or any other event) already finished the trick / it
+/// is no longer a bot's turn, `finish_deferred_bot_trick` applies no stale move —
+/// so there is no double-apply even if the world changed during the delay. The
+/// iteration bound caps the number of chained beats within a single hand so a
+/// wedged state can never spin this task forever.
+async fn resume_deferred_bots_after_delay<
     S: Storage<VersionedGame, E> + 'static,
     E: Send + 'static,
 >(
@@ -606,14 +629,20 @@ async fn finish_deferred_bot_tricks_after_delay<
     ws_id: usize,
     room_name: String,
     backend_storage: S,
+    initial_pause: BotPause,
 ) {
-    // A generous bound on chained bot-won tricks within a single hand, so a
-    // wedged state can never spin this task forever.
-    for _ in 0..64 {
-        tokio::time::sleep(bot_trick_pause()).await;
+    // A generous bound on chained beats within a single hand (many short
+    // per-action pauses can chain across a multi-trick run), so a wedged state
+    // can never spin this task forever.
+    let mut pending = initial_pause;
+    for _ in 0..4096 {
+        tokio::time::sleep(bot_pause(pending)).await;
 
-        let deferred_again = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let deferred_in_op = deferred_again.clone();
+        // The beat the NEXT resume stops on (if any), captured out of the locked
+        // closure so we can pick the right sleep duration for the following loop.
+        let next_pause: Arc<std::sync::Mutex<Option<BotPause>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let next_in_op = next_pause.clone();
         let op_logger = logger.clone();
         execute_operation(
             ws_id,
@@ -621,11 +650,12 @@ async fn finish_deferred_bot_tricks_after_delay<
             backend_storage.clone(),
             move |game, _, _| {
                 // Re-check + apply under the lock. `finish_deferred_bot_trick` is
-                // idempotent: it only finishes the trick if a bot still owns a
-                // now-complete trick, then continues the bots with deferral on.
+                // idempotent: it finishes a still-pending bot-won trick if any,
+                // else advances the next single meaningful bot move, then keeps
+                // deferring — reporting the next beat to wait on.
                 let result = shengji_core::bot::finish_deferred_bot_trick(game, &op_logger)?;
-                if result.deferred_bot_trick_finish {
-                    deferred_in_op.store(true, std::sync::atomic::Ordering::SeqCst);
+                if let Some(pause) = result.pause {
+                    *next_in_op.lock().unwrap() = Some(pause);
                 }
                 Ok(result
                     .messages
@@ -633,13 +663,16 @@ async fn finish_deferred_bot_tricks_after_delay<
                     .map(|(data, message)| GameMessage::Broadcast { data, message })
                     .collect())
             },
-            "finish deferred bot trick",
+            "resume deferred bots",
         )
         .await;
 
-        // If the resume did not pause on another bot-won trick, we're done.
-        if !deferred_again.load(std::sync::atomic::Ordering::SeqCst) {
-            break;
+        // If the resume did not pause on another beat, we're done; otherwise loop
+        // and sleep for the duration matching the next beat.
+        let next = *next_pause.lock().unwrap();
+        match next {
+            Some(pause) => pending = pause,
+            None => break,
         }
     }
 }
