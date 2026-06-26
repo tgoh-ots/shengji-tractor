@@ -57,6 +57,13 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
         this.drawCardAudio.play();
       }
       (window as any).send({ Action: "DrawCard" });
+      // After issuing a draw, the server advances any bots and broadcasts a new
+      // state. In a game whose only other players are bots, that broadcast can
+      // already have the turn back on us (the bots drew server-side in the same
+      // operation), so `canDraw` never flips to false in between. The auto-draw
+      // re-arm in render() keys off a false->true transition of `could_draw`, so
+      // we must reset it here; otherwise auto-draw fires exactly once and stalls.
+      this.could_draw = false;
     }
   }
 
