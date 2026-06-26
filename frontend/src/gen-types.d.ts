@@ -38,6 +38,13 @@ export type Action =
       RemoveAIPlayer: number;
     }
   | {
+      RenameBot: {
+        name: string;
+        player: number;
+        [k: string]: unknown;
+      };
+    }
+  | {
       SetChatLink: string | null;
     }
   | {
@@ -429,6 +436,12 @@ export type MessageVariant =
   | {
       name: string;
       type: "RemovedBot";
+      [k: string]: unknown;
+    }
+  | {
+      from: string;
+      to: string;
+      type: "RenamedBot";
       [k: string]: unknown;
     }
   | {

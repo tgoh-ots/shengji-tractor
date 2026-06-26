@@ -71,6 +71,10 @@ pub enum MessageVariant {
     RemovedBot {
         name: String,
     },
+    RenamedBot {
+        from: String,
+        to: String,
+    },
     AdvancementPolicySet {
         policy: AdvancementPolicy,
     },
@@ -250,6 +254,7 @@ impl MessageVariant {
             AddedBot { player, difficulty } =>
                 format!("{} added a {} bot ({})", n?, difficulty.as_str(), player_name(*player)?),
             RemovedBot { ref name } => format!("{name} (bot) has left the game"),
+            RenamedBot { ref from, ref to } => format!("{} renamed bot {from} to {to}", n?),
             AdvancementPolicySet { policy: AdvancementPolicy::FullyUnrestricted } =>
                 format!("{} removed all advancement restrictions", n?),
             AdvancementPolicySet { policy: AdvancementPolicy::Unrestricted } =>

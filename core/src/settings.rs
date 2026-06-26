@@ -21,6 +21,12 @@ use shengji_mechanics::types::{Card, Number, PlayerID, Rank};
 use crate::bot::BotDifficulty;
 use crate::message::MessageVariant;
 
+/// Maximum length (in Unicode scalar values) of a bot's display name. Kept in
+/// the same ballpark as the backend's `MAX_NAME_BYTES` join-path cap, but
+/// measured in characters so multibyte (e.g. CJK) names aren't unfairly
+/// truncated.
+pub const MAX_BOT_NAME_CHARS: usize = 32;
+
 /// The registration of an AI bot player. The `player_id` matches the regular
 /// player entry in [`PropagatedState::players`]; this registry is what marks that
 /// seat as bot-controlled.
@@ -444,6 +450,61 @@ impl PropagatedState {
 
     pub fn bots(&self) -> &[BotRegistration] {
         &self.bots
+    }
+
+    /// Rename a seated bot player. Only registered bots may be renamed; renaming
+    /// a human seat (or an unknown id) is rejected. The new name is trimmed and
+    /// validated to be non-empty, within the display-name length cap, and not
+    /// colliding with another participant's name in the room. On success the
+    /// player's display name is updated in place and a [`MessageVariant`]
+    /// describing the change is returned.
+    ///
+    /// Control-character stripping / sanitization is expected to have happened
+    /// upstream (see `backend::security::sanitize_text`); here we trim and bound
+    /// the length and enforce uniqueness, which is the part that needs access to
+    /// the full set of seated/observing players.
+    pub fn rename_bot(
+        &mut self,
+        player_id: PlayerID,
+        new_name: String,
+    ) -> Result<MessageVariant, Error> {
+        // Only registered bots may be renamed.
+        if self.is_bot(player_id).is_none() {
+            bail!("player is not a bot");
+        }
+
+        let trimmed = new_name.trim().to_string();
+        if trimmed.is_empty() {
+            bail!("bot name must not be empty");
+        }
+        if trimmed.chars().count() > MAX_BOT_NAME_CHARS {
+            bail!("bot name is too long");
+        }
+
+        // Reject collisions with any OTHER seated player or observer. Renaming a
+        // bot to its own current name is a no-op but still allowed.
+        let collides = self
+            .players
+            .iter()
+            .chain(self.observers.iter())
+            .any(|p| p.id != player_id && p.name == trimmed);
+        if collides {
+            bail!("a player with that name already exists");
+        }
+
+        let old_name = match self.players.iter_mut().find(|p| p.id == player_id) {
+            Some(player) => {
+                let old = player.name.clone();
+                player.name = trimmed.clone();
+                old
+            }
+            None => bail!("bot player not found"),
+        };
+
+        Ok(MessageVariant::RenamedBot {
+            from: old_name,
+            to: trimmed,
+        })
     }
 
     /// Generate a unique display name for a freshly-added bot, such as

@@ -19,6 +19,103 @@ interface IProps {
   name: string;
 }
 
+interface IBotRenameProps {
+  player: Player;
+}
+
+/*
+ * Inline rename control shown for a seated bot in the lobby. A pencil affordance
+ * swaps the bot's name for a small text input that dispatches a RenameBot action
+ * over the same websocket `send` mechanism as the other lobby controls:
+ *   { Action: { RenameBot: { player: playerId, name } } }
+ * Only bots are renamable; humans never get this control.
+ */
+const BotRename = ({ player }: IBotRenameProps): JSX.Element => {
+  const { send } = React.useContext(WebsocketContext);
+  const { t } = useTranslation();
+  const [editing, setEditing] = React.useState<boolean>(false);
+  const [draft, setDraft] = React.useState<string>(player.name);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  const open = (): void => {
+    setDraft(player.name);
+    setEditing(true);
+  };
+
+  const cancel = (): void => {
+    setEditing(false);
+  };
+
+  const submit = (): void => {
+    const trimmed = draft.trim();
+    // No-op on empty or unchanged names; the server also validates.
+    if (trimmed.length > 0 && trimmed !== player.name) {
+      send({ Action: { RenameBot: { player: player.id, name: trimmed } } });
+    }
+    setEditing(false);
+  };
+
+  React.useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        className="sj-btn sj-btn-ghost !min-h-[28px] !px-2 !text-xs !text-[var(--text-primary)]"
+        onClick={open}
+        title={t("ai.rename")}
+        aria-label={t("ai.rename")}
+      >
+        ✏️
+      </button>
+    );
+  }
+
+  return (
+    <span className="flex items-center gap-1">
+      <input
+        ref={inputRef}
+        type="text"
+        className="sj-input !min-h-[28px] !w-28 !py-0.5 !text-xs"
+        value={draft}
+        maxLength={32}
+        aria-label={t("ai.renameLabel")}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            submit();
+          } else if (e.key === "Escape") {
+            cancel();
+          }
+        }}
+      />
+      <button
+        type="button"
+        className="sj-btn sj-btn-primary !min-h-[28px] !px-2 !text-xs"
+        onClick={submit}
+        title={t("ai.renameSave")}
+        aria-label={t("ai.renameSave")}
+      >
+        ✓
+      </button>
+      <button
+        type="button"
+        className="sj-btn sj-btn-ghost !min-h-[28px] !px-2 !text-xs !text-[var(--text-primary)]"
+        onClick={cancel}
+        title={t("ai.renameCancel")}
+        aria-label={t("ai.renameCancel")}
+      >
+        ✕
+      </button>
+    </span>
+  );
+};
+
 const Players = (props: IProps): JSX.Element => {
   const {
     players,
@@ -105,16 +202,19 @@ const Players = (props: IProps): JSX.Element => {
               <span className="mt-2 flex items-center justify-center gap-1">
                 <MovePlayerLeft players={players} player={player} />
                 {bot !== undefined ? (
-                  <button
-                    type="button"
-                    className="sj-btn sj-btn-ghost !min-h-[28px] !px-2 !text-xs !text-[var(--text-primary)]"
-                    onClick={() =>
-                      send({ Action: { RemoveAIPlayer: player.id } })
-                    }
-                    title={t("ai.remove")}
-                  >
-                    {t("ai.remove")}
-                  </button>
+                  <>
+                    <BotRename player={player} />
+                    <button
+                      type="button"
+                      className="sj-btn sj-btn-ghost !min-h-[28px] !px-2 !text-xs !text-[var(--text-primary)]"
+                      onClick={() =>
+                        send({ Action: { RemoveAIPlayer: player.id } })
+                      }
+                      title={t("ai.remove")}
+                    >
+                      {t("ai.remove")}
+                    </button>
+                  </>
                 ) : (
                   <span
                     role="button"

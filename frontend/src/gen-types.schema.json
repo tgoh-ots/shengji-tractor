@@ -182,6 +182,27 @@
         },
         {
           "type": "object",
+          "required": ["RenameBot"],
+          "properties": {
+            "RenameBot": {
+              "type": "object",
+              "required": ["name", "player"],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "player": {
+                  "type": "integer",
+                  "format": "uint",
+                  "minimum": 0.0
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
           "required": ["SetChatLink"],
           "properties": {
             "SetChatLink": {
@@ -2086,6 +2107,22 @@
             "type": {
               "type": "string",
               "enum": ["RemovedBot"]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["from", "to", "type"],
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": ["RenamedBot"]
             }
           }
         },

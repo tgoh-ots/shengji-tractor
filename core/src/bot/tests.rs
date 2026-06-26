@@ -1000,7 +1000,11 @@ fn drive_human_post_draw(game: &mut InteractiveGame, host: PlayerID, logger: &Lo
         if p.next_player().map(|n| n == host).unwrap_or(false) {
             if p.bid_decided() {
                 game.interact(Action::PickUpKitty, host, logger).unwrap();
-            } else if let Some(bid) = p.valid_bids(host).unwrap().into_iter().min_by_key(|b| b.count)
+            } else if let Some(bid) = p
+                .valid_bids(host)
+                .unwrap()
+                .into_iter()
+                .min_by_key(|b| b.count)
             {
                 game.interact(Action::Bid(bid.card, bid.count), host, logger)
                     .unwrap();
@@ -1066,8 +1070,7 @@ fn test_deal_one_human_three_bots_normal() {
     let logger = null_logger();
 
     for trial in 0..3 {
-        let (mut game, host, all_ids) =
-            human_plus_bots_started(&logger, BotDifficulty::Easy);
+        let (mut game, host, all_ids) = human_plus_bots_started(&logger, BotDifficulty::Easy);
 
         // Capture the deal geometry up front (deck length + kitty) so we can
         // assert termination state afterwards.
@@ -1085,12 +1088,15 @@ fn test_deal_one_human_three_bots_normal() {
             drawable % num_players,
             0,
             "trial {}: drawable deck ({}) must divide evenly among {} seats",
-            trial, drawable, num_players
+            trial,
+            drawable,
+            num_players
         );
         assert!(
             kitty_size >= 5,
             "trial {}: kitty ({}) should be the standard >=5 set-aside",
-            trial, kitty_size
+            trial,
+            kitty_size
         );
 
         // ---- Verify the draw order one card at a time. ----
@@ -1113,7 +1119,8 @@ fn test_deal_one_human_three_bots_normal() {
             assert!(
                 all_ids.contains(&turn),
                 "trial {}: draw turn went to an unknown seat {:?}",
-                trial, turn
+                trial,
+                turn
             );
             // Strict round-robin: the drawer must be the seat AFTER the previous
             // drawer (mod num_players).
@@ -1143,7 +1150,8 @@ fn test_deal_one_human_three_bots_normal() {
                 assert!(
                     matches!(action, Action::DrawCard),
                     "trial {}: the only bot action mid-draw must be DrawCard, got {:?}",
-                    trial, action
+                    trial,
+                    action
                 );
                 game.interact(action, bot_id, &logger).unwrap();
             }
@@ -1250,16 +1258,17 @@ fn test_deal_human_is_landlord() {
         match &state {
             GameState::Draw(p) => {
                 if p.next_player().map(|n| n == host).unwrap_or(false) {
-                    if p.bid_decided()
-                        && p.next_player().unwrap() == host
-                    {
+                    if p.bid_decided() && p.next_player().unwrap() == host {
                         // The human is the responsible (winning) player: pick up.
                         game.interact(Action::PickUpKitty, host, &logger).unwrap();
                     } else if !p.bid_decided() {
                         // Make (or reinforce) the human's bid so the human stays the
                         // winning bidder.
-                        if let Some(bid) =
-                            p.valid_bids(host).unwrap().into_iter().min_by_key(|b| b.count)
+                        if let Some(bid) = p
+                            .valid_bids(host)
+                            .unwrap()
+                            .into_iter()
+                            .min_by_key(|b| b.count)
                         {
                             game.interact(Action::Bid(bid.card, bid.count), host, &logger)
                                 .unwrap();
@@ -1331,8 +1340,7 @@ fn test_deal_bot_is_landlord_buries_legal_kitty() {
     // correctly-sized kitty that avoids points when possible.
     let mut saw_bot_landlord = false;
     for trial in 0..6 {
-        let (mut game, host, all_ids) =
-            human_plus_bots_started(&logger, BotDifficulty::Easy);
+        let (mut game, host, all_ids) = human_plus_bots_started(&logger, BotDifficulty::Easy);
 
         // Capture the expected kitty size from the Draw phase.
         let kitty_size = match game.dump_state().unwrap() {
@@ -1440,9 +1448,7 @@ fn test_deal_bot_is_landlord_buries_legal_kitty() {
             );
         };
 
-        let landlord_is_bot = all_ids
-            .iter()
-            .any(|id| *id == landlord && *id != host);
+        let landlord_is_bot = all_ids.iter().any(|id| *id == landlord && *id != host);
         if landlord_is_bot {
             saw_bot_landlord = true;
         }
@@ -1484,8 +1490,7 @@ fn test_deal_bot_is_landlord_buries_legal_kitty() {
                     .filter(|(c, _)| c.points().is_none())
                     .map(|(_, n)| *n)
                     .sum::<usize>();
-                let non_point_in_kitty =
-                    kitty.iter().filter(|c| c.points().is_none()).count();
+                let non_point_in_kitty = kitty.iter().filter(|c| c.points().is_none()).count();
                 let avoidable = non_point_in_hand + non_point_in_kitty >= kitty_size;
                 assert!(
                     !avoidable,
@@ -1795,7 +1800,10 @@ fn test_no_one_can_bid_advance_bots_terminates() {
                 pl.id
             );
         }
-        assert!(p.done_drawing(), "deck should be drained for the no-bid case");
+        assert!(
+            p.done_drawing(),
+            "deck should be drained for the no-bid case"
+        );
         assert!(!p.bid_decided(), "no bid should be decided yet");
     } else {
         panic!("expected a Draw phase in the no-bid setup");
@@ -1827,4 +1835,120 @@ fn test_no_one_can_bid_advance_bots_terminates() {
         matches!(game.dump_state().unwrap(), GameState::Draw(_)),
         "the no-bid position should remain a coherent Draw state"
     );
+}
+
+/// Renaming a seated bot updates its display name in the propagated state,
+/// produces a `RenamedBot` broadcast, and keeps the bot registration intact.
+#[test]
+fn test_rename_bot_updates_name() {
+    let logger = null_logger();
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".to_string()).unwrap();
+    let msgs = game
+        .interact(
+            Action::AddAIPlayer {
+                difficulty: BotDifficulty::Easy,
+            },
+            host,
+            &logger,
+        )
+        .unwrap();
+    let bot_id = added_bot_id(&msgs);
+
+    let out = game
+        .interact(
+            Action::RenameBot {
+                player: bot_id,
+                name: "  Robo McBotface  ".to_string(),
+            },
+            host,
+            &logger,
+        )
+        .unwrap();
+
+    // The display name is trimmed and applied.
+    assert_eq!(game.player_name(bot_id).unwrap(), "Robo McBotface");
+    // It is still registered as a bot at the same difficulty.
+    assert_eq!(
+        game.dump_state().unwrap().propagated().is_bot(bot_id),
+        Some(BotDifficulty::Easy)
+    );
+    // A RenamedBot broadcast was emitted.
+    assert!(
+        out.iter().any(|(b, _)| matches!(
+            b.variant(),
+            MessageVariant::RenamedBot { to, .. } if to == "Robo McBotface"
+        )),
+        "expected a RenamedBot broadcast"
+    );
+}
+
+/// Renaming must be rejected for non-bot seats, empty/oversized names, and
+/// collisions with another participant's name.
+#[test]
+fn test_rename_bot_rejects_invalid() {
+    let logger = null_logger();
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".to_string()).unwrap();
+    let msgs = game
+        .interact(
+            Action::AddAIPlayer {
+                difficulty: BotDifficulty::Easy,
+            },
+            host,
+            &logger,
+        )
+        .unwrap();
+    let bot_id = added_bot_id(&msgs);
+
+    // A human seat cannot be renamed via RenameBot.
+    assert!(game
+        .interact(
+            Action::RenameBot {
+                player: host,
+                name: "nope".to_string(),
+            },
+            host,
+            &logger,
+        )
+        .is_err());
+
+    // Empty / whitespace-only names are rejected.
+    assert!(game
+        .interact(
+            Action::RenameBot {
+                player: bot_id,
+                name: "   ".to_string(),
+            },
+            host,
+            &logger,
+        )
+        .is_err());
+
+    // Oversized names are rejected.
+    assert!(game
+        .interact(
+            Action::RenameBot {
+                player: bot_id,
+                name: "x".repeat(64),
+            },
+            host,
+            &logger,
+        )
+        .is_err());
+
+    // Colliding with another participant's name (the host) is rejected.
+    assert!(game
+        .interact(
+            Action::RenameBot {
+                player: bot_id,
+                name: "host".to_string(),
+            },
+            host,
+            &logger,
+        )
+        .is_err());
+
+    // After all the rejections the bot keeps its original generated name.
+    assert!(game.player_name(bot_id).unwrap().contains("Bot"));
 }

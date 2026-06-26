@@ -186,6 +186,11 @@ impl InteractiveGame {
                 msgs.insert(0, MessageVariant::RemovedBot { name });
                 msgs
             }
+            (Action::RenameBot { player, ref name }, GameState::Initialize(ref mut state)) => {
+                info!(logger, "Renaming AI player"; "id" => player.0);
+                let propagated = state.propagated_mut();
+                vec![propagated.rename_bot(player, name.clone())?]
+            }
             (Action::SetNumDecks(num_decks), GameState::Initialize(ref mut state)) => {
                 info!(logger, "Setting number of decks"; "num_decks" => num_decks);
                 state.set_num_decks(num_decks)?
@@ -499,6 +504,7 @@ pub enum Action {
     MakePlayer(PlayerID),
     AddAIPlayer { difficulty: BotDifficulty },
     RemoveAIPlayer(PlayerID),
+    RenameBot { player: PlayerID, name: String },
     SetChatLink(Option<String>),
     SetNumDecks(Option<usize>),
     SetSpecialDecks(Vec<Deck>),

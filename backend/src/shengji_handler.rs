@@ -4,7 +4,7 @@ use anyhow::bail;
 use slog::{debug, error, info, o, Logger};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use shengji_core::interactive::InteractiveGame;
+use shengji_core::interactive::{Action, InteractiveGame};
 use shengji_mechanics::types::PlayerID;
 use shengji_types::GameMessage;
 use storage::Storage;
@@ -492,6 +492,18 @@ async fn handle_user_action<S: Storage<VersionedGame, E>, E: Send>(
             .await;
         }
         UserMessage::Action(action) => {
+            // Sanitize free-text carried by actions before applying them. A bot
+            // rename is the one action that carries an arbitrary display name, so
+            // strip control characters here (reusing the same `sanitize_text`
+            // helper as the join path); core then trims, length-bounds, and
+            // uniqueness-checks it.
+            let action = match action {
+                Action::RenameBot { player, name } => Action::RenameBot {
+                    player,
+                    name: sanitize_text(&name),
+                },
+                other => other,
+            };
             execute_operation(
                 ws_id,
                 room_name,
