@@ -47,11 +47,27 @@ const broadcastHandler: WebsocketHandler = (
   }
 };
 
+// Transient action-ordering rejections that harmlessly self-correct on the next
+// state sync — e.g. autoplay/autodraw firing a beat early while bots are mid-
+// pause, so the server rejects the duplicate/early move. They alarm players for
+// no reason, so we drop them from the toast list (and only log to the console)
+// while still surfacing every genuine error.
+const BENIGN_ERROR_PATTERNS = ["out of order", "out of turn", "not your turn"];
+
+const isBenignError = (err: string): boolean => {
+  const e = err.toLowerCase();
+  return BENIGN_ERROR_PATTERNS.some((p) => e.includes(p));
+};
+
 const errorHandler: WebsocketHandler = (
   state: AppState,
   message: GameMessage,
 ) => {
   if ("Error" in message) {
+    if (isBenignError(message.Error)) {
+      console.debug("Suppressed benign server rejection:", message.Error);
+      return null;
+    }
     return { errors: [...state.errors, message.Error] };
   } else {
     return null;
