@@ -1242,6 +1242,7 @@ const Initialize = (props: IProps): JSX.Element => {
           observers={props.state.propagated.observers}
           bots={props.state.propagated.bots}
           landlord={props.state.propagated.landlord}
+          gameMode={props.state.propagated.game_mode}
           next={null}
           movable={true}
           name={props.name}

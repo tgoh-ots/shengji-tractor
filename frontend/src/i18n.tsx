@@ -57,6 +57,10 @@ const en: Dict = {
   "lobby.start": "Start game",
   "lobby.waiting": "Waiting for players...",
   "lobby.randomize": "Randomize player order",
+  "lobby.team.yourTeam": "Your team",
+  "lobby.team.opponents": "Opponents",
+  "lobby.team.decidedInPlay": "Teams are decided during play.",
+  "lobby.team.fixedHint": "Partners sit across from each other.",
 
   // Add-AI control
   "ai.heading": "Add a computer player",
@@ -212,6 +216,10 @@ const zh: Dict = {
   "lobby.start": "开始游戏",
   "lobby.waiting": "等待玩家中…",
   "lobby.randomize": "随机排序玩家",
+  "lobby.team.yourTeam": "你的队伍",
+  "lobby.team.opponents": "对方",
+  "lobby.team.decidedInPlay": "队伍将在游戏中决定。",
+  "lobby.team.fixedHint": "对家即为你的队友。",
 
   "ai.heading": "添加电脑玩家",
   "ai.add": "添加机器人",

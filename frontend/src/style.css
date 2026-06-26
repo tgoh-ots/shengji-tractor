@@ -653,89 +653,62 @@ label {
   color: #fff7e6;
 }
 
-/* Row of small tags under each seat name (You / role / bot difficulty). */
-.sj-seat-tags {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 4px;
-}
-
-.sj-seat-tag {
-  font-size: 0.68rem;
-  font-weight: 600;
-  line-height: 1.2;
-  padding: 1px 7px;
+/* The single "You" tag, tucked inside the local player's own seat pill so it
+ * never collides with neighbouring seats. */
+.sj-seat-you-tag {
+  flex: none;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  padding: 2px 6px;
   border-radius: 999px;
-  white-space: nowrap;
-}
-
-.sj-seat-tag-you {
+  text-transform: uppercase;
   background: var(--text-on-felt, #eef6f3);
   color: #0c1615;
 }
 
-.sj-seat-tag-role {
-  border: 1px solid transparent;
-}
-.sj-seat-tag-declarer,
-.sj-seat-tag-teammate {
-  background: color-mix(in srgb, var(--team-declarer) 26%, transparent);
-  color: #fff7e6;
-}
-.sj-seat-tag-opponent {
-  background: color-mix(in srgb, var(--team-opponent) 26%, transparent);
-  color: #eaf7ff;
-}
-.sj-seat-tag-unknown {
-  background: rgba(148, 163, 184, 0.18);
-  border-color: color-mix(in srgb, var(--team-unknown) 45%, transparent);
-  color: #d7dde6;
-}
-
-/* The declarer tag is the most prominent on the declarer's side. */
-.sj-seat-tag-declarer {
-  background: color-mix(in srgb, var(--team-declarer) 40%, transparent);
-}
-
+/* Bot difficulty pill — kept on its own line under the seat name so it never
+ * collides with the team color or the "You" tag. */
 .sj-seat-badge {
+  font-size: 0.66rem;
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 1px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
   background: rgba(255, 255, 255, 0.1);
   color: var(--text-on-felt, #eef6f3);
 }
 
-/* A compact legend in the corner of the felt, so the color code is learnable
- * at a glance and the local player sees which side they're on. */
-.sj-team-legend {
-  grid-area: center;
-  align-self: end;
-  justify-self: end;
+/* A single compact legend in its own centered row directly under the felt. By
+ * sitting outside the seat grid in normal flow it can never overlap a seat or
+ * the trick at any table width. */
+.sj-table-wrap {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  flex-direction: column;
   align-items: center;
-  gap: 4px 10px;
-  margin: 0 2px -4px 0;
-  padding: 4px 8px;
-  border-radius: 10px;
-  font-size: 0.66rem;
-  font-weight: 600;
-  color: var(--text-on-felt-soft, #c8d9d4);
-  background: rgba(8, 22, 21, 0.42);
-  pointer-events: none;
+  gap: 8px;
 }
 
-.sj-team-legend-self {
-  padding: 1px 8px;
+.sj-table-wrap .sj-table {
+  width: 100%;
+}
+
+.sj-team-legend {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 4px 12px;
+  margin: 0;
+  padding: 4px 12px;
   border-radius: 999px;
-  font-weight: 700;
-}
-.sj-team-legend-self.is-declarer-side {
-  background: color-mix(in srgb, var(--team-declarer) 30%, transparent);
-  color: #fff7e6;
-}
-.sj-team-legend-self.is-opponent-side {
-  background: color-mix(in srgb, var(--team-opponent) 30%, transparent);
-  color: #eaf7ff;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-on-felt-soft, #c8d9d4);
+  background: var(--surface-panel-soft, rgba(8, 22, 21, 0.4));
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
 }
 
 .sj-team-legend-key {
@@ -758,6 +731,44 @@ label {
 }
 .sj-team-swatch-unknown {
   background: var(--team-unknown);
+}
+
+/* ---------------------------------------------------------------------
+ * Waiting-room (lobby) team coloring for fixed-partnership Tractor.
+ *
+ * Reuses the in-game team colors so the lobby reads the same way as the table:
+ * the local player's team is amber, the opponents are cyan. Each seat carries a
+ * single small corner tag so the grouping is unmistakable. (FindingFriends has
+ * no fixed pre-game teams, so these classes are never applied there.)
+ * ------------------------------------------------------------------- */
+.player.sj-lobby-team-self {
+  border-color: color-mix(in srgb, var(--team-declarer) 55%, transparent);
+  background: color-mix(in srgb, var(--team-declarer) 12%, transparent);
+}
+.player.sj-lobby-team-opponent {
+  border-color: color-mix(in srgb, var(--team-opponent) 55%, transparent);
+  background: color-mix(in srgb, var(--team-opponent) 12%, transparent);
+}
+
+.sj-lobby-team-tag {
+  position: absolute;
+  top: -0.55rem;
+  right: 0.5rem;
+  font-size: 0.6rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.sj-lobby-team-tag-self {
+  background: color-mix(in srgb, var(--team-declarer) 85%, #1a1207);
+  color: #fff7e6;
+}
+.sj-lobby-team-tag-opponent {
+  background: color-mix(in srgb, var(--team-opponent) 85%, #04131c);
+  color: #04131c;
 }
 
 .sj-center {
@@ -940,15 +951,20 @@ label {
     padding: 3px 9px;
   }
 
-  .sj-seat-tag {
-    font-size: 0.62rem;
+  .sj-seat-you-tag {
+    font-size: 0.54rem;
+    padding: 2px 5px;
+  }
+
+  .sj-seat-badge {
+    font-size: 0.6rem;
     padding: 1px 6px;
   }
 
-  /* On the tight mobile grid the legend would crowd the felt; the per-seat
-   * colors + tags already convey the teams, so the corner legend is hidden. */
   .sj-team-legend {
-    display: none;
+    font-size: 0.62rem;
+    gap: 3px 9px;
+    padding: 3px 10px;
   }
 }
 

@@ -109,14 +109,6 @@ const Seat = (props: {
           : "play.seat.right";
 
   const role = props.role;
-  const roleLabelKey =
-    role === "declarer"
-      ? "team.declarer"
-      : role === "teammate"
-        ? "team.teammate"
-        : role === "opponent"
-          ? "team.opponent"
-          : "team.unknown";
   const roleTitleKey =
     role === "declarer"
       ? "team.declarerTitle"
@@ -126,6 +118,10 @@ const Seat = (props: {
           ? "team.opponentTitle"
           : "team.unknownTitle";
 
+  // Team membership is conveyed purely by the seat pill's COLOR (amber =
+  // declarer's side, cyan = opponents, dashed slate = unrevealed) plus the 👑
+  // on the declarer and a single "You" tag on the local player's own seat.
+  // No redundant per-seat role text — that kept the felt cluttered.
   return (
     <div className={classNames("sj-seat", SEAT_CLASS[props.seat])}>
       <span
@@ -144,25 +140,16 @@ const Seat = (props: {
             👑
           </span>
         )}
-      </span>
-      <span className="sj-seat-tags">
         {props.isSelf && (
-          <span className="sj-seat-tag sj-seat-tag-you">{t("team.you")}</span>
-        )}
-        <span
-          className={classNames("sj-seat-tag", "sj-seat-tag-role", {
-            [`sj-seat-tag-${role}`]: true,
-          })}
-        >
-          {t(roleLabelKey)}
-          {role === "unknown" && "?"}
-        </span>
-        {props.bot !== undefined && (
-          <span className="sj-seat-tag sj-seat-badge">
-            {t(`ai.difficulty.${props.bot.difficulty}`)}
-          </span>
+          <span className="sj-seat-you-tag">{t("team.you")}</span>
         )}
       </span>
+      {props.bot !== undefined && (
+        <span className="sj-seat-badge">
+          {t(`ai.difficulty.${props.bot.difficulty}`)}
+        </span>
+      )}
+      <span className="sr-only">{t(roleTitleKey)}</span>
       {props.isTurn && <span className="sr-only">{t("rail.yourTurn")}</span>}
     </div>
   );
@@ -206,53 +193,34 @@ const Table = (props: IProps): JSX.Element => {
   const roleOf = (id: number): TeamRole =>
     seatTeamRole(id, props.landlord, props.landlordsTeam, props.gameMode);
 
-  // Which side is the local player on? Drives the "you're on the X side"
-  // emphasis banner. Spectators / unknown don't get a side callout.
-  const selfRole =
-    props.selfId >= 0 && props.players.some((p) => p.id === props.selfId)
-      ? roleOf(props.selfId)
-      : null;
-  const selfSideKey =
-    selfRole === "declarer" || selfRole === "teammate"
-      ? "team.youAreDeclarerSide"
-      : selfRole === "opponent"
-        ? "team.youAreOpponents"
-        : null;
-
   // A neutral allegiance only exists in FindingFriends.
   const hasUnknownSeats = seatAssignments.some(
     ({ player }) => roleOf(player.id) === "unknown",
   );
 
   return (
-    <div className="sj-table" role="group" aria-label="game table">
-      {props.status !== undefined && (
-        <div className="sj-table-status">{props.status}</div>
-      )}
-      {seatAssignments.map(({ player, seat }) => (
-        <Seat
-          key={player.id}
-          player={player}
-          seat={seat}
-          role={roleOf(player.id)}
-          isSelf={player.id === props.selfId}
-          isTurn={player.id === props.next}
-          bot={botById[player.id]}
-        />
-      ))}
-      <div className="sj-center">{props.center}</div>
-      <div className="sj-team-legend" aria-hidden="true">
-        {selfSideKey !== null && (
-          <span
-            className={classNames("sj-team-legend-self", {
-              "is-declarer-side":
-                selfRole === "declarer" || selfRole === "teammate",
-              "is-opponent-side": selfRole === "opponent",
-            })}
-          >
-            {t(selfSideKey)}
-          </span>
+    <div className="sj-table-wrap">
+      <div className="sj-table" role="group" aria-label="game table">
+        {props.status !== undefined && (
+          <div className="sj-table-status">{props.status}</div>
         )}
+        {seatAssignments.map(({ player, seat }) => (
+          <Seat
+            key={player.id}
+            player={player}
+            seat={seat}
+            role={roleOf(player.id)}
+            isSelf={player.id === props.selfId}
+            isTurn={player.id === props.next}
+            bot={botById[player.id]}
+          />
+        ))}
+        <div className="sj-center">{props.center}</div>
+      </div>
+      {/* One small, fixed legend in its own row directly under the felt. It only
+       * decodes the team colors — no per-seat duplication, no "you're on the X
+       * side" banner — so nothing overlaps the seats or the trick. */}
+      <div className="sj-team-legend" aria-hidden="true">
         <span className="sj-team-legend-key">
           <span className="sj-team-swatch sj-team-swatch-declarer" />
           {t("team.legend.declarerSide")}
