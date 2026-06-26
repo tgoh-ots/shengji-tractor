@@ -102,6 +102,14 @@ module.exports = {
           to: "rules.html",
         },
         {
+          from: "static/rules.js",
+          to: "rules.js",
+        },
+        {
+          from: "static/rules-cards.json",
+          to: "rules-cards.json",
+        },
+        {
           from: "static/timer-worker.js",
           to: "timer-worker.js",
         },

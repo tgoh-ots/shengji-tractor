@@ -488,10 +488,15 @@ label {
   }
 }
 
-/* used by rules.html */
+/* used by rules.html — card EXAMPLES are rendered as real SVG faces (see
+ * static/rules.js), not unicode glyphs. Each `.card` wraps an inline <svg>
+ * card face on a white background so suits + ranks read clearly on the dark
+ * rules page. Sizing/coloring/layout for the standalone rules document lives
+ * in the page's own <style> block; these rules only neutralize the legacy
+ * glyph styling that used to live here. */
 .rules .card {
-  font-size: 8em;
-  margin-right: -0.4em;
+  font-size: inherit;
+  margin-right: 0;
 }
 .rules .card:last-child {
   margin-right: 0;
