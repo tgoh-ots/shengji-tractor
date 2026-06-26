@@ -20,7 +20,10 @@ use crate::{
 };
 
 #[allow(clippy::too_many_arguments)]
-pub async fn entrypoint<S: Storage<VersionedGame, E>, E: std::fmt::Debug + Send>(
+pub async fn entrypoint<
+    S: Storage<VersionedGame, E> + 'static,
+    E: std::fmt::Debug + Send + 'static,
+>(
     tx: mpsc::UnboundedSender<Vec<u8>>,
     rx: mpsc::UnboundedReceiver<Vec<u8>>,
     ws_id: usize,
@@ -72,7 +75,10 @@ async fn send_to_user_with_compression(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_user_connected<S: Storage<VersionedGame, E>, E: std::fmt::Debug + Send>(
+async fn handle_user_connected<
+    S: Storage<VersionedGame, E> + 'static,
+    E: std::fmt::Debug + Send + 'static,
+>(
     tx: mpsc::UnboundedSender<Vec<u8>>,
     mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
     ws_id: usize,
@@ -334,7 +340,10 @@ async fn register_user<S: Storage<VersionedGame, E>, E: std::fmt::Debug + Send>(
     }
 }
 
-async fn run_game_for_player<S: Storage<VersionedGame, E>, E: Send + std::fmt::Debug>(
+async fn run_game_for_player<
+    S: Storage<VersionedGame, E> + 'static,
+    E: Send + std::fmt::Debug + 'static,
+>(
     logger: Logger,
     ws_id: usize,
     player_id: PlayerID,
@@ -385,7 +394,7 @@ async fn run_game_for_player<S: Storage<VersionedGame, E>, E: Send + std::fmt::D
     debug!(logger, "Exiting main game loop");
 }
 
-async fn handle_user_action<S: Storage<VersionedGame, E>, E: Send>(
+async fn handle_user_action<S: Storage<VersionedGame, E> + 'static, E: Send + 'static>(
     logger: Logger,
     ws_id: usize,
     caller: PlayerID,
@@ -504,17 +513,31 @@ async fn handle_user_action<S: Storage<VersionedGame, E>, E: Send>(
                 },
                 other => other,
             };
+            // The bot driver may STOP early because a bot just won a now-complete
+            // trick: in production we DEFER clearing that trick so the human can
+            // see the full 4-card trick before the bot leads the next one. The
+            // closure flips this flag when that happens; we read it after the lock
+            // is released (and the completed-trick state has been published).
+            let deferred = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let deferred_in_op = deferred.clone();
+            let op_logger = logger.clone();
             execute_operation(
                 ws_id,
                 room_name,
-                backend_storage,
+                backend_storage.clone(),
                 move |game, _, _| {
                     // Apply the human's action, then let any bot players that now
                     // need to act take their turns. Both happen within this single
                     // locked operation so the moves are applied atomically and the
-                    // combined set of broadcasts is published together.
-                    let mut broadcasts = game.interact(action, caller, &logger)?;
-                    broadcasts.extend(shengji_core::bot::advance_bots(game, &logger)?);
+                    // combined set of broadcasts is published together. We pass
+                    // `defer_bot_trick_finish = true` so a bot finishing a trick it
+                    // won pauses (handled below) instead of clearing it instantly.
+                    let mut broadcasts = game.interact(action, caller, &op_logger)?;
+                    let result = shengji_core::bot::advance_bots(game, &op_logger, true)?;
+                    if result.deferred_bot_trick_finish {
+                        deferred_in_op.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    broadcasts.extend(result.messages);
                     Ok(broadcasts
                         .into_iter()
                         .map(|(data, message)| GameMessage::Broadcast { data, message })
@@ -523,9 +546,102 @@ async fn handle_user_action<S: Storage<VersionedGame, E>, E: Send>(
                 "handle user action",
             )
             .await;
+
+            // If the bot driver paused on a bot-won completed trick, the full
+            // trick has now been published (lock released). Spawn a detached task
+            // that waits a short, human-visible beat WITHOUT holding the lock and
+            // then finishes the trick (and continues the bots, pausing again for
+            // any back-to-back bot-won trick).
+            if deferred.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::task::spawn(finish_deferred_bot_tricks_after_delay(
+                    logger,
+                    ws_id,
+                    room_name.to_string(),
+                    backend_storage,
+                ));
+            }
         }
     }
     Ok(())
+}
+
+/// Default human-visible pause (milliseconds) before a bot clears a trick it
+/// won, so the human can see the completed 4-card trick. Overridable at runtime
+/// via the `SHENGJI_BOT_TRICK_PAUSE_MS` environment variable.
+const DEFAULT_BOT_TRICK_PAUSE_MS: u64 = 2500;
+
+/// Read the configured bot-trick pause, defaulting to
+/// [`DEFAULT_BOT_TRICK_PAUSE_MS`] if the env var is unset or unparseable.
+fn bot_trick_pause() -> std::time::Duration {
+    let ms = std::env::var("SHENGJI_BOT_TRICK_PAUSE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_BOT_TRICK_PAUSE_MS);
+    std::time::Duration::from_millis(ms)
+}
+
+/// Detached task that finishes a deferred bot-won trick after a short delay.
+///
+/// This is the second half of the production trick-finish deferral (see
+/// `shengji_core::bot::advance_bots` with `defer_bot_trick_finish = true`). It is
+/// spawned ONLY after the completed-trick state has already been published and
+/// the game lock released, so the human sees the full 4-card trick during the
+/// pause. The sleep happens WITHOUT holding the lock.
+///
+/// It loops because consecutive bot-won tricks each defer: after a trick is
+/// finished, `finish_deferred_bot_trick` keeps driving the bots and may stop
+/// again on the NEXT bot-won trick, in which case we sleep and repeat. The loop
+/// ends as soon as a resume does NOT defer (human's turn, game over, etc.).
+///
+/// Safety: each resume re-derives, under the lock, what the bot driver wants to
+/// do RIGHT NOW. If a human (or any other event) already finished the trick, or
+/// it is no longer a bot's turn, `finish_deferred_bot_trick` applies no stale
+/// `EndTrick` — so there is no double-finish even if the world changed during the
+/// delay.
+async fn finish_deferred_bot_tricks_after_delay<
+    S: Storage<VersionedGame, E> + 'static,
+    E: Send + 'static,
+>(
+    logger: Logger,
+    ws_id: usize,
+    room_name: String,
+    backend_storage: S,
+) {
+    // A generous bound on chained bot-won tricks within a single hand, so a
+    // wedged state can never spin this task forever.
+    for _ in 0..64 {
+        tokio::time::sleep(bot_trick_pause()).await;
+
+        let deferred_again = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let deferred_in_op = deferred_again.clone();
+        let op_logger = logger.clone();
+        execute_operation(
+            ws_id,
+            &room_name,
+            backend_storage.clone(),
+            move |game, _, _| {
+                // Re-check + apply under the lock. `finish_deferred_bot_trick` is
+                // idempotent: it only finishes the trick if a bot still owns a
+                // now-complete trick, then continues the bots with deferral on.
+                let result = shengji_core::bot::finish_deferred_bot_trick(game, &op_logger)?;
+                if result.deferred_bot_trick_finish {
+                    deferred_in_op.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok(result
+                    .messages
+                    .into_iter()
+                    .map(|(data, message)| GameMessage::Broadcast { data, message })
+                    .collect())
+            },
+            "finish deferred bot trick",
+        )
+        .await;
+
+        // If the resume did not pause on another bot-won trick, we're done.
+        if !deferred_again.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+    }
 }
 
 async fn user_disconnected<S: Storage<VersionedGame, E>, E: Send>(

@@ -76,6 +76,26 @@ impl BotDifficulty {
 /// [`advance_bots`]; this prevents an unexpected state from spinning forever.
 const MAX_BOT_ITERATIONS: usize = 5000;
 
+/// The outcome of an [`advance_bots`] run, bundling the broadcasts produced with
+/// whether the loop stopped early because a bot is about to finish a trick it
+/// won and the caller asked to DEFER that finish (`defer_bot_trick_finish`).
+///
+/// When `deferred_bot_trick_finish` is `true`, the just-completed (full,
+/// 4-card) trick has intentionally NOT been cleared: the loop returned without
+/// applying the winning bot's [`Action::EndTrick`] so the completed-trick state
+/// can be published and seen by humans. The caller is responsible for waiting a
+/// short, human-visible beat and then calling [`finish_deferred_bot_trick`] to
+/// clear it and continue. When `false`, the loop ran to a normal stopping point
+/// (human's turn, game over, or no progress) exactly as before.
+#[derive(Debug, Default)]
+pub struct AdvanceResult {
+    /// Broadcast messages produced by the bot moves applied during this run.
+    pub messages: Vec<(BroadcastMessage, String)>,
+    /// `true` iff the run stopped early specifically because a bot won a
+    /// now-complete trick and the caller requested deferral of the finish.
+    pub deferred_bot_trick_finish: bool,
+}
+
 /// Drive any bot players that need to act, applying their moves through the same
 /// validated [`InteractiveGame::interact`] API a human uses.
 ///
@@ -91,10 +111,28 @@ const MAX_BOT_ITERATIONS: usize = 5000;
 /// bot, and stops as soon as the next actor is a human or no further progress is
 /// possible. It deliberately does NOT auto-start a new game; that remains a human
 /// lobby choice.
+///
+/// # `defer_bot_trick_finish`
+///
+/// When `false`, the loop is fully synchronous and unchanged: a bot that wins a
+/// completed trick has its [`Action::EndTrick`] applied immediately, so the
+/// trick is cleared and the next one begins within this single call. ALL tests,
+/// the self-play/ladder/dealing harnesses, and the e2e driver use `false` so a
+/// whole hand can be driven without any timing.
+///
+/// When `true` (the production handler), the loop instead STOPS the moment it
+/// would apply a winning bot's `EndTrick` for a now-complete trick: it leaves
+/// the trick un-cleared and returns [`AdvanceResult::deferred_bot_trick_finish`]
+/// `= true`. The caller publishes the completed-trick state (so a human can see
+/// the full 4-card trick), waits a short beat WITHOUT holding the game lock, and
+/// then resumes via [`finish_deferred_bot_trick`]. A HUMAN winning a trick is
+/// unaffected in both modes — `next_bot_action` returns `None` there and we wait
+/// for the human's "Finish trick" button exactly as before.
 pub fn advance_bots(
     game: &mut InteractiveGame,
     logger: &Logger,
-) -> Result<Vec<(BroadcastMessage, String)>, Error> {
+    defer_bot_trick_finish: bool,
+) -> Result<AdvanceResult, Error> {
     let mut out = vec![];
 
     for _ in 0..MAX_BOT_ITERATIONS {
@@ -103,10 +141,29 @@ pub fn advance_bots(
         // acting bot.
         let next = match next_bot_action(game)? {
             Some(next) => next,
-            None => return Ok(out),
+            None => {
+                return Ok(AdvanceResult {
+                    messages: out,
+                    deferred_bot_trick_finish: false,
+                })
+            }
         };
 
         let (bot_id, action) = next;
+
+        // Deferral point: if the next bot action is finishing a trick the bot
+        // won, and the caller opted into deferral, stop WITHOUT applying it so
+        // the completed trick stays on the table for a human-visible beat. The
+        // caller resumes via `finish_deferred_bot_trick` after a short delay.
+        // (`next_bot_action` only ever yields `Action::EndTrick` for a complete,
+        // bot-won trick — see its `GameState::Play` arm.)
+        if defer_bot_trick_finish && matches!(action, Action::EndTrick) {
+            return Ok(AdvanceResult {
+                messages: out,
+                deferred_bot_trick_finish: true,
+            });
+        }
+
         let msgs = game.interact(action, bot_id, logger)?;
         out.extend(msgs);
     }
@@ -115,7 +172,50 @@ pub fn advance_bots(
         logger,
         "advance_bots hit the iteration cap; aborting to avoid an infinite loop"
     );
-    Ok(out)
+    Ok(AdvanceResult {
+        messages: out,
+        deferred_bot_trick_finish: false,
+    })
+}
+
+/// Resume after a deferred bot-won trick finish (see `advance_bots` with
+/// `defer_bot_trick_finish = true`). This is the lock-held, idempotent,
+/// re-checking second half of the deferral: the caller invokes it after its
+/// (lock-free) delay has elapsed.
+///
+/// It is deliberately SAFE to call even if the world changed during the delay
+/// (a human pressed "Finish trick", a takeback happened, a reset occurred, the
+/// game ended, ...). We re-derive what the bot driver wants to do RIGHT NOW: if
+/// the very next action is still a bot finishing a trick it won, we apply that
+/// single `EndTrick` and then continue driving the bots (again with deferral, so
+/// a back-to-back bot-won trick pauses again). If the next action is anything
+/// else (the trick was already finished, it is a human's turn, the game ended,
+/// etc.) we simply fall through to a normal deferred `advance_bots`, which
+/// applies no stale `EndTrick`. Either way there is no double-finish and no
+/// reliance on the pre-delay snapshot.
+pub fn finish_deferred_bot_trick(
+    game: &mut InteractiveGame,
+    logger: &Logger,
+) -> Result<AdvanceResult, Error> {
+    // `advance_bots(defer=true)` already does exactly the right thing here: if a
+    // bot still owns a finished trick it will stop again at the deferral point
+    // (re-signalling), and otherwise it makes whatever progress is valid. But we
+    // must actually APPLY this trick's finish to make forward progress, so we
+    // explicitly perform the one pending bot `EndTrick` (if it is still pending
+    // and still bot-won) and only then continue deferring.
+    if let Some((bot_id, action)) = next_bot_action(game)? {
+        if matches!(action, Action::EndTrick) {
+            let msgs = game.interact(action, bot_id, logger)?;
+            let mut result = advance_bots(game, logger, true)?;
+            let mut combined = msgs;
+            combined.extend(result.messages);
+            result.messages = combined;
+            return Ok(result);
+        }
+    }
+    // The deferred finish is no longer applicable (world changed during the
+    // delay). Drive the bots normally; no stale EndTrick is applied.
+    advance_bots(game, logger, true)
 }
 
 /// Compute the next `(bot_id, action)` pair to apply, or `None` if no bot needs

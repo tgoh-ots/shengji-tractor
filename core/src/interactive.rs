@@ -645,8 +645,9 @@ mod move_validation_tests {
         all_ids.extend(bot_ids.iter().copied());
 
         for _ in 0..5000 {
-            // Let the bots make whatever progress they can.
-            advance_bots(&mut game, logger).unwrap();
+            // Let the bots make whatever progress they can. Tests drive a whole
+            // hand synchronously, so deferral is OFF (tricks auto-finish).
+            advance_bots(&mut game, logger, false).unwrap();
 
             match &game.dump_state().unwrap() {
                 GameState::Play(p) if !p.game_finished() && !p.hands().is_empty() => {
