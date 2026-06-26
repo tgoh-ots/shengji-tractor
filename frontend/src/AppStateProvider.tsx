@@ -16,6 +16,7 @@ export interface AppState {
   gameStatistics: GameStatistics;
   connected: boolean;
   everConnected: boolean;
+  reconnecting: boolean;
   roomName: string;
   name: string;
   gameState: GameState | null;
@@ -31,6 +32,7 @@ const appState: State<AppState> = combineState({
   gameStatistics,
   connected: noPersistence(() => false),
   everConnected: noPersistence(() => false),
+  reconnecting: noPersistence(() => false),
   roomName: noPersistence(() => window.location.hash.slice(1, 17)),
   name: stringLocalStorageState("name"),
   changeLogLastViewed: numberLocalStorageState("change_log_last_viewed"),

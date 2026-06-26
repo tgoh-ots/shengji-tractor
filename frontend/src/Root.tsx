@@ -13,6 +13,7 @@ import DebugInfo from "./DebugInfo";
 import TitleHandler from "./TitleHandler";
 import ResetButton from "./ResetButton";
 import Toolbar from "./Toolbar";
+import { WebsocketContext } from "./WebsocketProvider";
 import { useTranslation } from "./i18n";
 
 import type { JSX } from "react";
@@ -45,6 +46,7 @@ const Brand = ({ onGoHome }: { onGoHome: () => void }): JSX.Element => {
 const Root = (): JSX.Element => {
   const { state, updateState } = React.useContext(AppStateContext);
   const timerContext = React.useContext(TimerContext);
+  const { reconnectNow } = React.useContext(WebsocketContext);
   const { t } = useTranslation();
 
   // Leave the current room and return to the JoinRoom landing screen.
@@ -189,7 +191,16 @@ const Root = (): JSX.Element => {
       <div className="mx-auto max-w-2xl px-4 py-16">
         <Toolbar />
         <div className="sj-panel p-6 text-[var(--text-primary)]">
-          <p>{t("app.disconnected")}</p>
+          <p>
+            {state.reconnecting ? t("app.reconnecting") : t("app.disconnected")}
+          </p>
+          <button
+            type="button"
+            className="sj-btn sj-btn-primary mt-4"
+            onClick={reconnectNow}
+          >
+            {t("app.reconnectNow")}
+          </button>
         </div>
       </div>
     );

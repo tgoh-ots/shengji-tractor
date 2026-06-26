@@ -23,6 +23,8 @@ const en: Dict = {
   "app.welcome":
     "Welcome! This website helps you play 升级 / Tractor / 找朋友 / Finding Friends with other people online.",
   "app.connecting": "Connecting to the server...",
+  "app.reconnecting": "Connection lost — reconnecting…",
+  "app.reconnectNow": "Reconnect now",
   "app.disconnected":
     "It looks like you got disconnected from the server, please refresh! If the game is still ongoing, you should be able to re-join with the same name and pick up where you left off.",
   "app.refreshError":
@@ -181,6 +183,8 @@ const zh: Dict = {
   "app.welcome":
     "欢迎！本网站可以让你和朋友们在线游玩 升级 / 拖拉机 / 找朋友。",
   "app.connecting": "正在连接服务器…",
+  "app.reconnecting": "连接已断开，正在重新连接…",
+  "app.reconnectNow": "立即重连",
   "app.disconnected":
     "你似乎与服务器断开了连接，请刷新页面！如果游戏仍在进行，你可以用相同的名字重新加入并继续。",
   "app.refreshError":
