@@ -2028,6 +2028,40 @@
         },
         {
           "type": "object",
+          "required": [
+            "awarded_to_landlord_team",
+            "kitty_points",
+            "multiplier",
+            "type",
+            "winner"
+          ],
+          "properties": {
+            "awarded_to_landlord_team": {
+              "type": "boolean"
+            },
+            "kitty_points": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "multiplier": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "enum": ["KittyScored"]
+            },
+            "winner": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0.0
+            }
+          }
+        },
+        {
+          "type": "object",
           "required": ["cards", "type"],
           "properties": {
             "cards": {

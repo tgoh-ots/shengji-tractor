@@ -47,6 +47,12 @@ pub enum MessageVariant {
         points: usize,
         multiplier: usize,
     },
+    KittyScored {
+        kitty_points: usize,
+        multiplier: usize,
+        awarded_to_landlord_team: bool,
+        winner: PlayerID,
+    },
     EndOfGameKittyReveal {
         cards: Vec<Card>,
     },
@@ -240,6 +246,10 @@ impl MessageVariant {
                 format!("{} will start the next game", player_name(*landlord)?),
             PointsInKitty { points, multiplier } =>
                 format!("{points} points were buried and are attached to the last trick, with a multiplier of {multiplier}"),
+            KittyScored { kitty_points, multiplier, awarded_to_landlord_team: false, winner } =>
+                format!("The kitty was worth {} points ({} × {}), awarded to the attacking team ({} won the last trick)", kitty_points * multiplier, kitty_points, multiplier, player_name(*winner)?),
+            KittyScored { kitty_points, awarded_to_landlord_team: true, winner, .. } =>
+                format!("The defending team kept the kitty ({} won the last trick); no {}-point bonus awarded to the attacking team", player_name(*winner)?, kitty_points),
             JoinedGame { player } =>
                 format!("{} has joined the game", player_name(*player)?),
             JoinedGameAgain { player, game_shadowing_policy: GameShadowingPolicy::SingleSessionOnly } =>
@@ -417,5 +427,52 @@ impl MessageVariant {
             CompoundFormatsSet { compound_formats: CompoundFormats { rainbows: None } } =>
                 format!("{} disabled rainbow tricks", n?),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use shengji_mechanics::types::PlayerID;
+
+    use super::MessageVariant;
+
+    fn render(variant: &MessageVariant) -> String {
+        variant
+            .to_string(PlayerID(0), |id| {
+                if id == PlayerID(0) {
+                    Ok("alice")
+                } else {
+                    Ok("bob")
+                }
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn test_kitty_scored_attacking_team_text() {
+        let text = render(&MessageVariant::KittyScored {
+            kitty_points: 8,
+            multiplier: 2,
+            awarded_to_landlord_team: false,
+            winner: PlayerID(1),
+        });
+        assert_eq!(
+            text,
+            "The kitty was worth 16 points (8 × 2), awarded to the attacking team (bob won the last trick)"
+        );
+    }
+
+    #[test]
+    fn test_kitty_scored_defending_team_text() {
+        let text = render(&MessageVariant::KittyScored {
+            kitty_points: 8,
+            multiplier: 2,
+            awarded_to_landlord_team: true,
+            winner: PlayerID(1),
+        });
+        assert_eq!(
+            text,
+            "The defending team kept the kitty (bob won the last trick); no 8-point bonus awarded to the attacking team"
+        );
     }
 }

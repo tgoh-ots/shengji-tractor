@@ -406,6 +406,14 @@ export type MessageVariant =
       [k: string]: unknown;
     }
   | {
+      awarded_to_landlord_team: boolean;
+      kitty_points: number;
+      multiplier: number;
+      type: "KittyScored";
+      winner: number;
+      [k: string]: unknown;
+    }
+  | {
       cards: Card[];
       type: "EndOfGameKittyReveal";
       [k: string]: unknown;

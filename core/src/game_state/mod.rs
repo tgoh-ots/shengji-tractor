@@ -1391,7 +1391,24 @@ mod tests {
         play.play_cards(p2, &[D_K]).unwrap();
         play.play_cards(p3, &[H_5]).unwrap();
         play.play_cards(p4, &[C_Q]).unwrap();
-        play.finish_trick().unwrap();
+        // This is the last trick of the hand, so the kitty is scored here. The
+        // kitty (C_7, S_9, D_6, D_J, C_Q, C_10) is worth 10 points, and is won
+        // by p5 -- a member of the attacking (non-landlord) team -- with a
+        // multiplier of 2.
+        let last_msgs = play.finish_trick().unwrap();
+        assert!(
+            last_msgs.iter().any(|m| matches!(
+                m,
+                MessageVariant::KittyScored {
+                    kitty_points: 10,
+                    multiplier: 2,
+                    awarded_to_landlord_team: false,
+                    winner,
+                } if *winner == p5
+            )),
+            "expected the kitty to be scored for the attacking team, got {:?}",
+            last_msgs
+        );
 
         if let Ok((phase, _, _msgs)) = play.finish_game() {
             assert_eq!(phase.propagated().landlord, Some(p3));
@@ -1581,6 +1598,110 @@ mod tests {
                 Rank::Number(Number::Two)
             ],
             "Check that propagated players have the right new levels"
+        );
+    }
+
+    #[test]
+    fn test_kitty_scored_defending_team_keeps_kitty() {
+        use cards::*;
+
+        // A minimal Tractor game where the landlord (defending) team wins the
+        // last trick, so the kitty bonus is NOT awarded to the attacking team.
+        let mut init = InitializePhase::new();
+        let p1 = init.add_player("p1".into()).unwrap().0;
+        let p2 = init.add_player("p2".into()).unwrap().0;
+        let p3 = init.add_player("p3".into()).unwrap().0;
+        let p4 = init.add_player("p4".into()).unwrap().0;
+        let p5 = init.add_player("p5".into()).unwrap().0;
+        let p6 = init.add_player("p6".into()).unwrap().0;
+        let p7 = init.add_player("p7".into()).unwrap().0;
+        let p8 = init.add_player("p8".into()).unwrap().0;
+
+        init.set_landlord(Some(p1)).unwrap();
+        init.set_rank(p1, Rank::Number(Number::Seven)).unwrap();
+
+        let mut draw = init.start(PlayerID(0)).unwrap();
+        let mut deck = vec![];
+
+        // The landlord holds two spade trumps and leads them, winning both
+        // tricks. Everyone else holds off-suit non-trump, non-point cards.
+        let p1_hand = [S_7, S_A];
+        let p2_hand = [D_4, D_5];
+        let p3_hand = [C_6, C_8];
+        let p4_hand = [C_9, C_10];
+        let p5_hand = [H_8, H_Q];
+        let p6_hand = [H_4, H_3];
+        let p7_hand = [H_2, H_6];
+        let p8_hand = [H_9, H_J];
+
+        for i in 0..2 {
+            deck.push(p1_hand[i]);
+            deck.push(p2_hand[i]);
+            deck.push(p3_hand[i]);
+            deck.push(p4_hand[i]);
+            deck.push(p5_hand[i]);
+            deck.push(p6_hand[i]);
+            deck.push(p7_hand[i]);
+            deck.push(p8_hand[i]);
+        }
+        deck.reverse();
+        *draw.deck_mut() = deck;
+        *draw.position_mut() = 0;
+
+        // The buried kitty is worth 15 points (S_5 = 5, C_K = 10); the rest of
+        // the kitty cards carry no points.
+        *draw.kitty_mut() = vec![S_5, C_K, C_2, C_3, C_4, D_2, D_3, D_6];
+
+        for _ in 0..2 {
+            draw.draw_card(p1).unwrap();
+            draw.draw_card(p2).unwrap();
+            draw.draw_card(p3).unwrap();
+            draw.draw_card(p4).unwrap();
+            draw.draw_card(p5).unwrap();
+            draw.draw_card(p6).unwrap();
+            draw.draw_card(p7).unwrap();
+            draw.draw_card(p8).unwrap();
+        }
+
+        assert!(draw.bid(p1, S_7, 1));
+        let exchange = draw.advance(p1).unwrap();
+        let mut play = exchange.advance(p1).unwrap();
+
+        // First trick: landlord leads trump S_7 and wins.
+        play.play_cards(p1, &p1_hand[..1]).unwrap();
+        play.play_cards(p2, &p2_hand[..1]).unwrap();
+        play.play_cards(p3, &p3_hand[..1]).unwrap();
+        play.play_cards(p4, &p4_hand[..1]).unwrap();
+        play.play_cards(p5, &p5_hand[..1]).unwrap();
+        play.play_cards(p6, &p6_hand[..1]).unwrap();
+        play.play_cards(p7, &p7_hand[..1]).unwrap();
+        play.play_cards(p8, &p8_hand[..1]).unwrap();
+        play.finish_trick().unwrap();
+
+        // Last trick: landlord leads trump S_A and wins again, so the defending
+        // team keeps the kitty.
+        play.play_cards(p1, &p1_hand[1..2]).unwrap();
+        play.play_cards(p2, &p2_hand[1..2]).unwrap();
+        play.play_cards(p3, &p3_hand[1..2]).unwrap();
+        play.play_cards(p4, &p4_hand[1..2]).unwrap();
+        play.play_cards(p5, &p5_hand[1..2]).unwrap();
+        play.play_cards(p6, &p6_hand[1..2]).unwrap();
+        play.play_cards(p7, &p7_hand[1..2]).unwrap();
+        play.play_cards(p8, &p8_hand[1..2]).unwrap();
+
+        let msgs = play.finish_trick().unwrap();
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                MessageVariant::KittyScored {
+                    kitty_points: 15,
+                    awarded_to_landlord_team: true,
+                    winner,
+                    ..
+                } if *winner == p1
+            )),
+            "expected the defending team to keep the kitty, got {:?}",
+            msgs
         );
     }
 }

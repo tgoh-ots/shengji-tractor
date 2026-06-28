@@ -357,12 +357,22 @@ impl PlayPhase {
             for _ in 0..kitty_multipler {
                 new_points.extend(kitty_points.iter().copied());
             }
+            let raw_kitty_points = kitty_points.iter().flat_map(|c| c.points()).sum::<usize>();
             if !kitty_points.is_empty() && kitty_multipler > 0 {
                 msgs.push(MessageVariant::PointsInKitty {
-                    points: kitty_points.iter().flat_map(|c| c.points()).sum::<usize>(),
+                    points: raw_kitty_points,
                     multiplier: kitty_multipler,
                 });
             }
+            // The kitty bonus is attached to the winner of the last trick, but
+            // only counts toward the attacking team's total when the attacking
+            // (non-landlord) team wins it. Report who the kitty went to.
+            msgs.push(MessageVariant::KittyScored {
+                kitty_points: raw_kitty_points,
+                multiplier: kitty_multipler,
+                awarded_to_landlord_team: self.landlords_team.contains(&winner),
+                winner,
+            });
         }
         let winner_idx = bail_unwrap!(self.propagated.players.iter().position(|p| p.id == winner));
         if !new_points.is_empty() {
