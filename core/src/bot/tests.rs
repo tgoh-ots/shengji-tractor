@@ -3,8 +3,9 @@ use slog::{o, Discard, Logger};
 use shengji_mechanics::types::{Card, PlayerID};
 
 use crate::bot::{
-    advance_bots, finish_deferred_bot_trick, next_bot_action, observed_state, policy,
-    BotDifficulty, BotPause,
+    advance_bots, finish_deferred_bot_trick, force_finalize_parked_bot_bid,
+    is_parked_awaiting_human_counter_bid, next_bot_action, observed_state, policy, BotDifficulty,
+    BotPause,
 };
 use crate::game_state::initialize_phase::InitializePhase;
 use crate::game_state::GameState;
@@ -150,7 +151,7 @@ fn test_bot_view_hides_other_seats_cards() {
                 break;
             }
         }
-        match next_bot_action(&mut game).unwrap() {
+        match next_bot_action(&mut game, false).unwrap() {
             Some((bot_id, action)) => {
                 game.interact(action, bot_id, &logger).unwrap();
             }
@@ -516,7 +517,7 @@ fn test_determinizer_respects_counts_and_seen_cards() {
                 break;
             }
         }
-        match next_bot_action(&mut game).unwrap() {
+        match next_bot_action(&mut game, false).unwrap() {
             Some((id, action)) => {
                 game.interact(action, id, &logger).unwrap();
             }
@@ -574,7 +575,7 @@ fn step_to_mid_play(game: &mut InteractiveGame, logger: &Logger) {
                 break;
             }
         }
-        match next_bot_action(game).unwrap() {
+        match next_bot_action(game, false).unwrap() {
             Some((bot_id, action)) => {
                 game.interact(action, bot_id, logger).unwrap();
             }
@@ -1142,7 +1143,7 @@ fn test_deal_one_human_three_bots_normal() {
                 game.interact(Action::DrawCard, host, &logger).unwrap();
             } else {
                 // Exactly one bot action (the draw for this seat).
-                let (bot_id, action) = next_bot_action(&mut game)
+                let (bot_id, action) = next_bot_action(&mut game, false)
                     .unwrap()
                     .expect("a bot must be able to draw on its turn");
                 assert_eq!(
@@ -1373,7 +1374,7 @@ fn test_deal_bot_is_landlord_buries_legal_kitty() {
                         if p.next_player().map(|n| n == host).unwrap_or(false) {
                             // Human's turn to draw.
                             game.interact(Action::DrawCard, host, &logger).unwrap();
-                        } else if let Some((bot_id, action)) = next_bot_action(&mut game).unwrap() {
+                        } else if let Some((bot_id, action)) = next_bot_action(&mut game, false).unwrap() {
                             game.interact(action, bot_id, &logger).unwrap();
                         } else {
                             panic!("trial {}: draw stalled (no actor)", trial);
@@ -1383,7 +1384,7 @@ fn test_deal_bot_is_landlord_buries_legal_kitty() {
                         // is a bot, the bot driver picks up; if it's the human, the
                         // human picks up (it became the winning bidder only if it
                         // bid, which it didn't — so this is a bot).
-                        if let Some((bot_id, action)) = next_bot_action(&mut game).unwrap() {
+                        if let Some((bot_id, action)) = next_bot_action(&mut game, false).unwrap() {
                             game.interact(action, bot_id, &logger).unwrap();
                         } else if p.next_player().map(|n| n == host).unwrap_or(false) {
                             game.interact(Action::PickUpKitty, host, &logger).unwrap();
@@ -1395,7 +1396,7 @@ fn test_deal_bot_is_landlord_buries_legal_kitty() {
                         // driver bid / reveal; if it can't and the human is the
                         // responsible seat, the human reveals the bottom (legal only
                         // when a landlord exists) to make progress.
-                        if let Some((bot_id, action)) = next_bot_action(&mut game).unwrap() {
+                        if let Some((bot_id, action)) = next_bot_action(&mut game, false).unwrap() {
                             game.interact(action, bot_id, &logger).unwrap();
                         } else if p.next_player().map(|n| n == host).unwrap_or(false) {
                             // Bots cannot bid and won't reveal; the human must act to
@@ -1434,7 +1435,7 @@ fn test_deal_bot_is_landlord_buries_legal_kitty() {
                     }
                     if let Some(action) = next_action_for_human(&state, host) {
                         game.interact(action, host, &logger).unwrap();
-                    } else if let Some((bot_id, action)) = next_bot_action(&mut game).unwrap() {
+                    } else if let Some((bot_id, action)) = next_bot_action(&mut game, false).unwrap() {
                         game.interact(action, bot_id, &logger).unwrap();
                     } else {
                         panic!("trial {}: exchange stalled with no actor", trial);
@@ -2544,4 +2545,343 @@ fn test_human_not_robbed_of_bid_by_fallback() {
         matches!(game.dump_state().unwrap(), GameState::Draw(p) if p.bid_decided()),
         "after the human bids, a bid must be decided"
     );
+}
+
+// ===========================================================================
+// Draw-phase strategic-bid robbery regression: a bot's STANDING bid must NOT be
+// finalized into the landlord (PickUpKitty -> Exchange -> Play) while a seated
+// human could still legally OUTBID it.
+//
+// Production bug (1 human + 3 bots), distinct from the fallback-bid case above:
+// a bot made a *genuine strategic* bid during the draw (e.g. "an Easy Bot bid
+// 2♣"), so the bid was DECIDED. The bot driver's `bid_decided` branch then
+// immediately drove `PickUpKitty` for that bot the instant drawing finished,
+// locking it in as landlord and racing Exchange -> Play in one synchronous
+// burst — so the human "never had a chance to counter-bid before the game
+// started", even though bidding was still legally open (deck drawn, bottom
+// unrevealed, kitty not picked up; ANY seat may outbid a standing bid).
+//
+// The fix: in the `bid_decided` branch, when a BOT holds the standing bid, the
+// driver PARKS (returns None) while any human seat still has a legal outbid,
+// leaving the bidding window open. All-bot tables (no human seat) still
+// auto-pick-up, so there is no deadlock.
+// ===========================================================================
+#[test]
+fn test_human_not_robbed_of_counter_bid_by_strategic_bot_bid() {
+    use shengji_mechanics::types::cards::{
+        C_3, C_4, S_2, S_3, S_4, S_5, S_6, S_7, S_8, S_9,
+    };
+
+    let logger = null_logger();
+
+    // Build a real 1-human + 3-bot DrawPhase (correct player/bot registry).
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".to_string()).unwrap();
+    let mut bot_ids = vec![];
+    for _ in 0..3 {
+        let msgs = game
+            .interact(
+                Action::AddAIPlayer {
+                    difficulty: BotDifficulty::Easy,
+                },
+                host,
+                &logger,
+            )
+            .unwrap();
+        bot_ids.push(added_bot_id(&msgs));
+    }
+    game.interact(Action::StartGame, host, &logger).unwrap();
+    let bidding_bot = bot_ids[0];
+
+    // Patch the DrawPhase: deck drained (drawing done), NO landlord, NO bid yet.
+    // - bidding_bot: a PAIR of rank-2 spades plus a long run of spades. With
+    //   spades as trump (level 2) this is a genuinely STRONG trump holding, so
+    //   `choose_bid` returns a strategic S_2 x2 bid (bid_strength >= 10).
+    // - host (the human): a PAIR of big jokers, which can legally OUTBID the
+    //   bot's S_2 x2 (a joker pair beats a suited pair at equal count under the
+    //   default JokerOrGreaterLength policy) -- so the human CAN counter-bid.
+    // - the other two bots: un-biddable junk.
+    let state = game.dump_state().unwrap();
+    let mut json = serde_json::to_value(&state).unwrap();
+    {
+        let draw = json.get_mut("Draw").expect("must be in Draw phase");
+        draw["deck"] = serde_json::json!([]);
+        draw["bids"] = serde_json::json!([]);
+        draw["autobid"] = serde_json::Value::Null;
+        draw["propagated"]["landlord"] = serde_json::Value::Null;
+
+        let s2 = S_2.as_char().to_string();
+        let s3 = S_3.as_char().to_string();
+        let s4 = S_4.as_char().to_string();
+        let s5 = S_5.as_char().to_string();
+        let s6 = S_6.as_char().to_string();
+        let s7 = S_7.as_char().to_string();
+        let s8 = S_8.as_char().to_string();
+        let s9 = S_9.as_char().to_string();
+        let bj = Card::BigJoker.as_char().to_string();
+        let c3 = C_3.as_char().to_string();
+        let c4 = C_4.as_char().to_string();
+
+        let mut hands_map = serde_json::Map::new();
+        for pl in draw["propagated"]["players"].as_array().unwrap() {
+            let id = pl["id"].as_u64().unwrap() as usize;
+            let hand = if id == bidding_bot.0 {
+                // Strong spade hand: pair of S_2 + a long spade run -> a strong
+                // trump holding that clears the strategic bid threshold.
+                serde_json::json!({
+                    s2.clone(): 2, s3.clone(): 1, s4.clone(): 1, s5.clone(): 1,
+                    s6.clone(): 1, s7.clone(): 1, s8.clone(): 1, s9.clone(): 1,
+                })
+            } else if id == host.0 {
+                // A pair of big jokers (a legal outbid of the bot's S_2 x2) + junk.
+                serde_json::json!({ bj.clone(): 2, c3.clone(): 1, c4.clone(): 1 })
+            } else {
+                // Un-biddable junk.
+                serde_json::json!({ c3.clone(): 2, c4.clone(): 2 })
+            };
+            hands_map.insert(id.to_string(), hand);
+        }
+        draw["hands"]["hands"] = serde_json::Value::Object(hands_map);
+    }
+    let patched: GameState = serde_json::from_value(json).expect("patched Draw must deserialize");
+    let mut game = InteractiveGame::new_from_state(patched);
+
+    // Sanity: drawing done, nothing decided, and the bot genuinely WANTS a
+    // strategic bid on this strong hand (so the `bid_decided` branch is reached
+    // via a real strategic bid, not a fallback).
+    if let GameState::Draw(p) = &game.dump_state().unwrap() {
+        assert!(p.done_drawing(), "deck should be drained");
+        assert!(!p.bid_decided(), "no bid should be decided yet");
+        assert!(
+            policy::choose_bid(p, bidding_bot).is_some(),
+            "the bot must strategically WANT to bid this strong spade hand"
+        );
+    } else {
+        panic!("expected a Draw phase");
+    }
+
+    // Production runs advance_bots after the human's (last draw) action. The bot
+    // strategically bids -> bid_decided becomes true. The driver MUST then PARK:
+    // it must NOT pick up the kitty / finalize the landlord while the human can
+    // still outbid. (It is fine for the bot's strategic BID itself to be applied;
+    // what must NOT happen is the immediate PickUpKitty / phase transition.)
+    let out = advance_bots(&mut game, &logger, true).expect("advance_bots must not error");
+
+    // We are STILL in the Draw phase (no Exchange / Play): the landlord was not
+    // finalized and the kitty was not picked up.
+    let p = match game.dump_state().unwrap() {
+        GameState::Draw(p) => p,
+        other => panic!(
+            "advance_bots finalized the landlord behind the human's back; got {:?}",
+            other
+        ),
+    };
+    // The bot's strategic bid stands and is decided, but the responsible (winning)
+    // seat is the BOT and it has NOT advanced.
+    assert!(
+        p.bid_decided(),
+        "the bot's strategic bid should be the standing decided bid"
+    );
+    assert_eq!(
+        p.next_player().unwrap(),
+        bidding_bot,
+        "the standing (winning) bidder should be the bot that bid"
+    );
+    // No PickUpKitty was issued, so the only broadcasts (if any) are the bid
+    // itself -- crucially NOT a phase transition. Confirm we are parked: a second
+    // advance_bots is a clean no-op (the bot keeps waiting for the human).
+    let before = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+    let again = advance_bots(&mut game, &logger, true).expect("advance_bots must not error");
+    let after = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+    assert_eq!(
+        before, after,
+        "advance_bots must keep PARKING (no PickUpKitty) while the human can outbid"
+    );
+    assert!(
+        again.messages.is_empty(),
+        "a parked advance_bots must make no further move; produced {} messages",
+        again.messages.len()
+    );
+    let _ = out;
+
+    // The handler distinguishes THIS park (a bot's standing bid awaiting a human
+    // counter-bid, eligible for the bounded grace) from every other park.
+    assert!(
+        is_parked_awaiting_human_counter_bid(&game).unwrap(),
+        "the driver must report it is parked on the human's counter-bid window"
+    );
+
+    // The human's counter-bid is genuinely available and is accepted.
+    let p = match game.dump_state().unwrap() {
+        GameState::Draw(p) => p,
+        other => panic!("expected Draw, got {:?}", other),
+    };
+    let human_options = p.valid_bids(host).unwrap();
+    let outbid = human_options
+        .into_iter()
+        .max_by_key(|b| b.count)
+        .expect("the human must have a legal counter-bid available");
+    game.interact(Action::Bid(outbid.card, outbid.count), host, &logger)
+        .expect("the human's counter-bid must be accepted (their window was preserved)");
+
+    // After the human outbids, the human is the standing (winning) bidder, so the
+    // driver correctly hands the kitty pickup to the human (parks, no bot action).
+    let before = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+    advance_bots(&mut game, &logger, true).unwrap();
+    let after = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+    assert_eq!(
+        before, after,
+        "after the human wins the bid, advance_bots must not act for the human"
+    );
+    match game.dump_state().unwrap() {
+        GameState::Draw(p) => {
+            assert_eq!(
+                p.next_player().unwrap(),
+                host,
+                "the human's outbid must make it the responsible (winning) bidder"
+            );
+        }
+        other => panic!("expected Draw with the human as winning bidder, got {:?}", other),
+    }
+}
+
+/// Build the exact parked position from the test above: a fully-drawn DrawPhase
+/// where a BOT (`bot_ids[0]`) holds a strong spade hand and has STRATEGICALLY bid
+/// S_2 x2 (so the bid is decided), and the human holds a big-joker pair (a legal
+/// counter-bid). The deferred driver parks here awaiting the human's window.
+/// Returns the game and the human id.
+fn parked_on_human_counter_bid(logger: &Logger) -> (InteractiveGame, PlayerID) {
+    use shengji_mechanics::types::cards::{C_3, C_4, S_2, S_3, S_4, S_5, S_6, S_7, S_8, S_9};
+
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".to_string()).unwrap();
+    let mut bot_ids = vec![];
+    for _ in 0..3 {
+        let msgs = game
+            .interact(
+                Action::AddAIPlayer {
+                    difficulty: BotDifficulty::Easy,
+                },
+                host,
+                logger,
+            )
+            .unwrap();
+        bot_ids.push(added_bot_id(&msgs));
+    }
+    game.interact(Action::StartGame, host, logger).unwrap();
+    let bidding_bot = bot_ids[0];
+
+    let state = game.dump_state().unwrap();
+    let mut json = serde_json::to_value(&state).unwrap();
+    {
+        let draw = json.get_mut("Draw").expect("must be in Draw phase");
+        draw["deck"] = serde_json::json!([]);
+        draw["bids"] = serde_json::json!([]);
+        draw["autobid"] = serde_json::Value::Null;
+        draw["propagated"]["landlord"] = serde_json::Value::Null;
+
+        let s2 = S_2.as_char().to_string();
+        let s3 = S_3.as_char().to_string();
+        let s4 = S_4.as_char().to_string();
+        let s5 = S_5.as_char().to_string();
+        let s6 = S_6.as_char().to_string();
+        let s7 = S_7.as_char().to_string();
+        let s8 = S_8.as_char().to_string();
+        let s9 = S_9.as_char().to_string();
+        let bj = Card::BigJoker.as_char().to_string();
+        let c3 = C_3.as_char().to_string();
+        let c4 = C_4.as_char().to_string();
+
+        let mut hands_map = serde_json::Map::new();
+        for pl in draw["propagated"]["players"].as_array().unwrap() {
+            let id = pl["id"].as_u64().unwrap() as usize;
+            let hand = if id == bidding_bot.0 {
+                serde_json::json!({
+                    s2.clone(): 2, s3.clone(): 1, s4.clone(): 1, s5.clone(): 1,
+                    s6.clone(): 1, s7.clone(): 1, s8.clone(): 1, s9.clone(): 1,
+                })
+            } else if id == host.0 {
+                serde_json::json!({ bj.clone(): 2, c3.clone(): 1, c4.clone(): 1 })
+            } else {
+                serde_json::json!({ c3.clone(): 2, c4.clone(): 2 })
+            };
+            hands_map.insert(id.to_string(), hand);
+        }
+        draw["hands"]["hands"] = serde_json::Value::Object(hands_map);
+    }
+    let patched: GameState = serde_json::from_value(json).expect("patched Draw must deserialize");
+    let mut game = InteractiveGame::new_from_state(patched);
+
+    // Drive the deferred driver: the bot strategically bids, then parks.
+    advance_bots(&mut game, logger, true).unwrap();
+    advance_bots(&mut game, logger, true).unwrap();
+    assert!(
+        is_parked_awaiting_human_counter_bid(&game).unwrap(),
+        "setup must reach the parked-on-human-counter-bid position"
+    );
+    (game, host)
+}
+
+/// The bounded counter-bid GRACE must be deadlock-free: when the human DECLINES
+/// to outbid (their window elapses with no action), the production handler calls
+/// `force_finalize_parked_bot_bid`, which finalizes the standing BOT as landlord
+/// (picks up the kitty -> Exchange) so the game proceeds. This proves the park is
+/// a fair window, NOT a hang.
+#[test]
+fn test_parked_bot_bid_finalizes_when_human_declines() {
+    let logger = null_logger();
+    let (mut game, _host) = parked_on_human_counter_bid(&logger);
+
+    // The human did nothing during the grace window. Force the standing bot to
+    // finalize (this is exactly what the handler does once the grace elapses).
+    force_finalize_parked_bot_bid(&mut game, &logger).unwrap();
+
+    // The bot is now the landlord and the game has advanced into the exchange
+    // phase (or beyond) -- it did NOT hang waiting on a human that never bid.
+    match game.dump_state().unwrap() {
+        GameState::Exchange(_) | GameState::Play(_) => {}
+        other => panic!(
+            "force-finalizing a declined counter-bid window must advance the game; got {:?}",
+            other
+        ),
+    }
+}
+
+/// The grace release must be SAFE if the human DID outbid during the window: the
+/// world changed, so `force_finalize_parked_bot_bid` must apply NO stale bot
+/// pickup -- the human (the new standing bidder) keeps control.
+#[test]
+fn test_force_finalize_is_safe_after_human_outbids() {
+    let logger = null_logger();
+    let (mut game, host) = parked_on_human_counter_bid(&logger);
+
+    // The human outbids during the grace window.
+    let p = match game.dump_state().unwrap() {
+        GameState::Draw(p) => p,
+        other => panic!("expected Draw, got {:?}", other),
+    };
+    let outbid = p
+        .valid_bids(host)
+        .unwrap()
+        .into_iter()
+        .max_by_key(|b| b.count)
+        .expect("the human must have a legal counter-bid");
+    game.interact(Action::Bid(outbid.card, outbid.count), host, &logger)
+        .unwrap();
+
+    // Now the grace fires (handler raced the human). It must NOT steal the kitty
+    // for the bot: the human is the standing bidder, so this is a safe no-op and
+    // the human remains the responsible (winning) seat in the Draw phase.
+    force_finalize_parked_bot_bid(&mut game, &logger).unwrap();
+    match game.dump_state().unwrap() {
+        GameState::Draw(p) => assert_eq!(
+            p.next_player().unwrap(),
+            host,
+            "after a human outbid, the grace must not finalize the bot; the human keeps control"
+        ),
+        other => panic!(
+            "the human's outbid must keep the game in Draw with the human as winner; got {:?}",
+            other
+        ),
+    }
 }
