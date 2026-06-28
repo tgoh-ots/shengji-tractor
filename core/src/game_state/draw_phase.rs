@@ -33,6 +33,14 @@ pub struct DrawPhase {
     #[serde(default)]
     decks: Vec<Deck>,
     player_requested_reset: Option<PlayerID>,
+    /// The seats that have explicitly marked themselves "done bidding" (clicked
+    /// the temporary "Done bidding" button). The bidding window stays open until
+    /// EVERY human (non-bot) seat is in this set; a NEW bid clears it so everyone
+    /// re-confirms in response. Bots are never added here — they count as
+    /// implicitly done (see [`DrawPhase::all_humans_done_bidding`]). Defaulted so
+    /// older serialized states (without the field) deserialize cleanly.
+    #[serde(default)]
+    done_bidding: Vec<PlayerID>,
 }
 
 impl DrawPhase {
@@ -63,6 +71,7 @@ impl DrawPhase {
             revealed_cards: 0,
             autobid: None,
             player_requested_reset: None,
+            done_bidding: Vec::new(),
         }
     }
 
@@ -234,7 +243,7 @@ impl DrawPhase {
         if self.revealed_cards > 0 {
             return false;
         }
-        Bid::bid(
+        let bid_made = Bid::bid(
             id,
             card,
             count,
@@ -248,11 +257,54 @@ impl DrawPhase {
             self.propagated.joker_bid_policy,
             self.num_decks,
             0,
-        )
+        );
+        // A NEW bid re-opens the bidding window: clear everyone's "done bidding"
+        // flag so every human can respond to (and then re-confirm against) the new
+        // standing bid. We only clear when a bid was actually accepted.
+        if bid_made {
+            self.done_bidding.clear();
+        }
+        bid_made
+    }
+
+    /// Toggle whether the given player has marked themselves "done bidding". This
+    /// is the explicit replacement for the old time-based counter-bid grace: the
+    /// bidding window stays open until every HUMAN seat has marked done. Idempotent
+    /// — marking an already-done player done (or clearing an already-cleared one)
+    /// is a no-op.
+    pub fn set_done_bidding(&mut self, id: PlayerID, ready: bool) {
+        if ready {
+            if !self.done_bidding.contains(&id) {
+                self.done_bidding.push(id);
+            }
+        } else {
+            self.done_bidding.retain(|p| *p != id);
+        }
+    }
+
+    /// Whether the given player has marked themselves "done bidding".
+    pub fn is_done_bidding(&self, id: PlayerID) -> bool {
+        self.done_bidding.contains(&id)
+    }
+
+    /// Whether EVERY human (non-bot) seat has marked itself "done bidding". Bots
+    /// count as implicitly done, so an all-bot table is trivially `true` (no
+    /// deadlock). This is the gate that replaces the old timed counter-bid grace:
+    /// the landlord may be finalized only once this returns `true`.
+    pub fn all_humans_done_bidding(&self) -> bool {
+        self.propagated
+            .players
+            .iter()
+            .filter(|p| self.propagated.is_bot(p.id).is_none())
+            .all(|p| self.done_bidding.contains(&p.id))
     }
 
     pub fn take_back_bid(&mut self, id: PlayerID) -> Result<(), Error> {
-        Bid::take_back_bid(id, self.propagated.bid_takeback_policy, &mut self.bids, 0)
+        Bid::take_back_bid(id, self.propagated.bid_takeback_policy, &mut self.bids, 0)?;
+        // Taking back a bid changes the standing bid, so re-open the window: every
+        // human re-confirms "done" against the new state.
+        self.done_bidding.clear();
+        Ok(())
     }
 
     /// The legal bids the given player could make right now. Used by the bot

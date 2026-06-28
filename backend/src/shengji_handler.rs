@@ -557,35 +557,16 @@ async fn handle_user_action<S: Storage<VersionedGame, E> + 'static, E: Send + 's
             // that waits the appropriate beat WITHOUT holding the lock and then
             // resumes the bots (pausing again at each subsequent beat).
             //
-            // We ALSO spawn it when the driver did NOT pause but PARKED on a human
-            // counter-bid window (a bot holds the standing bid after the deck is
-            // drawn and a human could still outbid). With no normal beat there is no
-            // pause, but the resume task still needs to run the bounded counter-bid
-            // GRACE so the standing bot eventually finalizes if the human declines —
-            // otherwise the table would wait forever for an outbid that never comes.
+            // When a BOT holds the standing bid after the deck is drawn, the driver
+            // instead PARKS (no pause, no resume task) until every human seat clicks
+            // "Done bidding". That click is an ordinary `Action::MarkBiddingDone`
+            // which flows through this same branch and re-runs the bot driver — so
+            // once the LAST human is done, the bot finalizes itself here with no
+            // timer and no forced finalization needed. An all-bot table has zero
+            // humans, so "all humans done" is trivially true and the bot proceeds
+            // immediately (no deadlock).
             let initial_pause = *pause_kind.lock().unwrap();
-            let parked_on_counter_bid = if initial_pause.is_some() {
-                false
-            } else {
-                let parked: Arc<std::sync::Mutex<bool>> = Arc::new(std::sync::Mutex::new(false));
-                let parked_in_op = parked.clone();
-                execute_immutable_operation(
-                    ws_id,
-                    room_name,
-                    backend_storage.clone(),
-                    move |game, _| {
-                        *parked_in_op.lock().unwrap() =
-                            shengji_core::bot::is_parked_awaiting_human_counter_bid(game)
-                                .unwrap_or(false);
-                        Ok(vec![])
-                    },
-                    "check counter-bid park after user action",
-                )
-                .await;
-                let v = *parked.lock().unwrap();
-                v
-            };
-            if initial_pause.is_some() || parked_on_counter_bid {
+            if initial_pause.is_some() {
                 tokio::task::spawn(resume_deferred_bots_after_delay(
                     logger,
                     ws_id,
@@ -610,25 +591,6 @@ const DEFAULT_BOT_TRICK_PAUSE_MS: u64 = 2500;
 /// what one bot did before the next acts. This is the SHORTER beat. Overridable
 /// at runtime via the `SHENGJI_BOT_ACTION_PAUSE_MS` environment variable.
 const DEFAULT_BOT_ACTION_PAUSE_MS: u64 = 1200;
-
-/// Default counter-bid GRACE window (milliseconds) granted to a seated human when
-/// a BOT holds the standing bid after the deck is drawn. The bot driver PARKS
-/// rather than immediately picking up the kitty (which would lock the bot in as
-/// landlord and race straight into play), so the human gets a real window to
-/// reveal a higher/stronger trump and OUTBID. If the window elapses with no
-/// outbid, the bot finalizes and the game proceeds — so there is no deadlock when
-/// the human declines. Overridable at runtime via the
-/// `SHENGJI_BOT_COUNTER_BID_GRACE_MS` environment variable.
-const DEFAULT_BOT_COUNTER_BID_GRACE_MS: u64 = 6000;
-
-/// The configured counter-bid grace window (see `DEFAULT_BOT_COUNTER_BID_GRACE_MS`).
-fn bot_counter_bid_grace() -> std::time::Duration {
-    let ms = std::env::var("SHENGJI_BOT_COUNTER_BID_GRACE_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_BOT_COUNTER_BID_GRACE_MS);
-    std::time::Duration::from_millis(ms)
-}
 
 /// Read the configured pause for the given beat, defaulting to the matching
 /// constant if the env var is unset or unparseable. The trick-clear beat is the
@@ -668,6 +630,12 @@ fn bot_pause(kind: BotPause) -> std::time::Duration {
 /// so there is no double-apply even if the world changed during the delay. The
 /// iteration bound caps the number of chained beats within a single hand so a
 /// wedged state can never spin this task forever.
+///
+/// Note: the draw-phase "a bot holds the standing bid, awaiting the humans"
+/// situation is NOT handled here. The bot driver simply PARKS there until every
+/// human clicks "Done bidding"; the last such click is an ordinary user action
+/// that re-runs the driver and finalizes the bot. There is no timer and no forced
+/// finalization, so this task only ever paces normal per-action / trick beats.
 async fn resume_deferred_bots_after_delay<
     S: Storage<VersionedGame, E> + 'static,
     E: Send + 'static,
@@ -680,103 +648,34 @@ async fn resume_deferred_bots_after_delay<
 ) {
     // A generous bound on chained beats within a single hand (many short
     // per-action pauses can chain across a multi-trick run), so a wedged state
-    // can never spin this task forever.
-    //
-    // `pending` carries the NEXT normal beat to sleep on. It is `None` when the
-    // driver is instead PARKED on a human counter-bid window (no normal pause):
-    // in that case we skip the per-action/trick sleep and go straight to the
-    // park-check + bounded counter-bid grace below.
+    // can never spin this task forever. `pending` carries the NEXT beat to sleep
+    // on; the loop ends as soon as a resume reports no further beat.
     let mut pending = initial_pause;
     for _ in 0..4096 {
-        if let Some(pause) = pending {
-            tokio::time::sleep(bot_pause(pause)).await;
+        let pause = match pending {
+            Some(pause) => pause,
+            None => break,
+        };
+        tokio::time::sleep(bot_pause(pause)).await;
 
-            // The beat the NEXT resume stops on (if any), captured out of the
-            // locked closure so we can pick the right sleep for the following loop.
-            let next_pause: Arc<std::sync::Mutex<Option<BotPause>>> =
-                Arc::new(std::sync::Mutex::new(None));
-            let next_in_op = next_pause.clone();
-            let op_logger = logger.clone();
-            execute_operation(
-                ws_id,
-                &room_name,
-                backend_storage.clone(),
-                move |game, _, _| {
-                    // Re-check + apply under the lock. `finish_deferred_bot_trick`
-                    // is idempotent: it finishes a still-pending bot-won trick if
-                    // any, else advances the next single meaningful bot move, then
-                    // keeps deferring — reporting the next beat to wait on.
-                    let result = shengji_core::bot::finish_deferred_bot_trick(game, &op_logger)?;
-                    if let Some(pause) = result.pause {
-                        *next_in_op.lock().unwrap() = Some(pause);
-                    }
-                    Ok(result
-                        .messages
-                        .into_iter()
-                        .map(|(data, message)| GameMessage::Broadcast { data, message })
-                        .collect())
-                },
-                "resume deferred bots",
-            )
-            .await;
-
-            let next = *next_pause.lock().unwrap();
-            if let Some(pause) = next {
-                pending = Some(pause);
-                continue;
-            }
-            // No further normal beat — fall through to the counter-bid park check
-            // below (`pending` is reset by that block before the next iteration).
-        }
-
-        // We reach here only when there is no pending NORMAL beat. We are either
-        // done OR the driver PARKED waiting for a seated human's counter-bid (a bot
-        // holds the standing bid after the deck is drawn, and a human could still
-        // legally outbid). In the latter case we grant a bounded GRACE window:
-        // sleep (lock-free) so the human can reveal a higher/stronger trump and
-        // outbid; if the window elapses with no outbid, force the standing bot to
-        // finalize (pick up the kitty) so the game proceeds with no deadlock. The
-        // force-finalize re-checks under the lock and applies nothing stale if the
-        // human DID outbid during the grace.
-
-        // Is the driver parked specifically on a human counter-bid window?
-        let parked: Arc<std::sync::Mutex<bool>> = Arc::new(std::sync::Mutex::new(false));
-        let parked_in_op = parked.clone();
-        execute_immutable_operation(
-            ws_id,
-            &room_name,
-            backend_storage.clone(),
-            move |game, _| {
-                *parked_in_op.lock().unwrap() =
-                    shengji_core::bot::is_parked_awaiting_human_counter_bid(game).unwrap_or(false);
-                Ok(vec![])
-            },
-            "check counter-bid park",
-        )
-        .await;
-        let is_parked = *parked.lock().unwrap();
-        if !is_parked {
-            break;
-        }
-
-        // Grant the human their counter-bid window (lock-free sleep).
-        tokio::time::sleep(bot_counter_bid_grace()).await;
-
-        // Window elapsed: force the standing bot to finalize (unless the human
-        // outbid during the grace, in which case this is a no-op and we simply
-        // continue / end). Capture any new beat to keep looping.
-        let after_pause: Arc<std::sync::Mutex<Option<BotPause>>> =
+        // The beat the NEXT resume stops on (if any), captured out of the
+        // locked closure so we can pick the right sleep for the following loop.
+        let next_pause: Arc<std::sync::Mutex<Option<BotPause>>> =
             Arc::new(std::sync::Mutex::new(None));
-        let after_in_op = after_pause.clone();
+        let next_in_op = next_pause.clone();
         let op_logger = logger.clone();
         execute_operation(
             ws_id,
             &room_name,
             backend_storage.clone(),
             move |game, _, _| {
-                let result = shengji_core::bot::force_finalize_parked_bot_bid(game, &op_logger)?;
+                // Re-check + apply under the lock. `finish_deferred_bot_trick`
+                // is idempotent: it finishes a still-pending bot-won trick if
+                // any, else advances the next single meaningful bot move, then
+                // keeps deferring — reporting the next beat to wait on.
+                let result = shengji_core::bot::finish_deferred_bot_trick(game, &op_logger)?;
                 if let Some(pause) = result.pause {
-                    *after_in_op.lock().unwrap() = Some(pause);
+                    *next_in_op.lock().unwrap() = Some(pause);
                 }
                 Ok(result
                     .messages
@@ -784,15 +683,11 @@ async fn resume_deferred_bots_after_delay<
                     .map(|(data, message)| GameMessage::Broadcast { data, message })
                     .collect())
             },
-            "finalize parked bot bid after counter-bid grace",
+            "resume deferred bots",
         )
         .await;
 
-        let after = *after_pause.lock().unwrap();
-        match after {
-            Some(pause) => pending = Some(pause),
-            None => break,
-        }
+        pending = *next_pause.lock().unwrap();
     }
 }
 

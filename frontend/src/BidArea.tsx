@@ -33,6 +33,13 @@ interface IBidAreaProps {
   jokerBidPolicy: JokerBidPolicy;
   hands: Hands;
   numDecks: number;
+  // Whether the temporary "Done bidding" control should be offered to this
+  // player (the deck is fully drawn so bidding is the only remaining choice and
+  // this player is not the standing winner who finalizes via "Pick up kitty").
+  showDoneBidding: boolean;
+  // Whether this player has already clicked "Done bidding" (so we show the
+  // waiting state instead).
+  isDoneBidding: boolean;
 }
 
 const BidArea = (props: IBidAreaProps): JSX.Element => {
@@ -46,6 +53,11 @@ const BidArea = (props: IBidAreaProps): JSX.Element => {
   const takeBackBid = (evt: React.SyntheticEvent): void => {
     evt.preventDefault();
     send({ Action: "TakeBackBid" });
+  };
+
+  const markDoneBidding = (evt: React.SyntheticEvent, ready: boolean): void => {
+    evt.preventDefault();
+    send({ Action: { MarkBiddingDone: { ready } } });
   };
 
   const players: { [playerId: number]: Player } = {};
@@ -207,6 +219,30 @@ const BidArea = (props: IBidAreaProps): JSX.Element => {
           ) : null}
           {props.suffixButtons}
         </div>
+        {props.showDoneBidding ? (
+          props.isDoneBidding ? (
+            <div className="my-3 flex flex-wrap items-center gap-2">
+              <button
+                onClick={(evt) => markDoneBidding(evt, false)}
+                className="sj-btn"
+              >
+                {t("bid.undoDoneBidding")}
+              </button>
+              <span className="text-sm font-medium text-[var(--text-on-felt-soft)]">
+                {t("bid.waitingForOthers")}
+              </span>
+            </div>
+          ) : (
+            <div className="my-3 flex flex-wrap items-center gap-2">
+              <button
+                onClick={(evt) => markDoneBidding(evt, true)}
+                className="sj-btn sj-btn-primary"
+              >
+                {t("bid.doneBidding")}
+              </button>
+            </div>
+          )
+        ) : null}
         <p className="mb-1 text-sm font-semibold text-[var(--text-on-felt)]">
           {isLoadingBids
             ? t("bid.loading")

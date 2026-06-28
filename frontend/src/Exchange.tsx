@@ -249,6 +249,8 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
             }
             jokerBidPolicy={this.props.state.propagated.joker_bid_policy!}
             numDecks={this.props.state.num_decks}
+            showDoneBidding={false}
+            isDoneBidding={false}
             header={
               <h2 className="mb-2 text-base font-bold uppercase tracking-wide text-[var(--text-on-felt)]">
                 {t("bid.round", { round: this.props.state.epoch! + 1 })}

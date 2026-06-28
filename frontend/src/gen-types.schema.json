@@ -620,6 +620,23 @@
           "additionalProperties": false
         },
         {
+          "description": "Explicitly mark (or un-mark) the caller as \"done bidding\" during the draw phase. The landlord is only finalized once EVERY human seat is done; bots are implicitly done. A new bid re-opens bidding (clearing every \"done\" flag), so players re-confirm against the new standing bid. Replaces the old time-based counter-bid grace window.",
+          "type": "object",
+          "required": ["MarkBiddingDone"],
+          "properties": {
+            "MarkBiddingDone": {
+              "type": "object",
+              "required": ["ready"],
+              "properties": {
+                "ready": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "type": "object",
           "required": ["MoveCardToKitty"],
           "properties": {
@@ -1117,6 +1134,16 @@
           "type": "array",
           "items": {
             "$ref": "#/definitions/Deck"
+          }
+        },
+        "done_bidding": {
+          "description": "The seats that have explicitly marked themselves \"done bidding\" (clicked the temporary \"Done bidding\" button). The bidding window stays open until EVERY human (non-bot) seat is in this set; a NEW bid clears it so everyone re-confirms in response. Bots are never added here — they count as implicitly done (see [`DrawPhase::all_humans_done_bidding`]). Defaulted so older serialized states (without the field) deserialize cleanly.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
           }
         },
         "game_mode": {

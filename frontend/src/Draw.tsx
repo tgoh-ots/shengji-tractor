@@ -128,6 +128,21 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
       }
     });
 
+    // The "Done bidding" window is open once the deck is fully drawn and a bid is
+    // decided (a real bid or an auto-bid from revealing the bottom). It is offered
+    // to every human EXCEPT the current standing (winning) bidder — that player
+    // finalizes by picking up the kitty instead. Each human clicks it when
+    // satisfied; the landlord is only finalized once every human is done (a new
+    // bid re-opens the window and clears the flag server-side).
+    const deckDrawn = this.props.state.deck.length === 0;
+    const bidDecided =
+      this.props.state.bids.length > 0 || this.props.state.autobid != null;
+    const isStandingWinner = playerId >= 0 && next === playerId;
+    const showDoneBidding =
+      playerId >= 0 && deckDrawn && bidDecided && !isStandingWinner;
+    const isDoneBidding =
+      playerId >= 0 && (this.props.state.done_bidding ?? []).includes(playerId);
+
     const landlord = this.props.state.propagated.landlord;
     let trump: Trump | undefined;
     if (
@@ -175,6 +190,8 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
           }
           jokerBidPolicy={this.props.state.propagated.joker_bid_policy!}
           numDecks={this.props.state.num_decks}
+          showDoneBidding={showDoneBidding}
+          isDoneBidding={isDoneBidding}
           header={
             <>
               <h2 className="mb-2 text-base font-bold uppercase tracking-wide text-[var(--text-on-felt)]">

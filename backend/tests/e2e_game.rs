@@ -361,6 +361,20 @@ fn next_action_for(view: &GameState, me: PlayerID) -> Option<Action> {
     match view {
         GameState::Initialize(_) => None,
         GameState::Draw(p) => {
+            // When the deck is fully drawn and a bid is already decided, the
+            // standing bidder may be a BOT. In that case `next_player()` is the bot
+            // (not us), so we are not the actor — but the server now PARKS the bot
+            // from finalizing the landlord until every human clicks "Done bidding".
+            // As a satisfied human client, mark ourselves done so the table can
+            // proceed (the old time-based grace is gone). We only send this once
+            // (until a new bid re-opens bidding and clears the flag).
+            if p.done_drawing()
+                && p.bid_decided()
+                && p.next_player().ok()? != me
+                && !p.is_done_bidding(me)
+            {
+                return Some(Action::MarkBiddingDone { ready: true });
+            }
             if p.next_player().ok()? != me {
                 return None;
             }

@@ -162,6 +162,9 @@ const en: Dict = {
   "bid.autoDraw": "auto-draw",
   "bid.pickUpKitty": "Pick up cards from the bottom",
   "bid.revealCard": "Reveal card from the bottom",
+  "bid.doneBidding": "Done bidding",
+  "bid.undoDoneBidding": "Not done bidding",
+  "bid.waitingForOthers": "Waiting for other players to finish bidding…",
 
   // Exchange
   "exchange.yourHand": "Your hand",
@@ -318,6 +321,9 @@ const zh: Dict = {
   "bid.autoDraw": "自动摸牌",
   "bid.pickUpKitty": "拿起底牌",
   "bid.revealCard": "翻开底牌",
+  "bid.doneBidding": "结束叫牌",
+  "bid.undoDoneBidding": "继续叫牌",
+  "bid.waitingForOthers": "等待其他玩家结束叫牌…",
 
   "exchange.yourHand": "你的手牌",
   "exchange.discarded": "已埋的牌 {n} / {total}",

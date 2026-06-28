@@ -3,9 +3,8 @@ use slog::{o, Discard, Logger};
 use shengji_mechanics::types::{Card, PlayerID};
 
 use crate::bot::{
-    advance_bots, finish_deferred_bot_trick, force_finalize_parked_bot_bid,
-    is_parked_awaiting_human_counter_bid, next_bot_action, observed_state, policy, BotDifficulty,
-    BotPause,
+    advance_bots, finish_deferred_bot_trick, is_parked_awaiting_human_done_bidding,
+    next_bot_action, observed_state, policy, BotDifficulty, BotPause,
 };
 use crate::game_state::initialize_phase::InitializePhase;
 use crate::game_state::GameState;
@@ -1374,7 +1373,9 @@ fn test_deal_bot_is_landlord_buries_legal_kitty() {
                         if p.next_player().map(|n| n == host).unwrap_or(false) {
                             // Human's turn to draw.
                             game.interact(Action::DrawCard, host, &logger).unwrap();
-                        } else if let Some((bot_id, action)) = next_bot_action(&mut game, false).unwrap() {
+                        } else if let Some((bot_id, action)) =
+                            next_bot_action(&mut game, false).unwrap()
+                        {
                             game.interact(action, bot_id, &logger).unwrap();
                         } else {
                             panic!("trial {}: draw stalled (no actor)", trial);
@@ -1435,7 +1436,9 @@ fn test_deal_bot_is_landlord_buries_legal_kitty() {
                     }
                     if let Some(action) = next_action_for_human(&state, host) {
                         game.interact(action, host, &logger).unwrap();
-                    } else if let Some((bot_id, action)) = next_bot_action(&mut game, false).unwrap() {
+                    } else if let Some((bot_id, action)) =
+                        next_bot_action(&mut game, false).unwrap()
+                    {
                         game.interact(action, bot_id, &logger).unwrap();
                     } else {
                         panic!("trial {}: exchange stalled with no actor", trial);
@@ -2568,9 +2571,7 @@ fn test_human_not_robbed_of_bid_by_fallback() {
 // ===========================================================================
 #[test]
 fn test_human_not_robbed_of_counter_bid_by_strategic_bot_bid() {
-    use shengji_mechanics::types::cards::{
-        C_3, C_4, S_2, S_3, S_4, S_5, S_6, S_7, S_8, S_9,
-    };
+    use shengji_mechanics::types::cards::{C_3, C_4, S_2, S_3, S_4, S_5, S_6, S_7, S_8, S_9};
 
     let logger = null_logger();
 
@@ -2704,11 +2705,11 @@ fn test_human_not_robbed_of_counter_bid_by_strategic_bot_bid() {
     );
     let _ = out;
 
-    // The handler distinguishes THIS park (a bot's standing bid awaiting a human
-    // counter-bid, eligible for the bounded grace) from every other park.
+    // The driver reports THIS park (a bot's standing bid awaiting the humans'
+    // explicit "Done bidding" votes) distinctly from every other park.
     assert!(
-        is_parked_awaiting_human_counter_bid(&game).unwrap(),
-        "the driver must report it is parked on the human's counter-bid window"
+        is_parked_awaiting_human_done_bidding(&game).unwrap(),
+        "the driver must report it is parked awaiting the human's done-bidding vote"
     );
 
     // The human's counter-bid is genuinely available and is accepted.
@@ -2741,16 +2742,19 @@ fn test_human_not_robbed_of_counter_bid_by_strategic_bot_bid() {
                 "the human's outbid must make it the responsible (winning) bidder"
             );
         }
-        other => panic!("expected Draw with the human as winning bidder, got {:?}", other),
+        other => panic!(
+            "expected Draw with the human as winning bidder, got {:?}",
+            other
+        ),
     }
 }
 
 /// Build the exact parked position from the test above: a fully-drawn DrawPhase
 /// where a BOT (`bot_ids[0]`) holds a strong spade hand and has STRATEGICALLY bid
 /// S_2 x2 (so the bid is decided), and the human holds a big-joker pair (a legal
-/// counter-bid). The deferred driver parks here awaiting the human's window.
-/// Returns the game and the human id.
-fn parked_on_human_counter_bid(logger: &Logger) -> (InteractiveGame, PlayerID) {
+/// counter-bid). The deferred driver parks here awaiting the human's explicit
+/// "Done bidding" vote. Returns the game and the human id.
+fn parked_on_human_done_bidding(logger: &Logger) -> (InteractiveGame, PlayerID) {
     use shengji_mechanics::types::cards::{C_3, C_4, S_2, S_3, S_4, S_5, S_6, S_7, S_8, S_9};
 
     let mut game = InteractiveGame::new();
@@ -2816,46 +2820,83 @@ fn parked_on_human_counter_bid(logger: &Logger) -> (InteractiveGame, PlayerID) {
     advance_bots(&mut game, logger, true).unwrap();
     advance_bots(&mut game, logger, true).unwrap();
     assert!(
-        is_parked_awaiting_human_counter_bid(&game).unwrap(),
-        "setup must reach the parked-on-human-counter-bid position"
+        is_parked_awaiting_human_done_bidding(&game).unwrap(),
+        "setup must reach the parked-awaiting-human-done-bidding position"
     );
     (game, host)
 }
 
-/// The bounded counter-bid GRACE must be deadlock-free: when the human DECLINES
-/// to outbid (their window elapses with no action), the production handler calls
-/// `force_finalize_parked_bot_bid`, which finalizes the standing BOT as landlord
-/// (picks up the kitty -> Exchange) so the game proceeds. This proves the park is
-/// a fair window, NOT a hang.
+/// (a) The landlord must NOT be finalized while a BOT holds the standing bid and
+/// the (only) human has not yet clicked "Done bidding": the deferred driver parks
+/// (stays in Draw). Once the human marks done, the SAME re-run of `advance_bots`
+/// finalizes the standing bot (picks up the kitty -> Exchange) with no timer.
 #[test]
-fn test_parked_bot_bid_finalizes_when_human_declines() {
+fn test_landlord_not_finalized_until_human_marks_done() {
     let logger = null_logger();
-    let (mut game, _host) = parked_on_human_counter_bid(&logger);
+    let (mut game, host) = parked_on_human_done_bidding(&logger);
 
-    // The human did nothing during the grace window. Force the standing bot to
-    // finalize (this is exactly what the handler does once the grace elapses).
-    force_finalize_parked_bot_bid(&mut game, &logger).unwrap();
+    // The human has NOT marked done: the driver must keep parking (still in Draw).
+    advance_bots(&mut game, &logger, true).unwrap();
+    match game.dump_state().unwrap() {
+        GameState::Draw(p) => {
+            assert!(
+                !p.all_humans_done_bidding(),
+                "the human should not be done bidding yet"
+            );
+            assert!(
+                !p.is_done_bidding(host),
+                "the human should not be marked done before clicking"
+            );
+        }
+        other => panic!(
+            "the landlord was finalized before the human marked done; got {:?}",
+            other
+        ),
+    }
+
+    // The human clicks "Done bidding". This single user action re-runs the bot
+    // driver, which now sees every human is done and finalizes the standing bot.
+    let mut broadcasts = game
+        .interact(Action::MarkBiddingDone { ready: true }, host, &logger)
+        .unwrap();
+    let result = advance_bots(&mut game, &logger, true).unwrap();
+    broadcasts.extend(result.messages);
 
     // The bot is now the landlord and the game has advanced into the exchange
     // phase (or beyond) -- it did NOT hang waiting on a human that never bid.
     match game.dump_state().unwrap() {
         GameState::Exchange(_) | GameState::Play(_) => {}
         other => panic!(
-            "force-finalizing a declined counter-bid window must advance the game; got {:?}",
+            "after the human marked done, the standing bot must finalize and advance; got {:?}",
             other
         ),
     }
 }
 
-/// The grace release must be SAFE if the human DID outbid during the window: the
-/// world changed, so `force_finalize_parked_bot_bid` must apply NO stale bot
-/// pickup -- the human (the new standing bidder) keeps control.
+/// (b) A NEW bid re-opens bidding: it must clear every "done bidding" flag so the
+/// humans re-confirm against the new standing bid (and the driver re-parks even
+/// though a human had previously marked done).
 #[test]
-fn test_force_finalize_is_safe_after_human_outbids() {
+fn test_new_bid_clears_done_bidding_and_reopens() {
     let logger = null_logger();
-    let (mut game, host) = parked_on_human_counter_bid(&logger);
+    let (mut game, host) = parked_on_human_done_bidding(&logger);
 
-    // The human outbids during the grace window.
+    // The human marks done. With one human, all humans are now done.
+    game.interact(Action::MarkBiddingDone { ready: true }, host, &logger)
+        .unwrap();
+    match game.dump_state().unwrap() {
+        GameState::Draw(p) => {
+            assert!(p.is_done_bidding(host), "the human should be marked done");
+            assert!(
+                p.all_humans_done_bidding(),
+                "with the only human done, all humans are done"
+            );
+        }
+        other => panic!("expected Draw, got {:?}", other),
+    }
+
+    // Now the human OUTBIDS instead of letting the bot finalize. The new bid must
+    // RE-OPEN bidding: the "done" flag is cleared.
     let p = match game.dump_state().unwrap() {
         GameState::Draw(p) => p,
         other => panic!("expected Draw, got {:?}", other),
@@ -2869,19 +2910,78 @@ fn test_force_finalize_is_safe_after_human_outbids() {
     game.interact(Action::Bid(outbid.card, outbid.count), host, &logger)
         .unwrap();
 
-    // Now the grace fires (handler raced the human). It must NOT steal the kitty
-    // for the bot: the human is the standing bidder, so this is a safe no-op and
-    // the human remains the responsible (winning) seat in the Draw phase.
-    force_finalize_parked_bot_bid(&mut game, &logger).unwrap();
     match game.dump_state().unwrap() {
-        GameState::Draw(p) => assert_eq!(
-            p.next_player().unwrap(),
-            host,
-            "after a human outbid, the grace must not finalize the bot; the human keeps control"
-        ),
+        GameState::Draw(p) => {
+            assert!(
+                !p.is_done_bidding(host),
+                "a new bid must clear the human's done-bidding flag (re-open bidding)"
+            );
+            assert!(
+                !p.all_humans_done_bidding(),
+                "after re-opening, not all humans are done until they re-confirm"
+            );
+            // The human is now the standing bidder (their own outbid). The driver
+            // hands control back to the human (parks; no bot action steals it).
+            assert_eq!(
+                p.next_player().unwrap(),
+                host,
+                "the human's outbid makes them the responsible (winning) bidder"
+            );
+        }
         other => panic!(
-            "the human's outbid must keep the game in Draw with the human as winner; got {:?}",
+            "the human's outbid must keep the game in Draw; got {:?}",
             other
         ),
     }
+
+    // The driver must not act for the human here (it's the human's bid/kitty).
+    let before = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+    advance_bots(&mut game, &logger, true).unwrap();
+    let after = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+    assert_eq!(
+        before, after,
+        "after the human outbids, advance_bots must not act on the human's behalf"
+    );
+}
+
+/// (c) An all-bot table has ZERO human seats, so "all humans done" is trivially
+/// true: a bot holding the standing bid must finalize immediately (no deadlock,
+/// no waiting for a done-bidding click that will never come). We drive an all-bot
+/// table with the DEFERRED driver (the production path) and confirm it advances
+/// past the Draw phase on its own.
+#[test]
+fn test_all_bot_table_proceeds_immediately_when_bot_holds_bid() {
+    let logger = null_logger();
+    let (mut game, _bot_ids) = setup_all_bot_game(&logger);
+
+    // Drive the deferred (production) driver in a loop, finishing any deferred
+    // beats, until the table leaves the Draw phase or we run out of patience.
+    for _ in 0..5000 {
+        let result = advance_bots(&mut game, &logger, true).unwrap();
+        if result.pause.is_some() {
+            // A deferred beat: resume it (as the handler would) and keep going.
+            finish_deferred_bot_trick(&mut game, &logger).unwrap();
+        }
+        match game.dump_state().unwrap() {
+            GameState::Draw(p) => {
+                // While still drawing/bidding, an all-bot table must NEVER park on
+                // a "humans done" gate: with zero humans it is trivially satisfied.
+                if p.done_drawing() && p.bid_decided() {
+                    assert!(
+                        p.all_humans_done_bidding(),
+                        "an all-bot table must be trivially all-humans-done"
+                    );
+                    assert!(
+                        !is_parked_awaiting_human_done_bidding(&game).unwrap(),
+                        "an all-bot table must never park awaiting a done-bidding click"
+                    );
+                }
+            }
+            // Reached the exchange/play phase: the standing bot finalized on its
+            // own with no human input -- exactly the no-deadlock guarantee.
+            GameState::Exchange(_) | GameState::Play(_) => return,
+            GameState::Initialize(_) => panic!("unexpectedly returned to the lobby"),
+        }
+    }
+    panic!("an all-bot table never advanced past the Draw phase (possible deadlock)");
 }

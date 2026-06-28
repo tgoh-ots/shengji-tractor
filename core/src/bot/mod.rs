@@ -329,65 +329,35 @@ pub fn finish_deferred_bot_trick(
     advance_bots(game, logger, true)
 }
 
-/// Whether the deferred bot driver is currently PARKED waiting for a seated human
-/// to take their counter-bid window: the deck is fully drawn, a BOT holds the
-/// standing (decided) bid, the bot would otherwise pick up the kitty, but some
-/// human seat could still legally OUTBID it (so the window-respecting driver
-/// returns `None`).
+/// Whether the deferred bot driver is currently PARKED waiting for the seated
+/// humans to finish bidding: the deck is fully drawn, a BOT holds the standing
+/// (decided) bid, the bot would otherwise pick up the kitty, but not every human
+/// seat has clicked "Done bidding" yet (so the window-respecting driver returns
+/// `None`).
 ///
-/// The production handler uses this to grant a bounded counter-bid grace: after
-/// the window elapses with no human outbid, it calls
-/// [`force_finalize_parked_bot_bid`] so the standing bot proceeds (no deadlock).
-/// A `false` here means the driver parked for some OTHER reason (a human's own
-/// turn, game over, ...), in which case the handler must NOT force anything.
-pub fn is_parked_awaiting_human_counter_bid(game: &InteractiveGame) -> Result<bool, Error> {
-    // If the window-respecting driver wants to make a move, it is NOT parked on a
-    // counter-bid window.
+/// There is NO timer: the bot simply waits until every human marks done (or
+/// outbids — which re-opens the window and clears the votes). When all humans are
+/// done, the next human action (the last "Done bidding" click) re-runs the bot
+/// driver, which then finalizes the standing bot itself. This predicate is kept
+/// purely as an observability/diagnostic hook for the handler; it never triggers
+/// any forced finalization.
+pub fn is_parked_awaiting_human_done_bidding(game: &InteractiveGame) -> Result<bool, Error> {
+    // If the window-respecting driver wants to make a move, it is NOT parked.
     if next_bot_action(game, true)?.is_some() {
         return Ok(false);
     }
-    // It parked. Distinguish the counter-bid-window park (which we may force past
-    // after the grace) from every other park (human's own turn / nothing to do):
-    // only the former has the window-IGNORING driver wanting a bot `PickUpKitty`
-    // in a fully-drawn Draw phase.
+    // It parked. Distinguish the await-human-done park from every other park
+    // (human's own turn / nothing to do): only the former has the window-IGNORING
+    // driver wanting a bot `PickUpKitty` in a fully-drawn Draw phase where not all
+    // humans are done yet.
     match next_bot_action(game, false)? {
         Some((_, Action::PickUpKitty)) => Ok(matches!(
             game.dump_state()?,
-            GameState::Draw(p) if p.done_drawing() && p.bid_decided()
+            GameState::Draw(p)
+                if p.done_drawing() && p.bid_decided() && !p.all_humans_done_bidding()
         )),
         _ => Ok(false),
     }
-}
-
-/// Force the deferred bot driver PAST a counter-bid-window park: finalize the
-/// standing BOT bidder (pick up the kitty) and then keep driving the bots with the
-/// normal deferred cadence. This is the bounded counter-bid grace's release valve
-/// — the handler calls it only after the human's counter-bid window has elapsed
-/// without an outbid (see [`is_parked_awaiting_human_counter_bid`]).
-///
-/// It is SAFE to call even if the world changed during the grace (the human DID
-/// outbid, a reset happened, ...): if the window-IGNORING driver no longer wants a
-/// bot `PickUpKitty`, this applies no stale move and simply resumes the normal
-/// deferred driver. So there is no double-finalize and no reliance on a stale
-/// snapshot.
-pub fn force_finalize_parked_bot_bid(
-    game: &mut InteractiveGame,
-    logger: &Logger,
-) -> Result<AdvanceResult, Error> {
-    // Re-derive (window IGNORED) what the driver would do right now. Only a bot
-    // `PickUpKitty` is the park we are allowed to force; anything else means the
-    // world moved on (e.g. the human outbid) and we must not force a stale move.
-    if let Some((bot_id, action @ Action::PickUpKitty)) = next_bot_action(game, false)? {
-        let msgs = game.interact(action, bot_id, logger)?;
-        // After finalizing, resume the normal window-respecting deferred driver.
-        let mut result = advance_bots(game, logger, true)?;
-        let mut combined = msgs;
-        combined.extend(result.messages);
-        result.messages = combined;
-        return Ok(result);
-    }
-    // No bot pickup to force (the human acted, or nothing to do). Resume normally.
-    advance_bots(game, logger, true)
 }
 
 /// Compute the next `(bot_id, action)` pair to apply, or `None` if no bot needs
@@ -467,32 +437,29 @@ fn next_bot_action(
                         //
                         // So, when we are asked to RESPECT the human's bidding
                         // window (`respect_human_bid_window`, set only on the
-                        // production/deferred driver path), PARK (return None) if any
-                        // HUMAN seat could still legally bid — i.e. it has a non-empty
-                        // `valid_bids`, which under the engine's rules are exactly the
-                        // bids that BEAT the current standing bid. The human then
-                        // either outbids (becoming the responsible seat, so this same
-                        // branch hands control to them via the `None` arm above) or
-                        // releases the window (see the handler's bounded counter-bid
-                        // grace / the human's explicit pick-up), after which the bot
-                        // proceeds.
+                        // production/deferred driver path), PARK (return None) until
+                        // EVERY human seat has explicitly clicked "Done bidding"
+                        // (`Action::MarkBiddingDone`). Each human's click marks their
+                        // seat done; a NEW bid (anyone bidding) re-opens the window by
+                        // clearing every "done" flag, so the humans re-confirm against
+                        // the new standing bid. Once `all_humans_done_bidding` is true
+                        // (which, crucially, is TRIVIALLY true for an all-bot table —
+                        // zero human seats — so there is no deadlock), the bot
+                        // proceeds and picks up the kitty.
+                        //
+                        // This replaces the old time-based counter-bid grace: there is
+                        // no timer; finalization is gated purely on the explicit
+                        // per-human "done bidding" votes.
                         //
                         // On the SYNCHRONOUS driver path (`respect_human_bid_window =
                         // false`: every test, the self-play / ladder / dealing
                         // harnesses, the e2e driver) there is no human watching in
                         // real time, so we keep the original behavior and let the bot
                         // pick up immediately — a non-interactive driver must run to
-                        // completion without waiting on a human that will never act.
-                        // An all-bot table likewise has no human seat, so it never
-                        // parks regardless of the flag (no deadlock).
-                        let human_can_still_bid = respect_human_bid_window
-                            && state.propagated().players().iter().any(|pl| {
-                                bot_for(&state, pl.id).is_none()
-                                    && p.valid_bids(pl.id)
-                                        .map(|b| !b.is_empty())
-                                        .unwrap_or(false)
-                            });
-                        if human_can_still_bid {
+                        // completion without waiting on a human that will never click.
+                        let awaiting_human_done =
+                            respect_human_bid_window && !p.all_humans_done_bidding();
+                        if awaiting_human_done {
                             Ok(None)
                         } else {
                             Ok(Some((responsible, Action::PickUpKitty)))
