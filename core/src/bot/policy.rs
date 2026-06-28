@@ -95,6 +95,18 @@ impl Knobs {
                 search_candidates: 6,
                 rollout_tricks: 8,
             },
+            // Enoch: the SAME time-boxed determinized search as Hard, but driven
+            // by the Enoch-playbook heuristic (`Policy::EnochHeuristic`) at both
+            // the root prior and the rollout plies, so the full-game strategy
+            // shapes the search rather than only a one-shot greedy pick. No
+            // blunders, greedy on the search value. Honest (own redacted view).
+            BotDifficulty::Enoch => Knobs {
+                epsilon: 0.0,
+                temperature: 0.0,
+                search_worlds: 48,
+                search_candidates: 6,
+                rollout_tricks: 8,
+            },
             // CHEATER (perfect information): plays a perfect-information search
             // over the SINGLE true world (no determinization, no sampling — it
             // already knows every opponent's cards via the centralized honesty
@@ -242,8 +254,13 @@ fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Ca
     // runs fast). The cap guarantees a slow CPU degrades to fewer simulations
     // rather than hanging. Both honest tiers read ONLY the redacted view `p`.
     if knobs.search_worlds > 0 {
+        // Enoch shapes BOTH the prior AND the rollout plies with its full-game
+        // playbook; Expert uses the learned-net prior; Hard the bare heuristic.
+        let enoch = matches!(difficulty, BotDifficulty::Enoch);
         let prior = if matches!(difficulty, BotDifficulty::Expert) {
             Policy::Net
+        } else if enoch {
+            Policy::EnochHeuristic
         } else {
             Policy::Heuristic
         };
@@ -254,18 +271,32 @@ fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Ca
             rollout_tricks: knobs.rollout_tricks,
             seed: rng.gen(),
             policy: prior,
-            // Rollouts always use the cheap heuristic default policy (see the
-            // `rollout_policy` doc on `SearchConfig`).
-            rollout_policy: Policy::Heuristic,
+            // Rollouts use the cheap heuristic default policy (see the
+            // `rollout_policy` doc on `SearchConfig`) — except Enoch, which keeps
+            // its playbook in the rollouts too so the search values endgame /
+            // hand-off lines correctly.
+            rollout_policy: if enoch {
+                Policy::EnochHeuristic
+            } else {
+                Policy::Heuristic
+            },
         };
         if let Some(cards) = search_play(p, me, config) {
             return cards;
         }
     }
 
-    // Heuristic backbone (Easy, and the search tiers' fallback).
+    // Heuristic backbone (Easy, and the search tiers' fallback). Enoch falls back
+    // to its own playbook-enabled greedy ranking.
+    let enoch = matches!(difficulty, BotDifficulty::Enoch);
     let ranked: Vec<ScoredPlay> = if leading {
-        heuristics::ranked_leads(p, me)
+        if enoch {
+            heuristics::ranked_leads_enoch(p, me)
+        } else {
+            heuristics::ranked_leads(p, me)
+        }
+    } else if enoch {
+        heuristics::ranked_follows_enoch(p, me)
     } else {
         heuristics::ranked_follows(p, me)
     };
@@ -338,7 +369,7 @@ fn random_legal_play(
 fn exchange_action(
     p: &crate::game_state::exchange_phase::ExchangePhase,
     me: PlayerID,
-    _difficulty: BotDifficulty,
+    difficulty: BotDifficulty,
 ) -> Result<Option<Action>, Error> {
     if p.next_player()? != me || p.landlord() != me {
         // Only the landlord exchanges; nobody else acts during exchange.
@@ -364,7 +395,7 @@ fn exchange_action(
         // To keep within the validated API, we only ever swap one card per call:
         // move a sub-optimal kitty card to hand, or move a good-to-bury hand card
         // to the kitty. The driver calls us repeatedly until we BeginPlay.
-        if let Some(action) = reconcile_kitty(p, me, &hand_cards, trump) {
+        if let Some(action) = reconcile_kitty(p, me, &hand_cards, trump, difficulty) {
             return Ok(Some(action));
         }
     }
@@ -418,6 +449,7 @@ fn reconcile_kitty(
     _me: PlayerID,
     hand_cards: &[Card],
     trump: Trump,
+    difficulty: BotDifficulty,
 ) -> Option<Action> {
     let kitty_size = p.kitty_size();
     if kitty_size == 0 {
@@ -429,10 +461,14 @@ fn reconcile_kitty(
     // deterministically (see `choose_kitty`, which breaks ties by a stable card
     // ordering). Because the pool (hand ∪ kitty) is invariant under moves, this
     // target is STABLE across calls, which is what makes the reconciliation
-    // terminate.
+    // terminate. Enoch applies its stricter, point-budgeted burial discipline.
     let mut pool: Vec<Card> = hand_cards.to_vec();
     pool.extend_from_slice(kitty);
-    let desired = heuristics::choose_kitty(&pool, trump, kitty_size);
+    let desired = if matches!(difficulty, BotDifficulty::Enoch) {
+        heuristics::choose_kitty_enoch(&pool, trump, kitty_size)
+    } else {
+        heuristics::choose_kitty(&pool, trump, kitty_size)
+    };
 
     // Compute the symmetric difference as multisets: which desired cards are
     // still missing from the kitty (to bury), and which kitty cards are not in
@@ -519,6 +555,7 @@ fn keep_value(trump: Trump, card: Card) -> i32 {
 pub fn choose_bid(
     p: &crate::game_state::draw_phase::DrawPhase,
     me: PlayerID,
+    difficulty: BotDifficulty,
 ) -> Option<shengji_mechanics::bidding::Bid> {
     let valid = p.valid_bids(me).ok()?;
     if valid.is_empty() {
@@ -540,6 +577,11 @@ pub fn choose_bid(
         .map(|h| Card::cards(h.iter()).copied().collect())
         .unwrap_or_default();
 
+    // Enoch prioritizes the suit it holds the most PAIRS in (a trump pair is
+    // worth ~3-4 single trumps), per the playbook; the other tiers use the
+    // length-/strength-weighted backbone.
+    let enoch = matches!(difficulty, BotDifficulty::Enoch);
+
     // Score each candidate bid by the trump it would establish.
     let mut best: Option<(f64, shengji_mechanics::bidding::Bid)> = None;
     for bid in valid {
@@ -548,13 +590,39 @@ pub fn choose_bid(
             Card::Suited { suit, .. } => heuristics::trump_for(level, Some(suit)),
             Card::Unknown => continue,
         };
-        let mut strength = heuristics::bid_strength(&hand, candidate_trump);
+        let mut strength = if enoch {
+            heuristics::bid_strength_enoch(&hand, candidate_trump)
+        } else {
+            heuristics::bid_strength(&hand, candidate_trump)
+        };
         // Prefer fewer cards committed for the same strength (reinforce later).
         strength -= bid.count as f64 * 0.5;
         match &best {
             None => best = Some((strength, bid)),
             Some((bs, _)) if strength > *bs => best = Some((strength, bid)),
             _ => (),
+        }
+    }
+
+    // Enoch "don't declare too early": before most of the hand has been dealt you
+    // can't tell how long the suit will be, so a premature declaration "can make
+    // or break your game." Require Enoch to have drawn most of its cards before it
+    // commits to a trump, UNLESS its holding is already overwhelming.
+    if enoch {
+        let drawn = hand.len();
+        // Final per-player hand size = (all cards − kitty) / players.
+        let total_cards = p.propagated().num_decks().max(1) * 54;
+        let players = p.propagated().players().len().max(1);
+        let kitty = p.kitty().len();
+        let full_hand = total_cards.saturating_sub(kitty) / players;
+        let fraction = if full_hand == 0 {
+            1.0
+        } else {
+            drawn as f64 / full_hand as f64
+        };
+        let overwhelming = best.map(|(s, _)| s >= 22.0).unwrap_or(false);
+        if fraction < 0.6 && !overwhelming {
+            return None;
         }
     }
 

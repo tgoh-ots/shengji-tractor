@@ -144,7 +144,7 @@ fn play_one_hand(new_is_landlord_team: bool, rng: &mut StdRng) -> Option<GameOut
                     // by hand strength; otherwise reveal the bottom to fix trump.
                     let mut bid = false;
                     for &seat in &seats {
-                        if let Some(b) = policy::choose_bid(s, seat) {
+                        if let Some(b) = policy::choose_bid(s, seat, BotDifficulty::Hard) {
                             if s.bid(seat, b.card, b.count) {
                                 bid = true;
                                 break;

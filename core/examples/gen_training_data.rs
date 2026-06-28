@@ -176,7 +176,7 @@ fn play_one_hand_collecting(
                 } else {
                     let mut bid = false;
                     for &seat in &seats {
-                        if let Some(b) = policy::choose_bid(s, seat) {
+                        if let Some(b) = policy::choose_bid(s, seat, BotDifficulty::Hard) {
                             if s.bid(seat, b.card, b.count) {
                                 bid = true;
                                 break;

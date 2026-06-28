@@ -48,6 +48,7 @@ impl Brain {
             Brain::Tier(BotDifficulty::Easy) => "Easy",
             Brain::Tier(BotDifficulty::Hard) => "Hard",
             Brain::Tier(BotDifficulty::Expert) => "Expert",
+            Brain::Tier(BotDifficulty::Enoch) => "Enoch",
             Brain::Tier(BotDifficulty::Omniscient) => "Omniscient",
             Brain::AlwaysDumpPoints => "DumpPoints",
             Brain::AlwaysTrump => "AlwaysTrump",
@@ -120,8 +121,8 @@ fn play_one_hand(brains: &[Brain]) -> Option<HandOutcome> {
                     // to, reveal the bottom (auto-bid) for the landlord.
                     let mut bid_made = false;
                     for &seat in &seats {
-                        if let Brain::Tier(_) = brain_of[&seat] {
-                            if let Some(bid) = policy::choose_bid(s, seat) {
+                        if let Brain::Tier(d) = brain_of[&seat] {
+                            if let Some(bid) = policy::choose_bid(s, seat, d) {
                                 if s.bid(seat, bid.card, bid.count) {
                                     bid_made = true;
                                     break;

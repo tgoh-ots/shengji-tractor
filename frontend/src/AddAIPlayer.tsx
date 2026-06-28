@@ -14,7 +14,13 @@ import type { JSX } from "react";
  *   - Remove: { Action: { RemoveAIPlayer: playerId } }
  */
 
-const DIFFICULTIES: BotDifficulty[] = ["Easy", "Hard", "Expert", "Omniscient"];
+const DIFFICULTIES: BotDifficulty[] = [
+  "Easy",
+  "Hard",
+  "Expert",
+  "Enoch",
+  "Omniscient",
+];
 
 const AddAIPlayer = (): JSX.Element => {
   const { send } = React.useContext(WebsocketContext);

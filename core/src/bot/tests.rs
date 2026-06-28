@@ -305,7 +305,7 @@ fn play_hand_with_difficulties(difficulties: [BotDifficulty; 4]) -> Option<HandR
                     // Let bots bid by strength; otherwise reveal the bottom.
                     let mut bid = false;
                     for &seat in &seats {
-                        if let Some(b) = policy::choose_bid(s, seat) {
+                        if let Some(b) = policy::choose_bid(s, seat, diff_of[&seat]) {
                             if s.bid(seat, b.card, b.count) {
                                 bid = true;
                                 break;
@@ -439,6 +439,12 @@ fn test_difficulty_ladder_mixed_tier_self_play_quick() {
         (BotDifficulty::Hard, BotDifficulty::Expert),
         (BotDifficulty::Hard, BotDifficulty::Easy),
         (BotDifficulty::Expert, BotDifficulty::Easy),
+        // Enoch (the strongest HONEST tier) must run to completion against the
+        // other tiers too, and self-play cleanly.
+        (BotDifficulty::Enoch, BotDifficulty::Hard),
+        (BotDifficulty::Enoch, BotDifficulty::Easy),
+        (BotDifficulty::Enoch, BotDifficulty::Enoch),
+        (BotDifficulty::Omniscient, BotDifficulty::Enoch),
     ];
     for (a, b) in pairings {
         let games = 2;
@@ -638,6 +644,7 @@ fn test_observed_state_reveals_real_cards_only_for_omniscient() {
         BotDifficulty::Easy,
         BotDifficulty::Hard,
         BotDifficulty::Expert,
+        BotDifficulty::Enoch,
     ] {
         let honest_view = observed_state(&game, me, difficulty).unwrap();
         let honest_play = match &honest_view {
@@ -2501,7 +2508,7 @@ fn test_human_not_robbed_of_bid_by_fallback() {
         // And no bot is *strategically* willing to bid such a weak hand.
         for &bot in &bot_ids {
             assert!(
-                policy::choose_bid(p, bot).is_none(),
+                policy::choose_bid(p, bot, BotDifficulty::Hard).is_none(),
                 "bot {:?} should NOT want a strategic bid on this weak hand",
                 bot
             );
@@ -2655,7 +2662,7 @@ fn test_human_not_robbed_of_counter_bid_by_strategic_bot_bid() {
         assert!(p.done_drawing(), "deck should be drained");
         assert!(!p.bid_decided(), "no bid should be decided yet");
         assert!(
-            policy::choose_bid(p, bidding_bot).is_some(),
+            policy::choose_bid(p, bidding_bot, BotDifficulty::Hard).is_some(),
             "the bot must strategically WANT to bid this strong spade hand"
         );
     } else {

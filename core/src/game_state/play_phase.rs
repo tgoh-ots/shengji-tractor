@@ -151,6 +151,22 @@ impl PlayPhase {
         self.num_decks
     }
 
+    /// The buried kitty cards, IF they are visible in this (possibly redacted)
+    /// view. The kitty is un-hidden ONLY for the exchanger (the landlord who
+    /// buried it) until the end of the game; for every other seat the cards are
+    /// [`Card::Unknown`] (see [`PlayPhase::destructively_redact_for_player`]).
+    /// Returns `None` when the kitty is hidden so honest callers (e.g. the Enoch
+    /// bot's endgame kitty-protection logic) never act on garbage. This preserves
+    /// the honesty boundary: only the seat that actually saw the kitty can read
+    /// its point value.
+    pub fn visible_kitty(&self) -> Option<&[Card]> {
+        if self.kitty.contains(&Card::Unknown) {
+            None
+        } else {
+            Some(&self.kitty)
+        }
+    }
+
     /// The scoring "step size" (points per level threshold) for this hand, used
     /// by the bot heuristic to reason about how close the attacking team is to
     /// flipping the round. Returns `None` if the configured parameters are

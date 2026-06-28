@@ -68,6 +68,11 @@ pub enum Policy {
     Heuristic,
     /// The distilled learned net (Expert tier), heuristic fallback.
     Net,
+    /// The hand-written heuristic with the Enoch full-game playbook layered on
+    /// (Enoch tier). Same machinery as [`Policy::Heuristic`] but the lead/follow
+    /// scorers add the Enoch-specific bonuses, so the Enoch playbook shapes BOTH
+    /// the root candidate prior and the rollout moves.
+    EnochHeuristic,
 }
 
 /// Tunable search parameters.
@@ -295,6 +300,13 @@ fn ranked_candidates(p: &PlayPhase, me: PlayerID, policy: Policy) -> Vec<ScoredP
 
     match policy {
         Policy::Heuristic => heuristic_ranked(),
+        Policy::EnochHeuristic => {
+            if leading {
+                heuristics::ranked_leads_enoch(p, me)
+            } else {
+                heuristics::ranked_follows_enoch(p, me)
+            }
+        }
         Policy::Net => {
             // Generate the legal candidates the net should rank.
             let cands: Vec<Vec<Card>> = if leading {
@@ -437,6 +449,14 @@ fn rollout_ranked(
 
     match policy {
         Policy::Heuristic => heuristic_cards(),
+        Policy::EnochHeuristic => {
+            let ranked = if leading {
+                heuristics::ranked_leads_enoch(sim, actor)
+            } else {
+                heuristics::ranked_follows_enoch(sim, actor)
+            };
+            ranked.into_iter().map(|s| s.cards).collect()
+        }
         Policy::Net => {
             let cands: Vec<Vec<Card>> = if leading {
                 heuristics::lead_candidates(sim, actor)
