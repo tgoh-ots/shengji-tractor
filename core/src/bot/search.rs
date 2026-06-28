@@ -320,13 +320,14 @@ fn ranked_candidates(p: &PlayPhase, me: PlayerID, policy: Policy) -> Vec<ScoredP
             // net-guided Expert search edge out the heuristic-only Hard search on
             // the same compute. Both signals are squashed to a comparable [0,1]
             // softmax distribution so neither's raw scale dominates.
+            let ctx = heuristics::EvalCtx::build(p, me);
             let heur_scores: Vec<f64> = cands
                 .iter()
                 .map(|c| {
                     if leading {
-                        heuristics::score_lead(p, me, c)
+                        heuristics::score_lead(&ctx, p, c)
                     } else {
-                        heuristics::score_follow(p, me, c)
+                        heuristics::score_follow(&ctx, p, c)
                     }
                 })
                 .collect();

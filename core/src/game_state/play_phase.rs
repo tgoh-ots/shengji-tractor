@@ -151,6 +151,19 @@ impl PlayPhase {
         self.num_decks
     }
 
+    /// The scoring "step size" (points per level threshold) for this hand, used
+    /// by the bot heuristic to reason about how close the attacking team is to
+    /// flipping the round. Returns `None` if the configured parameters are
+    /// invalid for the current decks (the caller then disables threshold logic
+    /// rather than guessing). This reads only public, observable game settings.
+    pub fn bot_step_size(&self) -> Option<isize> {
+        self.propagated
+            .game_scoring_parameters
+            .step_size(&self.decks)
+            .ok()
+            .map(|s| s as isize)
+    }
+
     /// The landlord seat.
     pub fn landlord(&self) -> PlayerID {
         self.landlord

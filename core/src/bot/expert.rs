@@ -49,7 +49,7 @@
 
 use std::sync::OnceLock;
 
-use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Suit, Trump};
+use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Trump};
 
 use crate::bot::determinize::Knowledge;
 use crate::bot::heuristics::{self};
@@ -289,12 +289,12 @@ pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; 
         .count();
     let max_strength = cards
         .iter()
-        .map(|c| card_strength_pub(trump, *c))
+        .map(|c| heuristics::card_strength(trump, *c))
         .max()
         .unwrap_or(0);
     let min_strength = cards
         .iter()
-        .map(|c| card_strength_pub(trump, *c))
+        .map(|c| heuristics::card_strength(trump, *c))
         .min()
         .unwrap_or(0);
 
@@ -350,7 +350,7 @@ pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; 
             trick.played_cards().iter().find(|pc| pc.id == w).map(|pc| {
                 pc.cards
                     .iter()
-                    .map(|c| card_strength_pub(trump, *c))
+                    .map(|c| heuristics::card_strength(trump, *c))
                     .max()
                     .unwrap_or(0)
             })
@@ -434,10 +434,13 @@ pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; 
         .unwrap_or(0.0);
 
     // --- Heuristic prior ---
+    // FROZEN: this feature was trained against the LEGACY scorer. Keep it on the
+    // legacy version so changing the new heuristic doesn't silently shift the
+    // net's prior distribution (retrain later to unify).
     let heur = if leading {
-        heuristics::score_lead(p, me, cards)
+        heuristics::score_lead_legacy(p, me, cards)
     } else {
-        heuristics::score_follow(p, me, cards)
+        heuristics::score_follow_legacy(p, me, cards)
     };
     f[26] = (heur as f32 / 10.0).tanh();
     f[27] = 1.0; // bias
@@ -460,7 +463,7 @@ pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; 
     // The full deck has `num_decks` copies of every distinct card. The trump
     // universe (jokers + trump-number cards + the trump suit's ranks) times the
     // deck count is the total number of trumps in play.
-    let total_trumps = trump_universe_size(trump) * decks;
+    let total_trumps = heuristics::trump_universe_size(trump) * decks;
     let unseen_trumps = total_trumps.saturating_sub(seen_trumps);
     f[28] = if total_trumps > 0 {
         (unseen_trumps as f32 / total_trumps as f32).clamp(0.0, 1.0)
@@ -520,10 +523,10 @@ pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; 
     // by a same-suit response). Only meaningful when leading or following suit.
     let strongest = cards
         .iter()
-        .max_by_key(|c| card_strength_pub(trump, **c))
+        .max_by_key(|c| heuristics::card_strength(trump, **c))
         .copied();
     f[34] = strongest
-        .map(|c| is_guaranteed_top(&k, trump, c))
+        .map(|c| heuristics::is_guaranteed_top(&k, trump, c))
         .map(|g| if g { 1.0 } else { 0.0 })
         .unwrap_or(0.0);
 
@@ -537,106 +540,4 @@ pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; 
     f[35] = (revealed as f32 / deck_size as f32).clamp(0.0, 1.0);
 
     f
-}
-
-/// Number of distinct-position trump cards in a SINGLE deck for `trump`:
-/// 2 jokers + the trump-number cards + the 13 ranks of the trump suit (when
-/// there is a trump suit). For NoTrump the trump set is just the two jokers plus
-/// the four trump-number cards.
-fn trump_universe_size(trump: Trump) -> usize {
-    match trump {
-        Trump::NoTrump { number } => {
-            // jokers (2) + the four number cards of that rank (one per suit).
-            let number_cards = if number.is_some() { 4 } else { 0 };
-            2 + number_cards
-        }
-        Trump::Standard { number: _, suit: _ } => {
-            // jokers (2) + 13 ranks of the trump suit + 3 off-suit number cards
-            // (the trump-suit number card is already counted in the 13).
-            2 + 13 + 3
-        }
-    }
-}
-
-/// Whether `card` cannot be beaten, within its own effective suit, by any card
-/// the acting player has NOT yet seen. Jokers and the trump-suit trump-number
-/// card are always guaranteed; otherwise we check no higher same-suit card
-/// remains unseen. This is an HONEST upper-bound (it only uses `k.seen`).
-fn is_guaranteed_top(k: &Knowledge, trump: Trump, card: Card) -> bool {
-    let s = card_strength_pub(trump, card);
-    // The big joker (and a trump-suit trump-number when no joker outranks it) are
-    // unconditional tops.
-    if s >= 1000 {
-        return true;
-    }
-    let eff = trump.effective_suit(card);
-    // Scan the unseen pool for a same-effective-suit card that outranks `card`.
-    let decks = k.num_decks.max(1);
-    for higher in stronger_cards_in_suit(trump, eff, s) {
-        let total = decks;
-        let seen = k.seen.get(&higher).copied().unwrap_or(0);
-        if total > seen {
-            // At least one copy of a stronger same-suit card is still unseen.
-            return false;
-        }
-    }
-    true
-}
-
-/// Enumerate the cards in effective-suit `eff` whose strength strictly exceeds
-/// `floor` (used to test whether a card is the uncatchable top of its suit).
-fn stronger_cards_in_suit(trump: Trump, eff: EffectiveSuit, floor: i32) -> Vec<Card> {
-    let mut out: Vec<Card> = Vec::new();
-    let mut consider = |c: Card| {
-        if trump.effective_suit(c) == eff && card_strength_pub(trump, c) > floor {
-            out.push(c);
-        }
-    };
-    consider(Card::BigJoker);
-    consider(Card::SmallJoker);
-    let suits = [Suit::Clubs, Suit::Diamonds, Suit::Hearts, Suit::Spades];
-    let numbers = [
-        Number::Two,
-        Number::Three,
-        Number::Four,
-        Number::Five,
-        Number::Six,
-        Number::Seven,
-        Number::Eight,
-        Number::Nine,
-        Number::Ten,
-        Number::Jack,
-        Number::Queen,
-        Number::King,
-        Number::Ace,
-    ];
-    for suit in suits {
-        for number in numbers {
-            consider(Card::Suited { number, suit });
-        }
-    }
-    out
-}
-
-/// Public re-export of the heuristic's card-strength metric so this module's
-/// feature encoding stays identical to what training observed. We replicate the
-/// small mapping here rather than `pub`-ifying the private one to keep the
-/// heuristic module's surface area unchanged.
-fn card_strength_pub(trump: Trump, card: Card) -> i32 {
-    match card {
-        Card::BigJoker => 1000,
-        Card::SmallJoker => 999,
-        Card::Unknown => -1,
-        Card::Suited { number, suit } => {
-            if trump.number() == Some(number) {
-                if Some(suit) == trump.suit() {
-                    998
-                } else {
-                    997
-                }
-            } else {
-                number.as_u32() as i32
-            }
-        }
-    }
 }
