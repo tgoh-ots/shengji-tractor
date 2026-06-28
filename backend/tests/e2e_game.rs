@@ -169,6 +169,19 @@ where
         .expect("send action");
 }
 
+/// Send a `UserMessage::Message(text)` (a chat message) as JSON over the socket.
+async fn send_chat<S>(socket: &mut S, text: &str)
+where
+    S: SinkExt<WsMessage> + Unpin,
+    <S as futures::Sink<WsMessage>>::Error: std::fmt::Debug,
+{
+    let payload = json!({ "Message": text });
+    socket
+        .send(WsMessage::Text(serde_json::to_string(&payload).unwrap()))
+        .await
+        .expect("send chat");
+}
+
 #[tokio::test]
 async fn e2e_game_no_hidden_card_leakage() {
     let addr = spawn_server().await;
@@ -414,4 +427,166 @@ fn next_action_for(view: &GameState, me: PlayerID) -> Option<Action> {
             }
         }
     }
+}
+
+/// Concurrency regression test: chat must stay responsive while a bot is mid
+/// "thinking" (running its determinized search).
+///
+/// We seat the human plus three `Hard` bots (which run the time-boxed search) and
+/// give the search a LARGE per-move budget. We drive into the Play phase, then —
+/// at a moment when it is a BOT's turn (so a bot is computing its move off the
+/// game lock) — send a chat message and assert the server echoes it back PROMPTLY,
+/// well within the bot's search budget. Before the non-blocking refactor the bot
+/// computation ran inside the held game lock on an async worker, so chat (and
+/// every other room operation) stalled until the search finished; this test would
+/// then see the echo only after ~the full budget. Now the search runs on a
+/// blocking worker without the lock, so the echo returns quickly.
+#[tokio::test]
+async fn e2e_chat_responsive_while_bot_thinks() {
+    // Give the Hard-bot search a big budget so a bot's "thinking" window is wide
+    // and unmistakable; and stretch the per-action pause so bots act slowly,
+    // widening the window in which it is a bot's turn. (Set before the server
+    // starts handling actions; the server reads these per decision.)
+    std::env::set_var("SHENGJI_BOT_BUDGET_MS", "3000");
+    std::env::set_var("SHENGJI_BOT_ACTION_PAUSE_MS", "1500");
+    std::env::set_var("SHENGJI_BOT_TRICK_PAUSE_MS", "1500");
+
+    let addr = spawn_server().await;
+    let url = format!("ws://{addr}/api");
+    let (mut socket, _resp) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect to /api websocket");
+
+    let my_name = "human-chat";
+    let room_name = "chatroom_16char_";
+    assert_eq!(room_name.len(), 16, "room name must be exactly 16 chars");
+
+    let join = json!({
+        "room_name": room_name,
+        "name": my_name,
+        "disable_compression": true,
+    });
+    socket
+        .send(WsMessage::Text(join.to_string()))
+        .await
+        .expect("send JoinRoom");
+
+    // Drain to the initial lobby State.
+    let mut saw_initial_state = false;
+    for _ in 0..20 {
+        match next_json(&mut socket).await {
+            Some(v) => {
+                if v.get("State").is_some() {
+                    saw_initial_state = true;
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    assert!(saw_initial_state, "never received an initial lobby State");
+
+    // Seat three Hard bots (they run the determinized search) and start.
+    for _ in 0..3 {
+        send_action(
+            &mut socket,
+            &Action::AddAIPlayer {
+                difficulty: BotDifficulty::Hard,
+            },
+        )
+        .await;
+    }
+    send_action(&mut socket, &Action::StartGame).await;
+
+    // Drive until we reach the Play phase, acting on our own turns. Then, on a
+    // State where it is NOT our turn (a bot is/just-about-to be computing), fire a
+    // chat message and time how long the echo takes to come back.
+    let chat_text = "ping-while-thinking";
+    let mut reached_play = false;
+    let mut chat_latency: Option<Duration> = None;
+
+    let overall = Instant::now();
+    while overall.elapsed() < Duration::from_secs(60) && chat_latency.is_none() {
+        let msg = match next_json(&mut socket).await {
+            Some(v) => v,
+            None => break,
+        };
+        if msg.get("Error").is_some() {
+            continue;
+        }
+        let game = match assert_no_leak_and_parse(&msg, my_name) {
+            Some(g) => g,
+            None => continue,
+        };
+
+        let in_play = matches!(&game, GameState::Play(p) if !p.game_finished());
+        if in_play {
+            reached_play = true;
+        }
+
+        let me = match game
+            .propagated()
+            .players()
+            .iter()
+            .find(|p| p.name == my_name)
+            .map(|p| p.id)
+        {
+            Some(id) => id,
+            None => continue,
+        };
+
+        // If it is our turn, act so the table keeps moving toward / through Play.
+        if let Some(action) = next_action_for(&game, me) {
+            send_action(&mut socket, &action).await;
+            continue;
+        }
+
+        // It is NOT our turn. Once we are in the Play phase, a Hard bot is now
+        // computing its move (off the lock). Send a chat message and measure how
+        // fast the server echoes it back. A responsive (non-blocking) server
+        // returns it well within the 3s search budget; a lock-blocked one would
+        // only echo it after the search completes.
+        if reached_play {
+            let sent_at = Instant::now();
+            send_chat(&mut socket, chat_text).await;
+
+            // Wait specifically for our chat echo (ignore the stream of State /
+            // Broadcast messages the bots produce meanwhile).
+            let deadline = Duration::from_secs(10);
+            while sent_at.elapsed() < deadline {
+                match next_json(&mut socket).await {
+                    Some(v) => {
+                        if let Some(m) = v.get("Message") {
+                            if m.get("message").and_then(|x| x.as_str()) == Some(chat_text) {
+                                chat_latency = Some(sent_at.elapsed());
+                                break;
+                            }
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    assert!(
+        reached_play,
+        "the game never reached the Play phase, so the bot-thinking window was never observed"
+    );
+    let latency = chat_latency.expect("never received the chat echo back from the server");
+
+    // The Hard search budget is 3000ms. If the server held the game lock across the
+    // bot computation (the old behavior), the chat echo would be delayed by ~the
+    // full search. A non-blocking server echoes it back essentially immediately; we
+    // assert comfortably under the budget to prove the lock is NOT held across the
+    // compute. (Generous bound to avoid CI flakiness while still being far below
+    // 3000ms.)
+    assert!(
+        latency < Duration::from_millis(1500),
+        "chat echo took {:?}, which suggests it was blocked behind the bot's \
+         search (budget 3000ms); chat should stay responsive while a bot thinks",
+        latency
+    );
+
+    let _ = socket.close(None).await;
 }

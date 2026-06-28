@@ -146,6 +146,403 @@ impl AdvanceResult {
     }
 }
 
+/// A single planned bot step, produced by [`plan_next_bot_action`] from a
+/// (cheap-to-clone) snapshot of the game WITHOUT mutating it. This is the
+/// off-lock half of the non-blocking bot driver: the (potentially expensive)
+/// move selection — the determinized search for a Hard/Expert play — is done
+/// here, off the game lock and off the async worker, so the lock is only briefly
+/// re-acquired to APPLY the precomputed `action` (see
+/// [`apply_planned_bot_action`]).
+///
+/// `pause` carries the SAME deferral disposition `advance_bots(.., true)` would
+/// have produced for this step (see [`AdvanceResult::pause`] / [`BotPause`]):
+///
+/// * `None` — a burst step (a draw, or a reset confirmation). Apply it and
+///   immediately plan the next step with no human-visible pause.
+/// * `Some(BotPause::TrickClear)` — the next move is a bot finishing a trick it
+///   won. The `action` is the `EndTrick`, but it must NOT be applied until the
+///   trick-clear pause has elapsed (the full 4-card trick stays on the table).
+/// * `Some(BotPause::Action)` — a single meaningful move (play/bid/kitty/etc.).
+///   Apply it, publish, then pause briefly before planning the next step.
+#[derive(Debug, Clone)]
+pub struct BotStep {
+    /// The bot seat that should act.
+    pub bot_id: PlayerID,
+    /// The concrete, already-selected action to apply.
+    pub action: Action,
+    /// The deferral disposition for this step (see the struct docs).
+    pub pause: Option<BotPause>,
+}
+
+/// Cheaply classify whose turn it is and WHAT KIND of bot action is expected
+/// next, WITHOUT invoking the (expensive) move-selection policy. This is the
+/// re-validation key used by [`apply_planned_bot_action`]: a step planned off the
+/// lock is only applied if, under the lock, the world still expects the SAME bot
+/// to take the SAME kind of action. If the world moved on during the off-lock
+/// compute (a human finished the trick, a takeback/reset happened, the game
+/// ended, ...) the responsibility no longer matches and the stale step is
+/// dropped — the driver re-plans on the true new state.
+///
+/// It mirrors the turn/phase decisions of [`next_bot_action`] EXACTLY, but stops
+/// short of selecting the concrete move (no `policy::select_action`,
+/// `choose_bid`, or search), so it is cheap enough to run under the lock.
+fn expected_bot_responsibility(
+    game: &InteractiveGame,
+    respect_human_bid_window: bool,
+) -> Result<Option<(PlayerID, BotResponsibility)>, Error> {
+    let state = game.dump_state()?;
+
+    // Reset confirmation takes priority, exactly as in `next_bot_action`.
+    if let Some(requester) = state.player_requested_reset() {
+        if let Some(confirmer) = state
+            .propagated()
+            .players()
+            .iter()
+            .map(|p| p.id)
+            .find(|id| *id != requester && bot_for(&state, *id).is_some())
+        {
+            return Ok(Some((confirmer, BotResponsibility::ResetGame)));
+        }
+    }
+
+    match &state {
+        GameState::Initialize(_) => Ok(None),
+        GameState::Draw(p) => {
+            if !p.done_drawing() {
+                let next_player = p.next_player()?;
+                match bot_for(&state, next_player) {
+                    Some(_) => Ok(Some((next_player, BotResponsibility::Select))),
+                    None => Ok(None),
+                }
+            } else if p.bid_decided() {
+                let responsible = p.next_player()?;
+                match bot_for(&state, responsible) {
+                    None => Ok(None),
+                    Some(_) => {
+                        let awaiting_human_done =
+                            respect_human_bid_window && !p.all_humans_done_bidding();
+                        if awaiting_human_done {
+                            Ok(None)
+                        } else {
+                            Ok(Some((responsible, BotResponsibility::PickUpKitty)))
+                        }
+                    }
+                }
+            } else if let Some(landlord) = state.propagated().landlord {
+                match bot_for(&state, landlord) {
+                    Some(_) => Ok(Some((landlord, BotResponsibility::RevealCard))),
+                    None => Ok(None),
+                }
+            } else {
+                // No bid and no landlord yet: a bot may bid. We can't know which
+                // bot (or whether any) wants to bid without the policy, so we
+                // classify this as a generic "a bot should act" keyed on the seat
+                // the planner will pick. To keep the re-check cheap AND precise we
+                // re-derive the SAME first-able-bot the planner uses below; but
+                // because the bid choice itself needs the policy, the planner
+                // resolves the concrete seat. For the re-check we accept ANY bot
+                // bid here (the bid window logic is unchanged), so we report the
+                // first seated bot as the responsible seat.
+                for player in state.propagated().players() {
+                    if bot_for(&state, player.id).is_some() {
+                        return Ok(Some((player.id, BotResponsibility::Bid)));
+                    }
+                }
+                Ok(None)
+            }
+        }
+        GameState::Exchange(p) => {
+            let next_player = p.next_player()?;
+            match bot_for(&state, next_player) {
+                Some(_) => Ok(Some((next_player, BotResponsibility::Select))),
+                None => Ok(None),
+            }
+        }
+        GameState::Play(p) => {
+            if p.game_finished() {
+                return Ok(None);
+            }
+            match p.trick().next_player() {
+                None => {
+                    let next_leader = match p.trick().complete() {
+                        Ok(ended) => ended.winner,
+                        Err(_) => return Ok(None),
+                    };
+                    match bot_for(&state, next_leader) {
+                        Some(_) => Ok(Some((next_leader, BotResponsibility::EndTrick))),
+                        None => Ok(None),
+                    }
+                }
+                Some(next_player) => match bot_for(&state, next_player) {
+                    Some(_) => Ok(Some((next_player, BotResponsibility::Select))),
+                    None => Ok(None),
+                },
+            }
+        }
+    }
+}
+
+/// The KIND of move a bot seat is responsible for next, independent of the
+/// concrete [`Action`] the policy will choose. Used purely as a cheap
+/// re-validation key (see [`expected_bot_responsibility`]); it deliberately does
+/// NOT distinguish among the many concrete `Select` actions (draw, play,
+/// exchange step, ...), since `interact` re-validates the concrete move's
+/// legality anyway and the actor+phase match is what guards against applying a
+/// stale step after the world changed.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum BotResponsibility {
+    /// A reset confirmation by an eligible bot.
+    ResetGame,
+    /// The standing-bid bot finalizes the landlord by picking up the kitty.
+    PickUpKitty,
+    /// The pre-selected-landlord bot reveals the bottom (auto-bid).
+    RevealCard,
+    /// A bot may place a bid (no bid/landlord yet).
+    Bid,
+    /// The winning bot finishes a completed, bot-won trick.
+    EndTrick,
+    /// A policy-selected move (draw, exchange step, or play). The concrete action
+    /// is chosen by the policy; `interact` re-validates its legality.
+    Select,
+}
+
+impl BotResponsibility {
+    /// Whether a concrete `action` is consistent with this responsibility kind,
+    /// used to confirm a precomputed step still matches the world under the lock.
+    fn matches_action(self, action: &Action) -> bool {
+        match self {
+            BotResponsibility::ResetGame => matches!(action, Action::ResetGame),
+            BotResponsibility::PickUpKitty => matches!(action, Action::PickUpKitty),
+            BotResponsibility::RevealCard => matches!(action, Action::RevealCard),
+            BotResponsibility::Bid => matches!(action, Action::Bid(..)),
+            BotResponsibility::EndTrick => matches!(action, Action::EndTrick),
+            // A policy-selected move: any of the per-phase select actions. We do
+            // not over-constrain here; `interact` enforces concrete legality.
+            BotResponsibility::Select => matches!(
+                action,
+                Action::DrawCard
+                    | Action::RevealCard
+                    | Action::PickUpKitty
+                    | Action::PutDownKitty
+                    | Action::MoveCardToKitty(..)
+                    | Action::MoveCardToHand(..)
+                    | Action::SetFriends(..)
+                    | Action::BeginPlay
+                    | Action::PlayCards(..)
+                    | Action::PlayCardsWithHint(..)
+                    | Action::Bid(..)
+            ),
+        }
+    }
+}
+
+/// Plan the next bot step from a read-only snapshot, performing the (possibly
+/// expensive) move selection — the determinized search for a Hard/Expert play —
+/// WITHOUT holding any lock and WITHOUT mutating the game. This is the off-thread
+/// half of the non-blocking bot driver: callers run it on a cloned snapshot via
+/// `tokio::task::spawn_blocking`, then briefly re-acquire the game lock to apply
+/// the returned [`BotStep`] with [`apply_planned_bot_action`].
+///
+/// The deferral disposition (`pause`) mirrors `advance_bots(.., true)` for ONE
+/// step:
+///
+/// * a bot draw or a reset confirmation → `pause: None` (a burst step);
+/// * a bot finishing a trick it won → `Some(BotPause::TrickClear)` (the
+///   `EndTrick` must NOT be applied until the trick-clear pause elapses);
+/// * any other single meaningful bot move → `Some(BotPause::Action)`.
+///
+/// Returns `None` when no bot needs to act (a human's turn, game over, parked
+/// awaiting "Done bidding", or no progress possible) — identical to
+/// `next_bot_action` returning `None`.
+///
+/// Honesty is preserved exactly as in [`next_bot_action`]: each honest bot's move
+/// is selected from its own redacted [`observed_state`] view.
+pub fn plan_next_bot_action(
+    game: &InteractiveGame,
+    defer_bot_trick_finish: bool,
+) -> Result<Option<BotStep>, Error> {
+    let (bot_id, action) = match next_bot_action(game, defer_bot_trick_finish)? {
+        Some(next) => next,
+        None => return Ok(None),
+    };
+
+    let pause = if defer_bot_trick_finish && matches!(action, Action::EndTrick) {
+        // Stop BEFORE applying the winning bot's EndTrick (longer pause).
+        Some(BotPause::TrickClear)
+    } else if defer_bot_trick_finish && is_paceable_bot_action(&action) {
+        // Apply, then a short per-action pause.
+        Some(BotPause::Action)
+    } else {
+        // A burst step (draw / reset): apply with no pause.
+        None
+    };
+
+    Ok(Some(BotStep {
+        bot_id,
+        action,
+        pause,
+    }))
+}
+
+/// Apply a [`BotStep`] that was planned off the lock, under the game lock, AFTER
+/// cheaply re-validating that the world still expects this step. This is the
+/// on-lock half of the non-blocking bot driver.
+///
+/// The re-validation (via [`expected_bot_responsibility`], which does NO policy
+/// work) confirms the SAME bot is still responsible for the SAME kind of action.
+/// If the world changed during the off-lock compute (a human finished the trick,
+/// a takeback/reset occurred, the game ended, it is no longer this bot's turn,
+/// ...), the stale step is DROPPED and `Ok(None)` is returned so the caller
+/// re-plans on the true new state. If it still matches, the precomputed `action`
+/// is applied through the same validated [`InteractiveGame::interact`] API a
+/// human uses — which independently rejects any concrete illegality — and its
+/// broadcasts are returned.
+///
+/// `respect_human_bid_window` MUST match the value passed to
+/// [`plan_next_bot_action`] (the production/deferred driver passes `true`).
+///
+/// Returns `Ok(None)` if the step was DROPPED because the world moved on (the
+/// re-check failed), or `Ok(Some(broadcasts))` if it was applied (the broadcast
+/// list may be empty — many legal bot moves, e.g. a draw or a kitty step, produce
+/// no broadcast yet still mutate the state).
+pub fn apply_planned_bot_action(
+    game: &mut InteractiveGame,
+    step: &BotStep,
+    respect_human_bid_window: bool,
+    logger: &Logger,
+) -> Result<Option<Vec<(BroadcastMessage, String)>>, Error> {
+    let expected = expected_bot_responsibility(game, respect_human_bid_window)?;
+    let still_valid = match expected {
+        Some((bot_id, BotResponsibility::Bid)) => {
+            // Opening-bid case: which seat bids is policy-dependent (the planner
+            // picks the first bot that WANTS to bid, which may not be the first
+            // seated bot reported cheaply here). So we accept ANY seated bot's bid
+            // as long as the world still expects an opening bid and the planned
+            // actor is itself a bot. `interact` re-validates the concrete bid's
+            // legality. We still require the cheap key to BE `Bid` so a phase
+            // change since planning correctly invalidates the step.
+            let _ = bot_id;
+            matches!(step.action, Action::Bid(..))
+                && bot_for(&game.dump_state()?, step.bot_id).is_some()
+        }
+        Some((bot_id, responsibility)) => {
+            bot_id == step.bot_id && responsibility.matches_action(&step.action)
+        }
+        None => false,
+    };
+    if !still_valid {
+        // The world moved on during the off-lock compute; drop the stale step.
+        return Ok(None);
+    }
+    Ok(Some(game.interact(
+        step.action.clone(),
+        step.bot_id,
+        logger,
+    )?))
+}
+
+/// Whether the next bot responsibility is an UN-PACED "burst" step that is cheap
+/// to compute and must be applied without a human-visible pause: a bot draw
+/// (`DrawCard`, a Draw-phase `Select`) or a reset confirmation (`ResetGame`).
+/// These are the ONLY steps `advance_bots_burst_unpaced` applies under the lock —
+/// crucially, NEVER a Play-phase selection, so the (expensive) determinized
+/// search never runs while the lock is held. Everything else (bids, kitty/reveal,
+/// plays, trick finishes) is paceable and handled off the lock by the
+/// snapshot -> spawn_blocking -> apply driver.
+fn is_unpaced_burst_responsibility(state: &GameState, kind: BotResponsibility) -> bool {
+    match kind {
+        BotResponsibility::ResetGame => true,
+        // A `Select` is un-paced ONLY in the Draw phase (a card draw). In the
+        // Exchange / Play phases a `Select` is a paceable, possibly-expensive move.
+        BotResponsibility::Select => matches!(state, GameState::Draw(_)),
+        BotResponsibility::PickUpKitty
+        | BotResponsibility::RevealCard
+        | BotResponsibility::Bid
+        | BotResponsibility::EndTrick => false,
+    }
+}
+
+/// A cheap classification of what the bot driver would do NEXT, computed WITHOUT
+/// running any move-selection policy (no determinized search). Used by the
+/// non-blocking handler to decide, from a read-only snapshot, whether it needs to
+/// touch the write lock at all — avoiding spurious State republishes when no bot
+/// has anything to do.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum NextBotWork {
+    /// No bot needs to act: a human's turn, parked awaiting "Done bidding", game
+    /// over, or no progress possible. The driver should stop (and NOT write).
+    None,
+    /// The next bot step is an un-paced burst step (a draw or a reset
+    /// confirmation). The driver should burst these under one lock.
+    Burst,
+    /// The next bot step is a paceable / trick-clear beat (a bid, kitty/reveal,
+    /// exchange step, play, or trick finish). The driver should compute it off the
+    /// lock and apply it with pacing.
+    Paceable,
+}
+
+/// Cheaply classify the next bot step from a read-only snapshot, WITHOUT running
+/// the move-selection policy/search. See [`NextBotWork`]. The production driver
+/// passes `respect_human_bid_window = true`.
+pub fn classify_next_bot_work(
+    game: &InteractiveGame,
+    respect_human_bid_window: bool,
+) -> Result<NextBotWork, Error> {
+    let state = game.dump_state()?;
+    match expected_bot_responsibility(game, respect_human_bid_window)? {
+        None => Ok(NextBotWork::None),
+        Some((_, kind)) => {
+            if is_unpaced_burst_responsibility(&state, kind) {
+                Ok(NextBotWork::Burst)
+            } else {
+                Ok(NextBotWork::Paceable)
+            }
+        }
+    }
+}
+
+/// Apply, under the lock, every UN-PACED bot "burst" step (bot draws and reset
+/// confirmations) until the next bot step is a paceable / trick-clear beat, a
+/// human's turn, or there is nothing to do. Returns the combined broadcasts.
+///
+/// This is the on-lock complement to the off-lock pacing driver: it batches the
+/// many cheap bot draws of the deal into a SINGLE locked operation (one State
+/// publish instead of ~75), which keeps the draw phase cheap and avoids flooding
+/// clients, WITHOUT ever running the expensive Play-phase search under the lock
+/// (it stops before any paceable selection). The caller then drives the paceable
+/// steps one at a time off the lock.
+pub fn advance_bots_burst_unpaced(
+    game: &mut InteractiveGame,
+    logger: &Logger,
+) -> Result<Vec<(BroadcastMessage, String)>, Error> {
+    let mut out = vec![];
+    for _ in 0..MAX_BOT_ITERATIONS {
+        let state = game.dump_state()?;
+        let responsibility = match expected_bot_responsibility(game, true)? {
+            Some((_, kind)) if is_unpaced_burst_responsibility(&state, kind) => kind,
+            // Either nothing to do, or the next step is paceable/trick-clear:
+            // stop and let the off-lock driver handle it.
+            _ => break,
+        };
+        // The un-paced steps are cheap to select (a draw or a reset), so computing
+        // and applying them under the lock is fine. `next_bot_action` yields the
+        // concrete action; for these responsibilities it never runs the search.
+        let (bot_id, action) = match next_bot_action(game, true)? {
+            Some(next) => next,
+            None => break,
+        };
+        // Defensive: only apply if the concrete action matches the un-paced kind
+        // we expected (it always should). This guards against an unexpected
+        // expensive selection ever slipping through.
+        if !responsibility.matches_action(&action) {
+            break;
+        }
+        let msgs = game.interact(action, bot_id, logger)?;
+        out.extend(msgs);
+    }
+    Ok(out)
+}
+
 /// Whether a bot [`Action`], when applied by [`advance_bots`] in deferral mode,
 /// is a single "meaningful" move that should be followed by a SHORT human-visible
 /// pause so a human can register what happened. Returns `false` for the actions

@@ -3,8 +3,9 @@ use slog::{o, Discard, Logger};
 use shengji_mechanics::types::{Card, PlayerID};
 
 use crate::bot::{
-    advance_bots, finish_deferred_bot_trick, is_parked_awaiting_human_done_bidding,
-    next_bot_action, observed_state, policy, BotDifficulty, BotPause,
+    advance_bots, advance_bots_burst_unpaced, apply_planned_bot_action, classify_next_bot_work,
+    finish_deferred_bot_trick, is_parked_awaiting_human_done_bidding, next_bot_action,
+    observed_state, plan_next_bot_action, policy, BotDifficulty, BotPause, NextBotWork,
 };
 use crate::game_state::initialize_phase::InitializePhase;
 use crate::game_state::GameState;
@@ -3192,5 +3193,197 @@ fn test_every_played_broadcast_carries_cards_deferred_path() {
     assert!(
         played > 0,
         "the hand should have produced at least one play"
+    );
+}
+
+// ===========================================================================
+// Non-blocking driver primitives
+//
+// These cover the snapshot -> plan-off-lock -> apply-under-lock-with-recheck
+// building blocks the production handler uses to drive bots WITHOUT holding the
+// game lock across the (possibly expensive) move computation. The blocking
+// `advance_bots` path is unchanged and covered above; here we assert that the
+// new `plan_next_bot_action` / `apply_planned_bot_action` / `classify_next_bot_work`
+// primitives drive a hand correctly and re-validate safely.
+// ===========================================================================
+
+/// `plan_next_bot_action` (which performs the move selection on a snapshot) plus
+/// `apply_planned_bot_action` (which re-checks and applies) must drive a whole
+/// all-bot hand to completion — equivalent to the synchronous `advance_bots`,
+/// but with the plan and apply SPLIT (as the non-blocking handler does it). Here
+/// the "snapshot" is a clone of the game; we plan on the clone, then apply to the
+/// real game, mirroring the production snapshot/apply separation.
+#[test]
+fn test_plan_then_apply_drives_hand_to_completion() {
+    let logger = null_logger();
+    let (mut game, _bot_ids) = setup_all_bot_game(&logger);
+
+    let mut applied_steps = 0usize;
+    for _ in 0..20_000 {
+        if let GameState::Play(p) = &game.dump_state().unwrap() {
+            if p.game_finished() {
+                break;
+            }
+        }
+
+        // Plan on a CLONE (the off-lock snapshot in production).
+        let snapshot = game.dump_state().unwrap();
+        let snapshot_game = InteractiveGame::new_from_state(snapshot);
+        let step = match plan_next_bot_action(&snapshot_game, true).unwrap() {
+            Some(step) => step,
+            // No bot work right now. In an all-bot table the only `None` that is
+            // not "game over" would be a wedge; the loop bound guards that.
+            None => break,
+        };
+
+        // A trick-clear beat stops BEFORE applying the EndTrick: to make progress
+        // (as the handler does after its delay) we still apply that planned
+        // EndTrick here (the delay is a UI concern, not a correctness one).
+        let applied = apply_planned_bot_action(&mut game, &step, true, &logger).unwrap();
+        assert!(
+            applied.is_some(),
+            "a freshly planned step on the unchanged game must apply (not be dropped)"
+        );
+        applied_steps += 1;
+    }
+
+    match &game.dump_state().unwrap() {
+        GameState::Play(p) => assert!(
+            p.game_finished(),
+            "plan/apply loop did not finish the hand (applied {} steps)",
+            applied_steps
+        ),
+        GameState::Initialize(_) => panic!("expected a finished Play phase, got Initialize"),
+        GameState::Draw(_) => panic!("expected a finished Play phase, got Draw"),
+        GameState::Exchange(_) => panic!("expected a finished Play phase, got Exchange"),
+    }
+    assert!(applied_steps > 0, "expected to apply at least one bot step");
+}
+
+/// The safety re-check: a step planned against one world must be DROPPED (not
+/// applied) if the world moves on before it is applied. We plan a play for the
+/// bot whose turn it is, then mutate the game so it is NO LONGER that bot's turn
+/// (by applying the bot's real next action ourselves), and assert the stale
+/// planned step is dropped rather than double-applied.
+#[test]
+fn test_apply_planned_drops_stale_step_after_world_changed() {
+    let logger = null_logger();
+    let (mut game, _bot_ids) = setup_all_bot_game(&logger);
+
+    // Step one bot action at a time (NOT the synchronous `advance_bots`, which on
+    // an all-bot table runs the whole hand to completion) until we are in a live
+    // Play phase with a concrete bot play pending.
+    let mut reached_play = false;
+    for _ in 0..20_000 {
+        if let GameState::Play(p) = &game.dump_state().unwrap() {
+            if !p.game_finished() && p.trick().next_player().is_some() {
+                reached_play = true;
+                break;
+            }
+        }
+        let step = match plan_next_bot_action(&game, true).unwrap() {
+            Some(step) => step,
+            None => break,
+        };
+        apply_planned_bot_action(&mut game, &step, true, &logger).unwrap();
+    }
+    assert!(reached_play, "failed to reach a live Play phase");
+
+    // Plan the next bot step on a snapshot.
+    let snapshot = game.dump_state().unwrap();
+    let snapshot_game = InteractiveGame::new_from_state(snapshot);
+    let step = plan_next_bot_action(&snapshot_game, true)
+        .unwrap()
+        .expect("a bot should have a planned step in the Play phase");
+
+    // Now make the world move on: apply the bot's OWN next action ourselves (the
+    // same action the planner would pick is deterministic for Easy without
+    // search, so re-plan and apply to advance the turn). After this, it is no
+    // longer `step.bot_id`'s turn for that same trick position.
+    let real = next_bot_action(&game, true).unwrap().unwrap();
+    game.interact(real.1, real.0, &logger).unwrap();
+
+    // Applying the now-stale planned step must be safely DROPPED (returns None),
+    // never double-applied. (It might coincidentally still be valid if the turn
+    // wrapped to the same bot; in the 4-seat round-robin that does not happen on a
+    // single advance, so we expect a drop here.)
+    let applied = apply_planned_bot_action(&mut game, &step, true, &logger).unwrap();
+    assert!(
+        applied.is_none(),
+        "a stale planned step (world changed) must be dropped, not applied"
+    );
+}
+
+/// `classify_next_bot_work` must agree with what the planner does: when it says
+/// `None`, the planner plans nothing; when it says `Burst`/`Paceable`, the
+/// planner produces a step whose pacing matches (burst => no pause, paceable =>
+/// some pause). We sample this across the phases of a driven all-bot hand.
+#[test]
+fn test_classify_next_bot_work_agrees_with_planner() {
+    let logger = null_logger();
+    let (mut game, _bot_ids) = setup_all_bot_game(&logger);
+
+    let mut saw_burst = false;
+    let mut saw_paceable = false;
+
+    for _ in 0..20_000 {
+        if let GameState::Play(p) = &game.dump_state().unwrap() {
+            if p.game_finished() {
+                break;
+            }
+        }
+
+        let work = classify_next_bot_work(&game, true).unwrap();
+        let planned = plan_next_bot_action(&game, true).unwrap();
+
+        match work {
+            NextBotWork::None => {
+                assert!(
+                    planned.is_none(),
+                    "classify said None but the planner produced a step"
+                );
+                // No bot work (e.g. parked / human turn — impossible all-bot, so
+                // this is game-over-ish); stop.
+                break;
+            }
+            NextBotWork::Burst => {
+                saw_burst = true;
+                let step = planned.expect("classify said Burst but planner produced nothing");
+                assert!(
+                    step.pause.is_none(),
+                    "a burst step must carry no pause, got {:?}",
+                    step.pause
+                );
+            }
+            NextBotWork::Paceable => {
+                saw_paceable = true;
+                let step = planned.expect("classify said Paceable but planner produced nothing");
+                assert!(
+                    step.pause.is_some(),
+                    "a paceable step must carry a pause disposition"
+                );
+            }
+        }
+
+        // Advance the real game one bot step (using the blocking burst for cheap
+        // steps, else applying the single planned paceable step) so we walk the
+        // phases.
+        match work {
+            NextBotWork::Burst => {
+                let made = advance_bots_burst_unpaced(&mut game, &logger).unwrap();
+                let _ = made;
+            }
+            NextBotWork::Paceable => {
+                let step = plan_next_bot_action(&game, true).unwrap().unwrap();
+                apply_planned_bot_action(&mut game, &step, true, &logger).unwrap();
+            }
+            NextBotWork::None => break,
+        }
+    }
+
+    assert!(saw_burst, "expected at least one burst step (bot draws)");
+    assert!(
+        saw_paceable,
+        "expected at least one paceable step (bid/play/etc.)"
     );
 }

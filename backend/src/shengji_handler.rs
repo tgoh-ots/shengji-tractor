@@ -4,7 +4,11 @@ use anyhow::bail;
 use slog::{debug, error, info, o, Logger};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use shengji_core::bot::BotPause;
+use shengji_core::bot::{
+    apply_planned_bot_action, classify_next_bot_work, plan_next_bot_action, BotPause, BotStep,
+    NextBotWork,
+};
+use shengji_core::game_state::GameState;
 use shengji_core::interactive::{Action, InteractiveGame};
 use shengji_mechanics::types::PlayerID;
 use shengji_types::GameMessage;
@@ -514,35 +518,20 @@ async fn handle_user_action<S: Storage<VersionedGame, E> + 'static, E: Send + 's
                 },
                 other => other,
             };
-            // The bot driver may STOP early at a human-visible beat so a human can
-            // follow the game one bot move at a time: either a bot just won a
-            // now-complete trick (we DEFER clearing it so the full 4-card trick is
-            // visible) or a bot just made a single meaningful move (play / bid /
-            // kitty / landlord decision) after which we pause briefly. The closure
-            // records WHICH beat it stopped on (if any); we read it after the lock
-            // is released (and the just-produced state has been published).
-            let pause_kind: Arc<std::sync::Mutex<Option<BotPause>>> =
-                Arc::new(std::sync::Mutex::new(None));
-            let pause_in_op = pause_kind.clone();
+            // Apply ONLY the human's action under the game lock (a cheap
+            // operation), publish the resulting state, and release the lock. The
+            // (potentially CPU-heavy) bot move computation is then driven OFF the
+            // lock by `drive_bots_non_blocking` below, so chat and other players'
+            // actions keep flowing while a Hard/Expert bot "thinks". See that
+            // function for the snapshot -> spawn_blocking compute -> apply-under-
+            // lock-with-recheck model.
             let op_logger = logger.clone();
             execute_operation(
                 ws_id,
                 room_name,
                 backend_storage.clone(),
                 move |game, _, _| {
-                    // Apply the human's action, then let any bot players that now
-                    // need to act take their turns. Both happen within this single
-                    // locked operation so the moves are applied atomically and the
-                    // combined set of broadcasts is published together. We pass
-                    // `defer_bot_trick_finish = true` so the bot driver pauses at
-                    // the first human-visible beat (handled below) instead of
-                    // bursting the whole sequence.
-                    let mut broadcasts = game.interact(action, caller, &op_logger)?;
-                    let result = shengji_core::bot::advance_bots(game, &op_logger, true)?;
-                    if let Some(pause) = result.pause {
-                        *pause_in_op.lock().unwrap() = Some(pause);
-                    }
-                    broadcasts.extend(result.messages);
+                    let broadcasts = game.interact(action, caller, &op_logger)?;
                     Ok(broadcasts
                         .into_iter()
                         .map(|(data, message)| GameMessage::Broadcast { data, message })
@@ -552,29 +541,25 @@ async fn handle_user_action<S: Storage<VersionedGame, E> + 'static, E: Send + 's
             )
             .await;
 
-            // If the bot driver paused at a human-visible beat, the just-produced
-            // state has now been published (lock released). Spawn a detached task
-            // that waits the appropriate beat WITHOUT holding the lock and then
-            // resumes the bots (pausing again at each subsequent beat).
+            // Drive any bots that now need to act WITHOUT holding the game lock
+            // across their computation. Each bot move is selected on a blocking
+            // worker from a cloned snapshot, then applied under a brief lock with a
+            // turn/state re-check. Pacing (the trick-clear and per-action beats)
+            // and the done-bidding park are preserved.
             //
             // When a BOT holds the standing bid after the deck is drawn, the driver
-            // instead PARKS (no pause, no resume task) until every human seat clicks
-            // "Done bidding". That click is an ordinary `Action::MarkBiddingDone`
-            // which flows through this same branch and re-runs the bot driver — so
-            // once the LAST human is done, the bot finalizes itself here with no
-            // timer and no forced finalization needed. An all-bot table has zero
-            // humans, so "all humans done" is trivially true and the bot proceeds
-            // immediately (no deadlock).
-            let initial_pause = *pause_kind.lock().unwrap();
-            if initial_pause.is_some() {
-                tokio::task::spawn(resume_deferred_bots_after_delay(
-                    logger,
-                    ws_id,
-                    room_name.to_string(),
-                    backend_storage,
-                    initial_pause,
-                ));
-            }
+            // PARKS (plans nothing) until every human seat clicks "Done bidding".
+            // That click is an ordinary `Action::MarkBiddingDone` which flows
+            // through this same branch and re-runs the driver — so once the LAST
+            // human is done, the bot finalizes itself here, with no timer and no
+            // forced finalization. An all-bot table has zero humans, so "all humans
+            // done" is trivially true and the bot proceeds immediately (no deadlock).
+            tokio::task::spawn(drive_bots_non_blocking(
+                logger,
+                ws_id,
+                room_name.to_string(),
+                backend_storage,
+            ));
         }
     }
     Ok(())
@@ -608,86 +593,222 @@ fn bot_pause(kind: BotPause) -> std::time::Duration {
     std::time::Duration::from_millis(ms)
 }
 
-/// Detached task that resumes the deferred bot driver after a human-visible beat.
+/// Read a CLONE of the current game state out of storage under a brief lock,
+/// without mutating or re-versioning it. Used by `drive_bots_non_blocking` to
+/// snapshot the state the bot needs BEFORE computing its move off the lock.
+/// Returns `None` if the read failed (e.g. the room vanished).
+async fn snapshot_state<S: Storage<VersionedGame, E> + 'static, E: Send + 'static>(
+    ws_id: usize,
+    room_name: &str,
+    backend_storage: S,
+) -> Option<GameState> {
+    let captured: Arc<std::sync::Mutex<Option<GameState>>> = Arc::new(std::sync::Mutex::new(None));
+    let sink = captured.clone();
+    // `execute_immutable_operation` runs the closure with `&InteractiveGame` and
+    // does NOT bump the version or publish a State, so this is a pure read.
+    execute_immutable_operation(
+        ws_id,
+        room_name,
+        backend_storage,
+        move |game, _| {
+            if let Ok(state) = game.dump_state() {
+                *sink.lock().unwrap() = Some(state);
+            }
+            Ok(vec![])
+        },
+        "snapshot game state",
+    )
+    .await;
+    let state = captured.lock().unwrap().take();
+    state
+}
+
+/// Detached task that drives any bots that need to act AFTER a user action, WITHOUT
+/// holding the game lock across the (potentially CPU-heavy) move computation. This
+/// is what keeps chat and other players' actions responsive while a Hard/Expert bot
+/// "thinks".
 ///
-/// This is the second half of the production deferral (see
-/// `shengji_core::bot::advance_bots` with `defer_bot_trick_finish = true`). It is
-/// spawned ONLY after the just-produced state has already been published and the
-/// game lock released, so the human sees that state during the pause. Every sleep
-/// happens WITHOUT holding the lock.
+/// Each iteration has two parts:
 ///
-/// It loops because the bot driver pauses at EACH beat: after one resume,
-/// `finish_deferred_bot_trick` keeps driving the bots and may stop again at the
-/// next beat (the next bot move, or the next bot-won trick), reporting WHICH beat
-/// via [`AdvanceResult::pause`]. We sleep for the duration matching the CURRENT
-/// pending beat, resume once, then continue with whatever beat the resume reports
-/// next. The loop ends as soon as a resume reports no further beat (human's turn,
-/// game over, no progress).
+/// **(A) Cheap burst, under one brief lock.** `advance_bots_burst_unpaced` applies
+/// every UN-PACED bot step — bot draws and reset confirmations — in a SINGLE locked
+/// operation (one State publish instead of ~75 during the deal). These selections
+/// are cheap (never the Play-phase search), so doing them under the lock is fine and
+/// avoids flooding clients with one State per draw. It stops as soon as the next bot
+/// step is a paceable / trick-clear beat, a human's turn, or nothing.
 ///
-/// Safety: each resume re-derives, under the lock, what the bot driver wants to
-/// do RIGHT NOW. If a human (or any other event) already finished the trick / it
-/// is no longer a bot's turn, `finish_deferred_bot_trick` applies no stale move —
-/// so there is no double-apply even if the world changed during the delay. The
-/// iteration bound caps the number of chained beats within a single hand so a
-/// wedged state can never spin this task forever.
+/// **(B) One paceable step, computed OFF the lock.** For the next paceable beat (a
+/// bid, a kitty/reveal/exchange decision, a play, or a bot finishing a trick) we:
+///   1. **Snapshot** the state under a brief lock (a cheap clone), release the lock;
+///   2. **Compute** the move with `plan_next_bot_action` on a
+///      `tokio::task::spawn_blocking` worker — OFF the async runtime AND off the lock
+///      — so neither the lock nor an async worker is blocked for the up-to-1s search;
+///   3. **Apply** the precomputed step under a brief lock via
+///      `apply_planned_bot_action`, which first cheaply re-checks (no policy/search)
+///      that the SAME bot is still responsible for the SAME kind of action. If the
+///      world moved on during the off-lock compute (a human finished the trick, a
+///      takeback/reset happened, the game ended, ...), the stale step is DROPPED and
+///      we re-snapshot/re-plan on the next loop — no double-apply.
 ///
-/// Note: the draw-phase "a bot holds the standing bid, awaiting the humans"
-/// situation is NOT handled here. The bot driver simply PARKS there until every
-/// human clicks "Done bidding"; the last such click is an ordinary user action
-/// that re-runs the driver and finalizes the bot. There is no timer and no forced
-/// finalization, so this task only ever paces normal per-action / trick beats.
-async fn resume_deferred_bots_after_delay<
-    S: Storage<VersionedGame, E> + 'static,
-    E: Send + 'static,
->(
+/// Pacing is preserved exactly:
+///
+/// * `BotStep::pause == Some(TrickClear)` — a bot is about to finish a trick it
+///   won. The completed 4-card trick is already on the table (published by the prior
+///   play). We sleep the longer trick-clear beat WITHOUT the lock, THEN apply the
+///   `EndTrick`.
+/// * `Some(Action)` — apply the move, publish, then sleep the shorter per-action
+///   beat WITHOUT the lock.
+///
+/// The done-bidding PARK is preserved: when a bot holds the standing bid and a human
+/// could still outbid, both the burst and `plan_next_bot_action` make no move, so
+/// this task simply ends. The last human's "Done bidding" click re-runs the driver
+/// via the ordinary action path. The iteration bound caps chained steps within a
+/// hand so a wedged state can never spin this task forever.
+async fn drive_bots_non_blocking<S: Storage<VersionedGame, E> + 'static, E: Send + 'static>(
     logger: Logger,
     ws_id: usize,
     room_name: String,
     backend_storage: S,
-    initial_pause: Option<BotPause>,
 ) {
-    // A generous bound on chained beats within a single hand (many short
-    // per-action pauses can chain across a multi-trick run), so a wedged state
-    // can never spin this task forever. `pending` carries the NEXT beat to sleep
-    // on; the loop ends as soon as a resume reports no further beat.
-    let mut pending = initial_pause;
-    for _ in 0..4096 {
-        let pause = match pending {
-            Some(pause) => pause,
+    // A generous bound on chained paceable bot steps within a single hand (many
+    // short per-action pauses can chain across a multi-trick run), so a wedged
+    // state can never spin this task forever.
+    for _ in 0..8192 {
+        // Snapshot the current state with a read-only lock (NO version bump, NO
+        // State republish), then classify the next bot step cheaply (no search).
+        // This lets us avoid touching the WRITE lock — and thus avoid a spurious
+        // State republish — whenever no bot has anything to do.
+        let snapshot = match snapshot_state(ws_id, &room_name, backend_storage.clone()).await {
+            Some(s) => s,
             None => break,
         };
-        tokio::time::sleep(bot_pause(pause)).await;
+        let work = {
+            let game = InteractiveGame::new_from_state(snapshot.clone());
+            classify_next_bot_work(&game, true).unwrap_or(NextBotWork::None)
+        };
 
-        // The beat the NEXT resume stops on (if any), captured out of the
-        // locked closure so we can pick the right sleep for the following loop.
-        let next_pause: Arc<std::sync::Mutex<Option<BotPause>>> =
-            Arc::new(std::sync::Mutex::new(None));
-        let next_in_op = next_pause.clone();
+        match work {
+            // Nothing for a bot to do (human's turn, parked, game over). Stop
+            // WITHOUT writing, so we don't republish an unchanged State.
+            NextBotWork::None => break,
+            // The next step(s) are cheap un-paced burst steps (bot draws / reset).
+            // Apply them all under ONE lock (one State publish for the whole
+            // burst), then loop to re-classify.
+            NextBotWork::Burst => {
+                let burst_logger = logger.clone();
+                let burst_made_progress = Arc::new(std::sync::Mutex::new(false));
+                let progress_in_op = burst_made_progress.clone();
+                execute_operation(
+                    ws_id,
+                    &room_name,
+                    backend_storage.clone(),
+                    move |game, _, _| {
+                        let broadcasts =
+                            shengji_core::bot::advance_bots_burst_unpaced(game, &burst_logger)?;
+                        // The burst may legitimately produce no broadcasts (draws
+                        // emit none) yet still apply moves; detect progress by
+                        // whether the next work is no longer a burst.
+                        if !matches!(
+                            classify_next_bot_work(game, true).unwrap_or(NextBotWork::None),
+                            NextBotWork::Burst
+                        ) {
+                            *progress_in_op.lock().unwrap() = true;
+                        }
+                        Ok(broadcasts
+                            .into_iter()
+                            .map(|(data, message)| GameMessage::Broadcast { data, message })
+                            .collect())
+                    },
+                    "drive bots (burst)",
+                )
+                .await;
+                // If the burst couldn't drain (e.g. a stale classification raced an
+                // outside change), stop rather than spin republishing.
+                if !*burst_made_progress.lock().unwrap() {
+                    break;
+                }
+                continue;
+            }
+            // The next step is a paceable / trick-clear beat: fall through to the
+            // off-lock compute + apply path below.
+            NextBotWork::Paceable => {}
+        }
+
+        // Compute the next (paceable / trick-clear) bot step OFF the lock and OFF
+        // the async runtime. The determinized search is CPU-bound with no await
+        // points, so it must run on a blocking worker to avoid starving an async
+        // worker thread.
+        let plan_logger = logger.clone();
+        let planned = tokio::task::spawn_blocking(move || {
+            let game = InteractiveGame::new_from_state(snapshot);
+            match plan_next_bot_action(&game, true) {
+                Ok(step) => step,
+                Err(e) => {
+                    error!(plan_logger, "Failed to plan bot action"; "error" => format!("{e:?}"));
+                    None
+                }
+            }
+        })
+        .await;
+
+        let step: BotStep = match planned {
+            Ok(Some(step)) => step,
+            // No bot needs to act (human's turn, parked, game over), or the
+            // blocking task itself failed to join.
+            Ok(None) => break,
+            Err(e) => {
+                error!(logger, "Bot planning task panicked"; "error" => format!("{e:?}"));
+                break;
+            }
+        };
+
+        // For a trick-clear beat, the completed trick is already on the table
+        // (published by the prior play). Wait the longer beat WITHOUT the lock
+        // BEFORE applying the EndTrick, so the human sees the full trick.
+        if matches!(step.pause, Some(BotPause::TrickClear)) {
+            tokio::time::sleep(bot_pause(BotPause::TrickClear)).await;
+        }
+
+        // Apply the precomputed step under a brief lock, re-checking the world
+        // hasn't moved on. This publishes the new state and broadcasts.
+        let pause_after_apply = step.pause;
         let op_logger = logger.clone();
+        // `apply_planned_bot_action` returns `None` when it DROPS the step (the
+        // world changed since the snapshot); `Some(..)` when it applies (the
+        // broadcast list may be empty for a kitty/exchange step that still mutates).
+        let applied = Arc::new(std::sync::Mutex::new(false));
+        let applied_in_op = applied.clone();
         execute_operation(
             ws_id,
             &room_name,
             backend_storage.clone(),
-            move |game, _, _| {
-                // Re-check + apply under the lock. `finish_deferred_bot_trick`
-                // is idempotent: it finishes a still-pending bot-won trick if
-                // any, else advances the next single meaningful bot move, then
-                // keeps deferring — reporting the next beat to wait on.
-                let result = shengji_core::bot::finish_deferred_bot_trick(game, &op_logger)?;
-                if let Some(pause) = result.pause {
-                    *next_in_op.lock().unwrap() = Some(pause);
+            move |game, _, _| match apply_planned_bot_action(game, &step, true, &op_logger)? {
+                Some(broadcasts) => {
+                    *applied_in_op.lock().unwrap() = true;
+                    Ok(broadcasts
+                        .into_iter()
+                        .map(|(data, message)| GameMessage::Broadcast { data, message })
+                        .collect())
                 }
-                Ok(result
-                    .messages
-                    .into_iter()
-                    .map(|(data, message)| GameMessage::Broadcast { data, message })
-                    .collect())
+                None => Ok(vec![]),
             },
-            "resume deferred bots",
+            "drive bots (non-blocking)",
         )
         .await;
 
-        pending = *next_pause.lock().unwrap();
+        // If the precomputed step was dropped by the re-check (the world changed
+        // out from under us, e.g. a human finished the trick during the compute),
+        // re-burst/re-snapshot and re-plan rather than pausing on a stale beat.
+        if !*applied.lock().unwrap() {
+            continue;
+        }
+
+        // Per-action beat: pause briefly WITHOUT the lock so the human can register
+        // the single move before the next bot acts. Trick-clear already slept above
+        // (before applying).
+        if matches!(pause_after_apply, Some(BotPause::Action)) {
+            tokio::time::sleep(bot_pause(BotPause::Action)).await;
+        }
     }
 }
 
