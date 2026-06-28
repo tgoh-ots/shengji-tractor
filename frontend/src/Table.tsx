@@ -2,6 +2,7 @@ import * as React from "react";
 import classNames from "classnames";
 import { Player, BotRegistration, GameMode } from "./gen-types";
 import { useTranslation } from "./i18n";
+import { SeatPlay, TrickFootprint, winnerSuffix } from "./Trick";
 
 import type { JSX } from "react";
 
@@ -43,8 +44,26 @@ interface IProps {
   selfId: number;
   /** Status rail rendered across the top of the table. */
   status?: React.ReactNode;
-  /** The center trick area. */
-  center: React.ReactNode;
+  /**
+   * Fallback center content, used only when `compass` is not supplied (e.g. a
+   * spectator view). When `compass` is present the cards are placed at each
+   * seat instead and the center stays empty.
+   */
+  center?: React.ReactNode;
+  /**
+   * The current trick laid out as a COMPASS: each player's played cards are
+   * shown at their own compass point (you = south, across = north, sides =
+   * east/west) directly beside their seat pill, meeting toward the center —
+   * like a real card table. The center of the cross stays empty.
+   *
+   *  - `plays`   — per-player rendered play (cards only; see Trick.buildSeatPlays)
+   *  - `uniform` — the footprint every slot adopts (= the largest play this
+   *                trick) so all four are the same size and the cross is balanced
+   */
+  compass?: {
+    plays: { [id: number]: SeatPlay };
+    uniform: TrickFootprint;
+  };
 }
 
 const SEAT_ORDER: SeatKey[] = ["bottom", "left", "top", "right"];
@@ -94,6 +113,14 @@ const Seat = (props: {
   isSelf: boolean;
   isTurn: boolean;
   bot?: BotRegistration;
+  /**
+   * This player's played cards for the current trick, rendered at their compass
+   * point beside the pill. Undefined when there's no trick in progress; null/
+   * absent `node` when the player hasn't played yet (an empty slot is kept so
+   * the cross stays symmetric). `uniform` sizes every slot to the largest play.
+   */
+  play?: SeatPlay;
+  uniform?: TrickFootprint;
 }): JSX.Element | null => {
   const { t } = useTranslation();
   if (props.player === null) {
@@ -118,12 +145,36 @@ const Seat = (props: {
           ? "team.opponentTitle"
           : "team.unknownTitle";
 
+  // When a trick is in progress, every seat reserves a uniformly-sized play
+  // slot (= the largest play this trick) so the compass stays balanced even if
+  // one player throws a pair/tractor against three singles. The CSS variables
+  // drive the slot's min-width / min-height (see .sj-seat-play in style.css).
+  const hasTrick = props.uniform !== undefined;
+  const slotStyle =
+    props.uniform !== undefined
+      ? ({
+          "--sj-play-cols": props.uniform.cols,
+          "--sj-play-rows": props.uniform.rows,
+        } as React.CSSProperties)
+      : undefined;
+
+  const playSlot = hasTrick ? (
+    <div className="sj-seat-play" style={slotStyle}>
+      {props.play?.node}
+      {(props.play?.winning === true || props.play?.better === true) && (
+        <span className="sj-seat-play-marker" aria-hidden="true">
+          {winnerSuffix(props.play.winning, props.play.better)}
+        </span>
+      )}
+    </div>
+  ) : null;
+
   // Team membership is conveyed purely by the seat pill's COLOR (amber =
   // declarer's side, cyan = opponents, dashed slate = unrevealed) plus the 👑
   // on the declarer and a single "You" tag on the local player's own seat.
   // No redundant per-seat role text — that kept the felt cluttered.
-  return (
-    <div className={classNames("sj-seat", SEAT_CLASS[props.seat])}>
+  const pill = (
+    <>
       <span
         className={classNames("sj-seat-name", ROLE_CLASS[role], {
           "is-self": props.isSelf,
@@ -149,6 +200,29 @@ const Seat = (props: {
       )}
       <span className="sr-only">{t(roleTitleKey)}</span>
       {props.isTurn && <span className="sr-only">{t("rail.yourTurn")}</span>}
+    </>
+  );
+
+  // Order the pill and the card so the pill sits on the OUTER edge of the table
+  // and the cards reach toward the center — south reads pill-below-card, the
+  // other three read pill-then-card (the per-seat CSS flips east/west axis).
+  return (
+    <div
+      className={classNames("sj-seat", SEAT_CLASS[props.seat], {
+        "sj-seat--has-play": hasTrick,
+      })}
+    >
+      {props.seat === "bottom" ? (
+        <>
+          {playSlot}
+          {pill}
+        </>
+      ) : (
+        <>
+          {pill}
+          {playSlot}
+        </>
+      )}
     </div>
   );
 };
@@ -196,9 +270,15 @@ const Table = (props: IProps): JSX.Element => {
     ({ player }) => roleOf(player.id) === "unknown",
   );
 
+  const compass = props.compass;
+
   return (
     <div className="sj-table-wrap">
-      <div className="sj-table" role="group" aria-label="game table">
+      <div
+        className={classNames("sj-table", { "sj-table--compass": compass })}
+        role="group"
+        aria-label="game table"
+      >
         {props.status !== undefined && (
           <div className="sj-table-status">{props.status}</div>
         )}
@@ -211,9 +291,19 @@ const Table = (props: IProps): JSX.Element => {
             isSelf={player.id === props.selfId}
             isTurn={player.id === props.next}
             bot={botById[player.id]}
+            play={compass?.plays[player.id]}
+            uniform={compass?.uniform}
           />
         ))}
-        <div className="sj-center">{props.center}</div>
+        {/* The center of the cross stays empty — the played cards live at each
+         * seat's compass point. A small hub marks the meeting point. */}
+        <div className="sj-center" aria-hidden={compass !== undefined}>
+          {compass !== undefined ? (
+            <span className="sj-compass-hub" />
+          ) : (
+            props.center
+          )}
+        </div>
       </div>
       {/* One small, fixed legend in its own row directly under the felt. It only
        * decodes the team colors — no per-seat duplication, no "you're on the X

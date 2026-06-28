@@ -192,16 +192,17 @@ const Players = (props: IProps): JSX.Element => {
           const isNext = player.id === next;
           const bot = botById[player.id];
 
-          // Only color by fixed team when a landlord hasn't taken over the
-          // highlight (continuation games can pre-set a landlord).
-          const teamRole =
-            showLobbyTeams && !isLandlord ? teamRoleOfSeat(seatIndex) : null;
+          // Color every seat by its fixed team (seat-index parity). A
+          // continuation game can pre-set a landlord, but the fixed partnerships
+          // don't change, so the team colors must stay consistent — the declarer
+          // is marked by the "Declarer" text, not by the landlord highlight.
+          const teamRole = showLobbyTeams ? teamRoleOfSeat(seatIndex) : null;
 
           const className = classNames(
             "player relative flex min-w-[8.5rem] flex-col rounded-xl border px-3 py-2 text-sm transition",
             {
               "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_14%,transparent)]":
-                isLandlord,
+                isLandlord && !showLobbyTeams,
               "sj-lobby-team-self": teamRole === "self-team",
               "sj-lobby-team-opponent": teamRole === "opponent",
               "border-[var(--border-subtle)] bg-[var(--surface-panel-soft)]":

@@ -12,7 +12,7 @@ import {
 import Header from "./Header";
 import Beeper from "./Beeper";
 import Friends from "./Friends";
-import Trick from "./Trick";
+import Trick, { buildSeatPlays } from "./Trick";
 import Cards from "./Cards";
 import Points, { calculatePoints, ProgressBarDisplay } from "./Points";
 import LabeledPlay from "./LabeledPlay";
@@ -372,18 +372,12 @@ const Play = (props: IProps): JSX.Element => {
             isYourTurn={isCurrentPlayerTurn}
           />
         }
-        center={
-          <Trick
-            trick={playPhase.trick}
-            players={playPhase.propagated.players}
-            landlord={playPhase.landlord}
-            landlord_suffix={landlordSuffix}
-            landlords_team={playPhase.landlords_team}
-            next={nextPlayer}
-            name={props.name}
-            showTrickInPlayerOrder={props.showTrickInPlayerOrder}
-          />
-        }
+        compass={buildSeatPlays({
+          trick: playPhase.trick,
+          landlord: playPhase.landlord,
+          landlords_team: playPhase.landlords_team,
+          next: nextPlayer,
+        })}
       />
       <Friends gameMode={playPhase.game_mode} showPlayed={true} />
       {playPhase.removed_cards!.length > 0 ? (
