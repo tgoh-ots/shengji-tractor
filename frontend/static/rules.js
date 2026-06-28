@@ -82,7 +82,10 @@
     var el = document.getElementById(id);
     if (!el) return;
     cards.forEach(function (c) {
-      el.appendChild(makeCardEl(c.display_value, c.typ, svgMap));
+      // Look up the SVG by `value`, NOT `display_value`: the big joker's
+      // display_value is the UNCOLORED small-joker glyph (🃟), so using it would
+      // render both jokers identically. `value` (🃏) yields its colored art.
+      el.appendChild(makeCardEl(c.value, c.typ, svgMap));
     });
   }
 
