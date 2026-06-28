@@ -52,7 +52,12 @@ const broadcastHandler: WebsocketHandler = (
 // pause, so the server rejects the duplicate/early move. They alarm players for
 // no reason, so we drop them from the toast list (and only log to the console)
 // while still surfacing every genuine error.
-const BENIGN_ERROR_PATTERNS = ["out of order", "out of turn", "not your turn"];
+const BENIGN_ERROR_PATTERNS = [
+  "out of order",
+  "out of turn",
+  "not your turn",
+  "no cards left in deck",
+];
 
 const isBenignError = (err: string): boolean => {
   const e = err.toLowerCase();

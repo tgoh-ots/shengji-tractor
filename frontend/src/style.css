@@ -842,11 +842,18 @@ label {
  * cross stays balanced when one player throws a pair/tractor vs three singles.
  * ===================================================================== */
 .sj-table--compass {
-  /* A roomier center row so the four arms have space to meet in the middle. */
-  grid-template-rows: auto auto minmax(150px, 1fr) auto;
-  /* Pull the arms in toward the hub so the cross reads as a "+". */
+  /* Compact rows: the center arm only needs to clear the small (zoomed-down)
+   * trick cards, so the whole cross stays short and the local player's hand
+   * remains visible below the fold on a ~800px-tall laptop screen. */
+  grid-template-rows: auto auto auto auto;
+  row-gap: 2px;
   align-items: center;
   justify-items: center;
+  /* Trick cards are deliberately SMALLER than hand cards — they only need to be
+   * legible, not interactive. `zoom` (unlike transform: scale) also shrinks the
+   * element's LAYOUT box, so the compass actually reclaims the vertical space
+   * and the bordered play box hugs the now-smaller cards. */
+  --sj-trick-zoom: 0.52;
 }
 
 /* Each seat is a little stack of {pill, card-slot}. The flex DIRECTION orients
@@ -854,7 +861,7 @@ label {
  * cards point inward toward the hub. */
 .sj-seat--has-play {
   display: flex;
-  gap: 6px;
+  gap: 4px;
 }
 .sj-seat-top.sj-seat--has-play {
   flex-direction: column; /* pill on top, card below (pointing down to hub) */
@@ -871,33 +878,34 @@ label {
   align-items: center;
 }
 
-/* The uniformly-sized play slot. min-width / min-height are derived from the
- * largest play this trick so all four slots share one footprint. The width unit
- * (~36px) ≈ one card's exposed sliver when cards overlap; the +0.7 covers the
- * last (fully-shown) card. Height grows by row for throws that overflow. */
+/* The play slot reserves a uniform LAYOUT footprint so the four seats stay
+ * aligned (a single card and a pair occupy the same reserved slot), but it is
+ * INVISIBLE — the visible bordered box is the inner .labeled-play, which hugs
+ * just the cards. The footprint units are already in zoomed pixels (the cards
+ * inside are zoomed), so one card column ≈ 20px and one row ≈ 62px. */
 .sj-seat-play {
-  --sj-play-col-w: clamp(22px, 5.2vw, 38px);
-  --sj-play-row-h: clamp(86px, 17vw, 132px);
+  --sj-play-col-w: 20px;
+  --sj-play-row-h: 64px;
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
+  align-items: center;
   justify-content: center;
   min-width: calc((var(--sj-play-cols, 1) + 0.7) * var(--sj-play-col-w));
   min-height: calc(var(--sj-play-rows, 1) * var(--sj-play-row-h));
 }
 
-/* The play itself: cards only, centered in the slot, no name label (the seat
- * pill carries the name + team color + crown + "You" tag). The bordered box
- * grows to fill the uniform slot so all four play-AREAS are the same size — a
- * single card and a pair/tractor in the same trick occupy equal footprints. */
+/* The visible play box: cards only, no name label (the seat pill carries the
+ * name + team color + crown + "You" tag). It HUGS the cards — no flex-grow, no
+ * empty padded space above/below — so a single card gets a snug border and a
+ * pair/tractor gets a border wrapped tightly around the group. Zoomed down so
+ * trick cards read smaller than hand cards. */
 .sj-seat-play .labeled-play {
-  display: flex;
+  zoom: var(--sj-trick-zoom, 0.52);
+  display: inline-flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  flex: 1 1 auto;
   margin: 0;
-  padding: 6px;
+  padding: 6px 8px;
   background: rgba(8, 22, 21, 0.28);
   border-color: rgba(255, 255, 255, 0.1);
 }
@@ -908,19 +916,51 @@ label {
   padding-bottom: 0;
 }
 
+/* The global `.card` rule adds 20px of top margin (so dealt hand cards can drop
+ * in). Inside the compass that just inflates every play box — zero it so the
+ * border hugs the card with no empty band above. */
+.sj-seat-play .labeled-play .card {
+  margin-top: 0;
+}
+
+/* EAST / WEST multi-card plays OVERLAP into a tight fanned sliver — on top of
+ * the card's own `collapseRight` overlap, each extra card slides further left so
+ * only a thin sliver shows (like the fanned hand). This keeps the SIDE arms
+ * compact (the constraint is vertical room; NORTH/SOUTH keep their cards more
+ * spread out since horizontal space is free). The card is ~85px wide and
+ * already pulls -0.6w via collapseRight; this extra -16px tightens the fan. */
+.sj-seat-left .labeled-play .play .card + .card,
+.sj-seat-right .labeled-play .play .card + .card,
+.sj-seat-left .labeled-play .card-group .card + .card,
+.sj-seat-right .labeled-play .card-group .card + .card {
+  margin-left: -16px;
+}
+.sj-seat-left .labeled-play .card-group + .card-group,
+.sj-seat-right .labeled-play .card-group + .card-group {
+  margin-left: -16px;
+}
+
 /* The (!) winner / (-) better-player marker, tucked under the cards so it never
  * collides with a neighbouring arm. */
 .sj-seat-play-marker {
-  margin-top: 2px;
-  font-size: 0.8rem;
+  margin-top: 1px;
+  font-size: 0.78rem;
   font-weight: 700;
+  line-height: 1;
   color: var(--accent, #f59e0b);
+}
+
+/* The compass center cell only holds the tiny hub, so it must NOT reserve the
+ * tall 120px min-height the felt-cluster layout used — that was a big chunk of
+ * the wasted vertical space. */
+.sj-table--compass .sj-center {
+  min-height: 0;
 }
 
 /* A faint hub marking the center where the arms meet. Purely decorative. */
 .sj-compass-hub {
-  width: 14px;
-  height: 14px;
+  width: 10px;
+  height: 10px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
@@ -1076,13 +1116,13 @@ label {
    * fits a phone without overlapping a neighbouring arm. */
   .sj-table--compass {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) minmax(0, 1fr);
-    grid-template-rows: auto auto minmax(120px, 1fr) auto;
+    grid-template-rows: auto auto auto auto;
     grid-template-areas:
       "rail   rail   rail"
       "top    top    top"
       "left   center right"
       "bottom bottom bottom";
-    gap: 6px;
+    gap: 4px 6px;
   }
   .sj-table--compass .sj-seat-top {
     align-self: center;
@@ -1099,18 +1139,15 @@ label {
   .sj-table--compass .sj-seat-bottom {
     justify-self: center;
   }
-  /* Tighter card sliver on phones so wide throws never crowd the side arms.
-   * The cards themselves are fixed-pixel SVGs, so we also scale the rendered
-   * play down a touch on phones to keep a 3-wide throw inside its arm. */
-  .sj-table--compass .sj-seat-play {
-    --sj-play-col-w: clamp(16px, 4.6vw, 26px);
-    --sj-play-row-h: clamp(58px, 18vw, 96px);
-    gap: 4px;
+  /* On phones the trick cards shrink a little further and the reserved slot
+   * footprint tightens so a wide throw still fits its arm without crowding a
+   * neighbour. The play box still hugs its cards (no inflated boundary). */
+  .sj-table--compass {
+    --sj-trick-zoom: 0.46;
   }
-  .sj-table--compass .sj-seat-play .labeled-play {
-    transform: scale(0.74);
-    transform-origin: center;
-    padding: 3px;
+  .sj-table--compass .sj-seat-play {
+    --sj-play-col-w: 15px;
+    --sj-play-row-h: 56px;
   }
 
   .sj-seat-name {

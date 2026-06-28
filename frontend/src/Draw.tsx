@@ -39,9 +39,14 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
   }
 
   drawCard(): void {
+    // Must be our turn AND the deck must still have cards. The deck check
+    // matters because a previously-armed auto-draw timer can fire just after
+    // the deck empties — and now that the "Done bidding" window keeps the draw
+    // phase mounted with an empty deck, that stale fire would otherwise send a
+    // DrawCard the server rejects with "no cards left in deck".
     const canDraw =
       this.props.state.propagated.players[this.props.state.position].name ===
-      this.props.name;
+        this.props.name && this.props.state.deck.length > 0;
     if (this.timeout !== null) {
       this.props.clearTimeout(this.timeout);
       this.timeout = null;
