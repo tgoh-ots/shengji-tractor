@@ -65,6 +65,10 @@
         -webkit-font-smoothing: antialiased;
         text-rendering: optimizeLegibility;
         overflow-x: hidden;
+        /* Center inline card-example boxes (grouped examples flow in a row,
+         * centered); prose blocks are re-aligned left below so text reads
+         * normally. */
+        text-align: center;
       }
 
       /* One readable column: center every direct child to the same width. */
@@ -72,6 +76,22 @@
         max-width: var(--rules-maxw);
         margin-left: auto;
         margin-right: auto;
+      }
+
+      /* Prose + headings read left-aligned; only the card examples center. */
+      body.rules p,
+      body.rules ul,
+      body.rules ol,
+      body.rules li,
+      body.rules h2,
+      body.rules h3,
+      body.rules h4,
+      body.rules h5,
+      body.rules table,
+      body.rules > label,
+      body.rules > select,
+      body.rules .labeled-play .label {
+        text-align: left;
       }
 
       body.rules h1 {
@@ -239,17 +259,17 @@
        * directly above their label rather than floating far left.
        * --------------------------------------------------------------- */
       body.rules .labeled-play {
-        display: flex;
+        display: inline-flex;
         flex-direction: column;
         align-items: flex-start;
-        width: fit-content;
-        margin: 0 auto 1rem;
+        vertical-align: top;
+        margin: 0 0.35rem 1rem;
         padding: 0.6rem 0.7rem 0.6rem;
         background: var(--rules-surface);
         border: 1px solid var(--rules-line);
         border-radius: 0.75rem;
         box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
-        max-width: min(100%, 52rem);
+        max-width: min(100%, 60rem);
       }
       body.rules .labeled-play .play {
         display: flex;
