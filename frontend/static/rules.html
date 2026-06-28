@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
   <head>
-    <title>升级 / 找朋友 Rules</title>
+    <title>Tractor / Finding Friends Rules</title>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="stylesheet" type="text/css" href="style.css" />
@@ -154,85 +154,15 @@
       }
 
       /* ---------------------------------------------------------------
-       * CSS-ONLY game-mode switch (Tractor vs Finding Friends).
+       * Finding-Friends-only content.
        *
-       * Two hidden radio inputs (#mode-tractor / #mode-friends) live at the
-       * top of <body>, immediately followed by the .rules-tabs label bar and
-       * then all the page content (including the .ff-only blocks). The
-       * :checked state of the radios drives BOTH the active-tab styling and
-       * the visibility of the Finding-Friends-only material via ~ sibling
-       * selectors — no JavaScript required.
+       * The page is a single continuous read: the base (Tractor) rules are
+       * always shown, and the Finding-Friends-specific material lives inline in
+       * a distinct, always-visible callout (.ff-section) so it is obvious that
+       * those instructions apply only to the Finding Friends variant. There is
+       * no mode toggle.
        * --------------------------------------------------------------- */
-      .rules-mode-input {
-        position: absolute;
-        width: 1px;
-        height: 1px;
-        margin: -1px;
-        padding: 0;
-        border: 0;
-        clip: rect(0 0 0 0);
-        clip-path: inset(50%);
-        overflow: hidden;
-        white-space: nowrap;
-      }
-
-      .rules-tabs {
-        display: flex;
-        justify-content: center;
-        gap: 0.4rem;
-        flex-wrap: wrap;
-        margin: 0 auto 1.5rem;
-        padding: 0.35rem;
-        width: fit-content;
-        max-width: 100%;
-        border-radius: 999px;
-        background: var(--rules-surface);
-        border: 1px solid var(--rules-line);
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
-      }
-      .rules-tab {
-        display: inline-block;
-        appearance: none;
-        border: none;
-        background: transparent;
-        color: var(--rules-ink-soft);
-        font-family: inherit;
-        font-size: 0.98rem;
-        font-weight: 700;
-        line-height: 1.2;
-        padding: 0.55rem 1.1rem;
-        border-radius: 999px;
-        cursor: pointer;
-        transition:
-          background 120ms ease,
-          color 120ms ease;
-        user-select: none;
-      }
-      .rules-tab:hover {
-        color: var(--rules-ink);
-      }
-      /* Active-tab highlight driven by the checked radio. */
-      #mode-tractor:checked ~ .rules-tabs label[for="mode-tractor"],
-      #mode-friends:checked ~ .rules-tabs label[for="mode-friends"] {
-        background: var(--rules-accent);
-        color: var(--rules-accent-ink);
-      }
-      /* Keyboard focus ring on the active label for accessibility. */
-      .rules-mode-input:focus-visible ~ .rules-tabs label {
-        outline: none;
-      }
-      #mode-tractor:focus-visible ~ .rules-tabs label[for="mode-tractor"],
-      #mode-friends:focus-visible ~ .rules-tabs label[for="mode-friends"] {
-        outline: 2px solid var(--rules-accent);
-        outline-offset: 2px;
-      }
-
-      /* Finding-Friends-only content: hidden in Tractor mode, revealed (with a
-       * distinct callout treatment) when the Finding Friends radio is checked. */
       .ff-only {
-        display: none;
-      }
-      #mode-friends:checked ~ .ff-only {
         display: block;
       }
       .ff-section {
@@ -422,26 +352,6 @@
     </style>
   </head>
   <body id="body" class="rules lang-en four-color">
-    <!--
-      CSS-only game-mode switch. These two hidden radios sit at the top of
-      <body> so their :checked state can drive (via ~ sibling selectors) both
-      the active-tab highlight in .rules-tabs and the visibility of every
-      .ff-only block later in the document — no JavaScript needed. rules.js
-      only checks #mode-friends when the URL carries ?mode=friends.
-    -->
-    <input
-      type="radio"
-      name="rules-mode"
-      id="mode-tractor"
-      class="rules-mode-input"
-      checked
-    />
-    <input
-      type="radio"
-      name="rules-mode"
-      id="mode-friends"
-      class="rules-mode-input"
-    />
     <h1>
       <span class="lang-zh">升级 与 找朋友 规则</span>
       <span class="lang-en">Tractor &amp; Finding Friends Rules</span>
@@ -453,20 +363,11 @@
       >
       <span class="lang-en"
         >Tractor and Finding Friends — a guide to the popular Chinese
-        trick-taking card game played on this site.</span
+        trick-taking card game played on this site. The base rules below apply to
+        Tractor; the highlighted "Finding Friends only" callout marks the extra
+        rules that apply to the Finding Friends variant.</span
       >
     </p>
-
-    <div class="rules-tabs" aria-label="Rule set">
-      <label class="rules-tab" for="mode-tractor">
-        <span class="lang-zh">升级（拖拉机）</span>
-        <span class="lang-en">Tractor</span>
-      </label>
-      <label class="rules-tab" for="mode-friends">
-        <span class="lang-zh">找朋友</span>
-        <span class="lang-en">Finding Friends</span>
-      </label>
-    </div>
 
     <p>
       <span class="lang-en"
@@ -486,10 +387,10 @@
 
     <p>
       <span class="lang-en"
-        >升级 is a family of trick-taking card games popular in China. It's also
-        known as tractor (拖拉机), 40 points (四十分), 80 points (八十分),
-        playing for 100 points (打百分), finding friends (找朋友), among others.
-        You can <a target="_blank" href="../">play online here</a>.</span
+        >Tractor is a family of trick-taking card games popular in China. It's
+        also known as tractor, 40 points, 80 points, playing for 100 points,
+        finding friends, among others. You can
+        <a target="_blank" href="../">play online here</a>.</span
       >
       <span class="lang-zh"
         >升级 是一类流行于中国的接牌游戏，又称
@@ -883,9 +784,9 @@
     <p>
       <span class="lang-en"
         >The defending team is determined by a designated leader of the team
-        (当庄). In Tractor, the teams are fixed and the leader rotates among the
-        winning team. In Finding Friends, the leader rotates among the team that
-        won the previous round, but the teams are fluid and change from
+        (the declarer). In Tractor, the teams are fixed and the leader rotates
+        among the winning team. In Finding Friends, the leader rotates among the
+        team that won the previous round, but the teams are fluid and change from
         round-to-round.</span
       >
       <span class="lang-zh"
@@ -896,10 +797,10 @@
     </p>
     <p>
       <span class="lang-en"
-        >The leader (whoever is 当庄) of the team gets an additional advantage at
-        the beginning of the game: they can see the extra "bottom cards" (the
-        bottom / 底牌) and exchange them for cards in their hand. Otherwise, all
-        players are the same, and teams only matter for scoring.</span
+        >The leader (whoever is the declarer) of the team gets an additional
+        advantage at the beginning of the game: they can see the extra "bottom
+        cards" (the bottom) and exchange them for cards in their hand. Otherwise,
+        all players are the same, and teams only matter for scoring.</span
       >
       <span class="lang-zh"
         >庄家（当庄）在开局时有一项额外优势：他们可以看到额外的“底牌”，并用手牌进行交换。除此之外，所有玩家都一样，队伍只在计分时起作用。</span
@@ -1011,8 +912,9 @@
     <p>
       <span class="lang-en"
         >If this is the first round being played, the winner of the bid is also
-        the leader of the defending team (当庄). Otherwise, the only consequence
-        of the bidding process is setting the trump specification.</span
+        the leader of the defending team (the declarer). Otherwise, the only
+        consequence of the bidding process is setting the trump
+        specification.</span
       >
       <span class="lang-zh"
         >如果这是第一局，叫牌获胜者也是防守方的庄家（当庄）。否则，叫牌过程的唯一作用就是确定主牌设定。</span
@@ -1026,10 +928,10 @@
     <p>
       <span class="lang-en"
         >After the drawing phase is completed, 4 to 8 cards are left in the bottom
-        of the draw pile and become the bottom cards (底牌). For example, in a
+        of the draw pile and become the bottom cards. For example, in a
         four-player game, there will be 8 cards left; in a five-player game, there
         will be 6. These cards are made available for the leader of the defending
-        team (当庄) to pick up.</span
+        team (the declarer) to pick up.</span
       >
       <span class="lang-zh"
         >摸牌阶段结束后，牌堆底部会剩下 4 到 8 张牌，成为底牌。例如，四人局会剩

@@ -21,7 +21,8 @@ import type { JSX } from "react";
 const Confetti = React.lazy(async () => await import("./Confetti"));
 
 const Brand = ({ onGoHome }: { onGoHome: () => void }): JSX.Element => {
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
+  const isZh = lang === "zh";
   return (
     <h1 className="m-0 max-w-[min(100%,11rem)] text-xl font-bold leading-tight tracking-tight sm:max-w-none sm:text-3xl">
       <button
@@ -31,12 +32,16 @@ const Brand = ({ onGoHome }: { onGoHome: () => void }): JSX.Element => {
         aria-label={t("brand.home")}
         className="m-0 cursor-pointer border-0 bg-transparent p-0 text-left font-bold leading-tight tracking-tight text-[var(--text-on-felt)] transition-opacity hover:opacity-80 focus-visible:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-transparent"
       >
-        升级 <span className="text-[var(--accent)]">Tractor</span>
+        {isZh && "升级 "}
+        <span className="text-[var(--accent)]">{t("brand.tractor")}</span>
         <span className="mx-2 hidden text-[var(--text-on-felt-soft)] sm:inline">
           ·
         </span>
         <span className="hidden sm:inline">
-          找朋友 <span className="text-[var(--accent)]">Finding Friends</span>
+          {isZh && "找朋友 "}
+          <span className="text-[var(--accent)]">
+            {t("brand.findingFriends")}
+          </span>
         </span>
       </button>
     </h1>

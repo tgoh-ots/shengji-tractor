@@ -20,6 +20,7 @@ const en: Dict = {
   // App shell / generic
   "app.title.tractor": "Tractor",
   "app.title.findingFriends": "Finding Friends",
+  "app.documentTitle": "Play Tractor / Finding Friends online!",
   "app.welcome":
     "Welcome! This website helps you play 升级 / Tractor / 找朋友 / Finding Friends with other people online.",
   "app.connecting": "Connecting to the server...",
@@ -34,6 +35,8 @@ const en: Dict = {
 
   // Brand / navigation
   "brand.home": "Leave room and return to the home screen",
+  "brand.tractor": "Tractor",
+  "brand.findingFriends": "Finding Friends",
 
   // Language / settings toggles
   "toolbar.language": "中文",
@@ -86,6 +89,7 @@ const en: Dict = {
   "term.pair": "Pair",
   "term.throw": "Throw",
   "term.points": "Points",
+  "term.fenUnit": "pts",
   "term.noTrump": "No trump",
 
   // Play / status rail
@@ -95,6 +99,7 @@ const en: Dict = {
   "rail.turn": "Turn",
   "rail.yourTurn": "Your turn",
   "rail.level": "Level",
+  "play.declarerMark": "(declarer)",
   "play.finishTrick": "Finish trick",
   "play.takeBack": "Take back last play",
   "play.finishGame": "Finish game",
@@ -184,6 +189,7 @@ const en: Dict = {
 const zh: Dict = {
   "app.title.tractor": "升级",
   "app.title.findingFriends": "找朋友",
+  "app.documentTitle": "在线游玩 升级 / 找朋友！",
   "app.welcome":
     "欢迎！本网站可以让你和朋友们在线游玩 升级 / 拖拉机 / 找朋友。",
   "app.connecting": "正在连接服务器…",
@@ -197,6 +203,8 @@ const zh: Dict = {
   "common.rank": "级",
 
   "brand.home": "离开房间并返回主页",
+  "brand.tractor": "Tractor",
+  "brand.findingFriends": "Finding Friends",
 
   "toolbar.language": "English",
   "toolbar.settings": "设置",
@@ -243,6 +251,7 @@ const zh: Dict = {
   "term.pair": "对子",
   "term.throw": "甩牌",
   "term.points": "分",
+  "term.fenUnit": "分",
   "term.noTrump": "无主",
 
   "rail.trump": "主牌",
@@ -251,6 +260,7 @@ const zh: Dict = {
   "rail.turn": "出牌",
   "rail.yourTurn": "轮到你了",
   "rail.level": "级牌",
+  "play.declarerMark": "(当庄)",
   "play.finishTrick": "结束本轮",
   "play.takeBack": "收回上次出牌",
   "play.finishGame": "结束游戏",

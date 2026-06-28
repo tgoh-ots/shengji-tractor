@@ -196,7 +196,7 @@ const Points = (props: IProps): JSX.Element => {
           key={player.id}
           trump={props.trump}
           className={classNames({ landlord: onLandlordTeam })}
-          label={`${player.name}: ${pointsPerPlayer[player.id] - penalty}分`}
+          label={`${player.name}: ${pointsPerPlayer[player.id] - penalty}${t("term.fenUnit")}`}
           cards={cards}
         />
       );
@@ -247,8 +247,11 @@ const Points = (props: IProps): JSX.Element => {
       {/* Status message on its OWN line, full contrast, clear of the markers. */}
       <p className="mt-3 text-sm font-medium leading-snug text-[var(--text-on-felt)]">
         <span className="font-bold">
-          {collectedStr}分
-          {props.hideLandlordPoints ? null : ` / ${totalPointsPlayed}分`}
+          {collectedStr}
+          {t("term.fenUnit")}
+          {props.hideLandlordPoints
+            ? null
+            : ` / ${totalPointsPlayed}${t("term.fenUnit")}`}
         </span>{" "}
         <span className="text-[var(--text-on-felt-soft)]">
           {t("points.stolenFrom", { name: landlord?.name ?? "" })}

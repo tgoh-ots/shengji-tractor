@@ -28,15 +28,7 @@
   body.classList.add(lang === "zh" ? "lang-zh" : "lang-en");
   document.documentElement.setAttribute("lang", lang === "zh" ? "zh" : "en");
 
-  // --- 2. Mode deep-link: ?mode=friends checks the Finding-Friends radio. ---
-  // The tab switch is otherwise pure CSS (hidden radios + :checked selectors),
-  // so it keeps working even if this script never runs.
-  if ((params.get("mode") || "").toLowerCase() === "friends") {
-    var ff = document.getElementById("mode-friends");
-    if (ff) ff.checked = true;
-  }
-
-  // --- 3. Round-result deck selector: recompute the point-threshold table. ---
+  // --- 2. Round-result deck selector: recompute the point-threshold table. ---
   (function () {
     var sel = document.getElementById("n-select");
     if (!sel) return;
@@ -66,7 +58,7 @@
     sel.addEventListener("change", setPointThresholds);
   })();
 
-  // --- 4. Card examples: render real SVG card faces. ---
+  // --- 3. Card examples: render real SVG card faces. ---
   var fourColor = body.classList.contains("four-color");
 
   // Build an <svg> card face element for a given card glyph (display_value).

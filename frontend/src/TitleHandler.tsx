@@ -1,23 +1,24 @@
 import * as React from "react";
 import { SettingsContext } from "./AppStateProvider";
+import { useTranslation } from "./i18n";
 
 import type { JSX } from "react";
 
-const DEFAULT_TITLE = "Play 升级 / Tractor / 找朋友 / Finding Friends online!";
-
 const TitleHandler = (props: { playerName?: string }): JSX.Element => {
   const settings = React.useContext(SettingsContext);
+  const { t } = useTranslation();
   React.useEffect(() => {
+    const title = t("app.documentTitle");
     if (
       props.playerName !== undefined &&
       props.playerName !== null &&
       settings.showPlayerName
     ) {
-      document.title = `${props.playerName} | ${DEFAULT_TITLE}`;
+      document.title = `${props.playerName} | ${title}`;
     } else {
-      document.title = DEFAULT_TITLE;
+      document.title = title;
     }
-  }, [props.playerName, settings.showPlayerName]);
+  }, [props.playerName, settings.showPlayerName, t]);
   return <></>;
 };
 

@@ -105,7 +105,7 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
         () => {
           this.drawCard();
         },
-        this.props.autodrawSpeedMs !== null ? this.props.autodrawSpeedMs : 400,
+        this.props.autodrawSpeedMs !== null ? this.props.autodrawSpeedMs : 700,
       );
     }
     this.could_draw = canDraw;

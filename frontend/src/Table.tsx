@@ -132,9 +132,7 @@ const Seat = (props: {
         title={`${props.player.name} · ${t(seatLabelKey)} · ${t(roleTitleKey)}`}
       >
         {props.bot !== undefined && <span aria-hidden="true">🤖</span>}
-        <span className="overflow-hidden text-ellipsis">
-          {props.player.name}
-        </span>
+        <span className="sj-seat-name-text">{props.player.name}</span>
         {role === "declarer" && (
           <span aria-hidden="true" title={t("term.banker")}>
             👑

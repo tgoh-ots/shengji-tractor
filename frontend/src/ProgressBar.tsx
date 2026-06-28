@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useTranslation } from "./i18n";
 
 import type { JSX } from "react";
 
@@ -26,6 +27,7 @@ const clampPct = (proportion: number): number =>
  * marker shows their progress from the top end.
  */
 const ProgressBar = (props: IProps): JSX.Element => {
+  const { t } = useTranslation();
   const { totalPoints, challengerPoints, landlordPoints, checkpoints } = props;
 
   const challengerPct = clampPct(challengerPoints / totalPoints);
@@ -99,7 +101,8 @@ const ProgressBar = (props: IProps): JSX.Element => {
             className="sj-score-swatch"
             style={{ backgroundColor: challengerColor }}
           />
-          {challengerPoints}分
+          {challengerPoints}
+          {t("term.fenUnit")}
         </span>
         {!props.hideLandlordPoints && (
           <span className="sj-score-legend-item">
@@ -107,7 +110,8 @@ const ProgressBar = (props: IProps): JSX.Element => {
               className="sj-score-swatch"
               style={{ backgroundColor: landlordColor }}
             />
-            {landlordMarker}分
+            {landlordMarker}
+            {t("term.fenUnit")}
           </span>
         )}
       </div>

@@ -312,7 +312,7 @@ const DeckSettings = (props: IDeckSettings): JSX.Element => {
           </div>
           <div className="flex flex-col gap-2">
             <label className="flex items-center justify-between gap-2 text-sm text-[var(--text-primary)]">
-              <span>Include HJ (大王)</span>
+              <span>Include HJ (big joker)</span>
               <input
                 type="checkbox"
                 className="h-4 w-4 accent-[var(--accent)]"
@@ -326,7 +326,7 @@ const DeckSettings = (props: IDeckSettings): JSX.Element => {
               />
             </label>
             <label className="flex items-center justify-between gap-2 text-sm text-[var(--text-primary)]">
-              <span>Include LJ (小王)</span>
+              <span>Include LJ (small joker)</span>
               <input
                 type="checkbox"
                 className="h-4 w-4 accent-[var(--accent)]"
@@ -1306,8 +1306,8 @@ const Initialize = (props: IProps): JSX.Element => {
               value={modeAsString}
               onChange={setGameMode}
             >
-              <option value="Tractor">升级 / Tractor</option>
-              <option value="FindingFriends">找朋友 / Finding Friends</option>
+              <option value="Tractor">Tractor</option>
+              <option value="FindingFriends">Finding Friends</option>
             </SettingSelect>
           </SettingRow>
           {props.state.propagated.game_mode !== "Tractor" ? (
@@ -1369,7 +1369,7 @@ const Initialize = (props: IProps): JSX.Element => {
               value={props.state.propagated.kitty_theft_policy}
               onChange={setKittyTheftPolicy}
             >
-              <option value="AllowKittyTheft">Allowed (炒地皮)</option>
+              <option value="AllowKittyTheft">Allowed</option>
               <option value="NoKittyTheft">Not allowed</option>
             </SettingSelect>
           </SettingRow>
@@ -1518,7 +1518,7 @@ const Initialize = (props: IProps): JSX.Element => {
                   props.state.propagated.landlord_emoji !== undefined &&
                   props.state.propagated.landlord_emoji !== ""
                     ? props.state.propagated.landlord_emoji
-                    : "当庄"}
+                    : "(declarer)"}
                 </span>
               </>
             }

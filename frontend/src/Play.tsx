@@ -233,6 +233,19 @@ const Play = (props: IProps): JSX.Element => {
     currentPlayer.id === lastPlay.id &&
     !playPhase.game_ended_early;
 
+  // "Finish trick" advances the game once every seat has played. Only the
+  // trick's winner (who leads the next trick) may finish it. This prevents a
+  // human from finishing a bot-won trick: bots auto-finish their own tricks,
+  // and a non-winner clicking "Finish trick" would otherwise be a no-op / poke.
+  const trickComplete =
+    playPhase.trick.player_queue.length === 0 && !playPhase.game_ended_early;
+  const isTrickWinner =
+    !isSpectator &&
+    playPhase.trick.current_winner !== undefined &&
+    playPhase.trick.current_winner !== null &&
+    currentPlayer.id === playPhase.trick.current_winner;
+  const canFinishTrick = trickComplete && isTrickWinner;
+
   const shouldBeBeeping =
     props.beepOnTurn && isCurrentPlayerTurn && !playPhase.game_ended_early;
 
@@ -292,7 +305,7 @@ const Play = (props: IProps): JSX.Element => {
     playPhase.propagated.landlord_emoji !== null &&
     playPhase.propagated.landlord_emoji !== ""
       ? playPhase.propagated.landlord_emoji
-      : "(当庄)";
+      : t("play.declarerMark");
 
   const landlordTeamSize = playPhase.landlords_team.length;
   let configFriendTeamSize = 0;
@@ -420,10 +433,7 @@ const Play = (props: IProps): JSX.Element => {
         <button
           className="sj-btn"
           onClick={endTrick}
-          disabled={
-            playPhase.trick.player_queue.length > 0 ||
-            playPhase.game_ended_early
-          }
+          disabled={!canFinishTrick}
         >
           {t("play.finishTrick")}
         </button>

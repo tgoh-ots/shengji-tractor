@@ -65,21 +65,20 @@ const Cell = (props: {
 
 /*
  * Compact status rail summarizing the live game state: trump suit + level,
- * declarer (庄家), current points (分), and whose turn it is. Rendered above
- * the trick area on the in-game table.
+ * declarer, current points, and whose turn it is. Labels are localized via
+ * i18n (English in English mode, Chinese in Chinese mode). Rendered above the
+ * trick area on the in-game table.
  */
 const StatusRail = (props: IProps): JSX.Element => {
   const { t } = useTranslation();
   return (
     <div className="sj-rail mb-4 flex flex-wrap items-center gap-x-6 gap-y-3 p-3">
-      <Cell label={`${t("rail.trump")} / 主`}>
+      <Cell label={t("rail.trump")}>
         <TrumpDisplay trump={props.trump} />
       </Cell>
-      <Cell label={`${t("rail.declarer")} / 庄`}>
-        {props.declarerName ?? "—"}
-      </Cell>
-      <Cell label={`${t("rail.points")} / 分`}>{props.points}</Cell>
-      <Cell label={`${t("rail.turn")} / 出牌`} highlight={props.isYourTurn}>
+      <Cell label={t("rail.declarer")}>{props.declarerName ?? "—"}</Cell>
+      <Cell label={t("rail.points")}>{props.points}</Cell>
+      <Cell label={t("rail.turn")} highlight={props.isYourTurn}>
         {props.isYourTurn ? t("rail.yourTurn") : (props.turnName ?? "—")}
       </Cell>
     </div>

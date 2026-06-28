@@ -19,17 +19,20 @@ const GameModeE = (props: IProps): JSX.Element => {
       rules
     </a>
   );
+  const isZh = lang === "zh";
   if (props.gameMode === "Tractor") {
     return (
       <span>
-        升级 <span className="text-[var(--accent)]">Tractor</span>
+        {isZh && "升级 "}
+        <span className="text-[var(--accent)]">Tractor</span>
         {rules}
       </span>
     );
   } else {
     return (
       <span>
-        找朋友 <span className="text-[var(--accent)]">Finding Friends</span>
+        {isZh && "找朋友 "}
+        <span className="text-[var(--accent)]">Finding Friends</span>
         {rules}
       </span>
     );

@@ -60,7 +60,7 @@ const renderScoringMessage = (message: Message): JSX.Element => {
     ) {
       changes.push(
         <span key={changes.length}>
-          step size: {variant.parameters.step_size_per_deck}分 per deck
+          step size: {variant.parameters.step_size_per_deck} pts per deck
         </span>,
       );
     }

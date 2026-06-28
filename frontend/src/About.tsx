@@ -41,10 +41,10 @@ interface Copy {
 
 const COPY: Record<Lang, Copy> = {
   en: {
-    title: "About / 关于",
+    title: "About",
     builtHeading: "How this was built",
     builtBody:
-      'Shengji Online (升级 Online) is a free, open-source way to play 升级 / Tractor / Finding Friends with friends online. It is forked from the open-source rbtying/shengji engine (MIT). On top of that foundation it adds computer opponents — a heuristic + search AI backed by a distilled learned network, plus an optional perfect-information ("omniscient") mode — a fully redesigned, responsive bilingual interface, and deployment on Fly.io.',
+      'Shengji Online is a free, open-source way to play Tractor / Finding Friends with friends online. It is forked from the open-source rbtying/shengji engine (MIT). On top of that foundation it adds computer opponents — a heuristic + search AI backed by a distilled learned network, plus an optional perfect-information ("omniscient") mode — a fully redesigned, responsive bilingual interface, and deployment on Fly.io.',
     sourcesHeading: "Sources",
     sources: [
       {
