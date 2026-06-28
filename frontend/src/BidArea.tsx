@@ -50,11 +50,6 @@ const BidArea = (props: IBidAreaProps): JSX.Element => {
   const [isLoadingBids, setIsLoadingBids] = React.useState<boolean>(false);
   const trump = props.trump == null ? { NoTrump: {} } : props.trump;
 
-  const takeBackBid = (evt: React.SyntheticEvent): void => {
-    evt.preventDefault();
-    send({ Action: "TakeBackBid" });
-  };
-
   const markDoneBidding = (evt: React.SyntheticEvent, ready: boolean): void => {
     evt.preventDefault();
     send({ Action: { MarkBiddingDone: { ready } } });
@@ -204,19 +199,6 @@ const BidArea = (props: IBidAreaProps): JSX.Element => {
         </div>
         <div className="my-3 flex flex-wrap items-center gap-2">
           {props.prefixButtons}
-          {props.bidTakeBacksEnabled ? (
-            <button
-              onClick={takeBackBid}
-              disabled={
-                props.bids.length === 0 ||
-                props.bids[props.bids.length - 1].id !== playerId ||
-                props.bids[props.bids.length - 1].epoch !== props.epoch
-              }
-              className="sj-btn"
-            >
-              {t("bid.takeBack")}
-            </button>
-          ) : null}
           {props.suffixButtons}
         </div>
         {props.showDoneBidding ? (

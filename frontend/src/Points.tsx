@@ -32,6 +32,9 @@ interface IProps {
   hideLandlordPoints: boolean;
   smallerTeamSize: boolean;
   gameScoringParameters: GameScoringParameters;
+  // The local player's id, so the scoreboard can label which colored team is
+  // theirs ("Your team") vs the opponents. Undefined for spectators.
+  selfId?: number;
 }
 
 export const calculatePoints = (
@@ -242,6 +245,11 @@ const Points = (props: IProps): JSX.Element => {
           landlordPoints={totalPointsPlayed - nonLandlordPoints}
           challengerPoints={nonLandlordPointsWithPenalties}
           hideLandlordPoints={props.hideLandlordPoints}
+          selfOnLandlordTeam={
+            props.selfId === undefined
+              ? undefined
+              : props.landlordTeam.includes(props.selfId)
+          }
         />
       )}
       {/* Status message on its OWN line, full contrast, clear of the markers. */}
@@ -331,6 +339,11 @@ export const ProgressBarDisplay = (props: IProps): JSX.Element => {
       landlordPoints={totalPointsPlayed - nonLandlordPoints}
       challengerPoints={nonLandlordPointsWithPenalties}
       hideLandlordPoints={props.hideLandlordPoints}
+      selfOnLandlordTeam={
+        props.selfId === undefined
+          ? undefined
+          : props.landlordTeam.includes(props.selfId)
+      }
     />
   );
 };

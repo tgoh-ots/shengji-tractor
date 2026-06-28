@@ -400,6 +400,7 @@ const Play = (props: IProps): JSX.Element => {
           hideLandlordPoints={playPhase.propagated.hide_landlord_points!}
           gameScoringParameters={playPhase.propagated.game_scoring_parameters!}
           smallerTeamSize={smallerTeamSize}
+          selfId={isSpectator ? undefined : currentPlayer.id}
         />
       )}
       <div className="my-3 flex flex-wrap items-center gap-2">
@@ -566,6 +567,7 @@ const Play = (props: IProps): JSX.Element => {
           }
           gameScoringParameters={playPhase.propagated.game_scoring_parameters}
           smallerTeamSize={smallerTeamSize}
+          selfId={isSpectator ? undefined : currentPlayer.id}
         />
       ) : null}
       <LabeledPlay

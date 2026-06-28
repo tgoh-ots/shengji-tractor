@@ -923,21 +923,42 @@ label {
   margin-top: 0;
 }
 
-/* EAST / WEST multi-card plays OVERLAP into a tight fanned sliver — on top of
- * the card's own `collapseRight` overlap, each extra card slides further left so
- * only a thin sliver shows (like the fanned hand). This keeps the SIDE arms
- * compact (the constraint is vertical room; NORTH/SOUTH keep their cards more
- * spread out since horizontal space is free). The card is ~85px wide and
- * already pulls -0.6w via collapseRight; this extra -16px tightens the fan. */
+/* EAST / WEST (side-seat) multi-card plays OVERLAP VERTICALLY into a tight
+ * fanned sliver. The side arms live in the narrow left/right grid slots, so the
+ * play box stacks its cards/card-groups TOP-TO-BOTTOM rather than side-by-side.
+ * A negative margin-TOP slides each trailing card up over the previous one so a
+ * pair/tractor collapses to an overlapped sliver fan (only a sliver of each
+ * trailing card visible), reclaiming the scarce vertical space. (NORTH/SOUTH
+ * keep their cards spread side-by-side since horizontal space is free there.)
+ *
+ * Force the side play box + its rows to lay out vertically so the overlap reads
+ * as a top-down fan regardless of how the cards/groups are nested. */
+.sj-seat-left .labeled-play .play,
+.sj-seat-right .labeled-play .play {
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Cards nested inside a card-group also stack vertically on the side arms so an
+ * intra-group pair overlaps top-down like the loose-card case. */
+.sj-seat-left .labeled-play .card-group,
+.sj-seat-right .labeled-play .card-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* The card is ~85px tall (zoomed); pull each trailing card up so only a ~18px
+ * sliver of it shows below the card above. */
 .sj-seat-left .labeled-play .play .card + .card,
 .sj-seat-right .labeled-play .play .card + .card,
 .sj-seat-left .labeled-play .card-group .card + .card,
 .sj-seat-right .labeled-play .card-group .card + .card {
-  margin-left: -16px;
+  margin-top: -64px;
 }
 .sj-seat-left .labeled-play .card-group + .card-group,
 .sj-seat-right .labeled-play .card-group + .card-group {
-  margin-left: -16px;
+  margin-top: -64px;
 }
 
 /* The (!) winner / (-) better-player marker, tucked under the cards so it never

@@ -9,6 +9,11 @@ interface IProps {
   challengerPoints: number;
   landlordPoints: number;
   hideLandlordPoints: boolean;
+  // Whether the local player sits on the landlord (declarer) side. Drives the
+  // "Your team" vs "Opponents" labelling so the local player can tell at a
+  // glance which color is theirs. Spectators leave this undefined → neutral
+  // "Declarer's side" / "Opponents" labels (mirroring the in-game legend).
+  selfOnLandlordTeam?: boolean;
 }
 
 const challengerColor = "#5bc0de";
@@ -34,6 +39,22 @@ const ProgressBar = (props: IProps): JSX.Element => {
   // Landlord points count down from the top of the scale.
   const landlordMarker = totalPoints - landlordPoints;
   const landlordPct = clampPct(landlordMarker / totalPoints);
+
+  // The challenger (blue) is the attacking side; the landlord (red) is the
+  // declarer's side. Label each swatch so the local player tells at a glance
+  // which color is theirs. Falls back to the neutral side names for spectators.
+  const challengerLabel =
+    props.selfOnLandlordTeam === undefined
+      ? t("team.legend.opponents")
+      : props.selfOnLandlordTeam
+        ? t("points.opponents")
+        : t("points.yourTeam");
+  const landlordLabel =
+    props.selfOnLandlordTeam === undefined
+      ? t("team.legend.declarerSide")
+      : props.selfOnLandlordTeam
+        ? t("points.yourTeam")
+        : t("points.opponents");
 
   return (
     <div className="sj-score-bar">
@@ -94,15 +115,18 @@ const ProgressBar = (props: IProps): JSX.Element => {
         </span>
       </div>
 
-      {/* Legend so the two colored markers are self-explanatory. */}
+      {/* Legend so the two colored markers are self-explanatory: each swatch is
+       * labelled with the team it belongs to AND its point total. */}
       <div className="sj-score-legend">
         <span className="sj-score-legend-item">
           <span
             className="sj-score-swatch"
             style={{ backgroundColor: challengerColor }}
           />
-          {challengerPoints}
-          {t("term.fenUnit")}
+          <span>
+            {challengerLabel}: {challengerPoints}
+            {t("term.fenUnit")}
+          </span>
         </span>
         {!props.hideLandlordPoints && (
           <span className="sj-score-legend-item">
@@ -110,8 +134,10 @@ const ProgressBar = (props: IProps): JSX.Element => {
               className="sj-score-swatch"
               style={{ backgroundColor: landlordColor }}
             />
-            {landlordMarker}
-            {t("term.fenUnit")}
+            <span>
+              {landlordLabel}: {landlordMarker}
+              {t("term.fenUnit")}
+            </span>
           </span>
         )}
       </div>

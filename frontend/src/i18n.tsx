@@ -182,11 +182,13 @@ const en: Dict = {
   "points.title": "Points",
   "points.loading": "Loading scores...",
   "points.stolenFrom": "stolen from {name}'s team.",
-  "points.nextThreshold": "(next threshold: {n}分)",
+  "points.nextThreshold": "(next threshold: {n} pts)",
   "points.willGoUp": "{name}'s team will go up {n} level(s)",
   "points.smallTeamBonus": ", including a small-team bonus",
   "points.neitherUp": "Neither team will go up a level",
   "points.attackingUp": "The attacking team will go up {n} level(s)",
+  "points.yourTeam": "Your team",
+  "points.opponents": "Opponents",
 };
 
 const zh: Dict = {
@@ -343,6 +345,8 @@ const zh: Dict = {
   "points.smallTeamBonus": "，包含小队加成",
   "points.neitherUp": "两队都不升级",
   "points.attackingUp": "进攻方将升 {n} 级",
+  "points.yourTeam": "你的队伍",
+  "points.opponents": "对方",
 };
 
 const dictionaries: Record<Lang, Dict> = { en, zh };
