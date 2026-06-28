@@ -287,15 +287,48 @@ impl DrawPhase {
         self.done_bidding.contains(&id)
     }
 
-    /// Whether EVERY human (non-bot) seat has marked itself "done bidding". Bots
-    /// count as implicitly done, so an all-bot table is trivially `true` (no
-    /// deadlock). This is the gate that replaces the old timed counter-bid grace:
-    /// the landlord may be finalized only once this returns `true`.
+    /// The seat that currently holds the standing (winning) bid, if a bid has been
+    /// decided AND the deck has been fully drawn (so the landlord is about to be
+    /// finalized). This is exactly the seat that [`DrawPhase::next_player`] returns
+    /// once the deck is empty: the player who will pick up the kitty.
+    ///
+    /// This seat is *never* shown a "Done bidding" button in the UI (they finalize
+    /// by picking up the kitty), so requiring them to mark "done" would deadlock if
+    /// they are a human. We therefore treat the standing winner as IMPLICITLY done
+    /// (see [`DrawPhase::all_humans_done_bidding`]). Recomputed from the live bids,
+    /// so when someone outbids, the *new* winner becomes the excluded seat and the
+    /// previous winner re-joins the "must mark done" set.
+    fn standing_winner(&self) -> Option<PlayerID> {
+        if !self.deck.is_empty() || !self.bid_decided() {
+            return None;
+        }
+        // Mirror `next_player`'s landlord selection so the excluded seat is exactly
+        // the one that will pick up the kitty.
+        let (first_bid, winning_bid) = Bid::first_and_winner(&self.bids, self.autobid).ok()?;
+        Some(self.propagated.landlord.unwrap_or(
+            match self.propagated.first_landlord_selection_policy {
+                FirstLandlordSelectionPolicy::ByWinningBid => winning_bid.id,
+                FirstLandlordSelectionPolicy::ByFirstBid => first_bid.id,
+            },
+        ))
+    }
+
+    /// Whether EVERY human (non-bot) seat that still needs to confirm has marked
+    /// itself "done bidding". Bots count as implicitly done, so an all-bot table is
+    /// trivially `true` (no deadlock). The current standing (winning) bidder is ALSO
+    /// implicitly done: that seat finalizes by picking up the kitty and is never
+    /// shown a "Done bidding" button, so requiring it would deadlock whenever the
+    /// winner is a human. This is the gate that replaces the old timed counter-bid
+    /// grace: the landlord may be finalized only once this returns `true`.
     pub fn all_humans_done_bidding(&self) -> bool {
+        let standing_winner = self.standing_winner();
         self.propagated
             .players
             .iter()
             .filter(|p| self.propagated.is_bot(p.id).is_none())
+            // The standing winner finalizes via the kitty pickup, not the "Done
+            // bidding" button, so never require them to mark done.
+            .filter(|p| Some(p.id) != standing_winner)
             .all(|p| self.done_bidding.contains(&p.id))
     }
 

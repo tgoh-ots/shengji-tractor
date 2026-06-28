@@ -837,24 +837,45 @@ impl Trick {
             let (cards, bad_throw_cards, better_player) =
                 if let Some((better_player, forced_unit)) = invalid {
                     let forced_cards: Vec<Card> = if tf.is_rainbow {
-                        // Rainbow units: `card` is a representative; extract the
-                        // actual matching cards from what the leader played.
-                        match &forced_unit {
-                            TrickUnit::Repeated { card, count } => {
-                                if let Some(unit_number) = card.card.number() {
-                                    let mut result = Vec::new();
-                                    for &c in &cards {
-                                        if c.number() == Some(unit_number) && result.len() < *count
-                                        {
-                                            result.push(c);
-                                        }
-                                    }
-                                    result
-                                } else {
-                                    vec![]
+                        // Rainbow units: `card`/`members` are representatives of a
+                        // RANK spread across suits, so we can't synthesize the exact
+                        // played cards from the representative — we must pull the
+                        // actual matching cards out of what the leader played
+                        // (`cards`). We match by card number and take as many as the
+                        // forced unit requires. (A rainbow unit is always Repeated
+                        // over a numbered rank, so the joker/Tractor sub-cases below
+                        // are defensive: they keep the forced play — and therefore
+                        // the "played" log line — non-empty rather than silently
+                        // dropping the cards, which also avoids the `position(...)
+                        // .unwrap()` panic just below on an empty/synthetic unit.)
+                        let take_by_number = |unit_number, count: usize| {
+                            let mut result = Vec::new();
+                            for &c in &cards {
+                                if c.number() == Some(unit_number) && result.len() < count {
+                                    result.push(c);
                                 }
                             }
-                            TrickUnit::Tractor { .. } => vec![],
+                            result
+                        };
+                        let extracted = match &forced_unit {
+                            TrickUnit::Repeated { card, count } => match card.card.number() {
+                                Some(n) => take_by_number(n, *count),
+                                None => vec![],
+                            },
+                            TrickUnit::Tractor { members, count } => members
+                                .iter()
+                                .filter_map(|m| m.card.number())
+                                .flat_map(|n| take_by_number(n, *count))
+                                .collect(),
+                        };
+                        // Fall back to the full played throw if the rank-based
+                        // extraction came up empty (defensive: never emit an empty
+                        // "played" line). These cards are guaranteed to be in
+                        // `cards`, so the removal loop below cannot panic.
+                        if extracted.is_empty() {
+                            cards.clone()
+                        } else {
+                            extracted
                         }
                     } else {
                         match &forced_unit {
@@ -4090,5 +4111,34 @@ mod tests {
             1,
             "only one unit remains after invalidation"
         );
+
+        // The game-log "played" line is driven by the PlayedCards message: it must
+        // carry the ACTUAL forced cards, never an empty list (which would render as
+        // "<player> played" with nothing). The forced unit here is a rainbow of one
+        // rank (four of a kind across suits), so the played cards are those four.
+        let played = msgs
+            .iter()
+            .find_map(|m| match m {
+                super::PlayCardsMessage::PlayedCards { cards } => Some(cards.clone()),
+                _ => None,
+            })
+            .expect("a failed throw must still emit a PlayedCards message");
+        assert!(
+            !played.is_empty(),
+            "the forced-throw PlayedCards must carry the committed cards, not be empty"
+        );
+        assert_eq!(
+            played.len(),
+            4,
+            "the forced rainbow unit commits all four same-rank cards"
+        );
+        // And every forced card must be one the player actually played.
+        let original = [C_5, D_5, H_5, S_5, C_8, D_8, H_8, S_8];
+        for c in &played {
+            assert!(
+                original.contains(c),
+                "forced card {c:?} must be one the leader actually threw"
+            );
+        }
     }
 }

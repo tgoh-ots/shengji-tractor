@@ -2916,16 +2916,23 @@ fn test_new_bid_clears_done_bidding_and_reopens() {
                 !p.is_done_bidding(host),
                 "a new bid must clear the human's done-bidding flag (re-open bidding)"
             );
-            assert!(
-                !p.all_humans_done_bidding(),
-                "after re-opening, not all humans are done until they re-confirm"
-            );
             // The human is now the standing bidder (their own outbid). The driver
             // hands control back to the human (parks; no bot action steals it).
             assert_eq!(
                 p.next_player().unwrap(),
                 host,
                 "the human's outbid makes them the responsible (winning) bidder"
+            );
+            // The standing winner finalizes via the kitty pickup, NOT the "Done
+            // bidding" button (they are never shown it), so they are implicitly
+            // done. With the only human now the standing winner, "all humans done"
+            // is trivially true -- but crucially this does NOT let the driver steal
+            // the human's kitty pickup (asserted below): a human winner always
+            // parks the driver. This is exactly the deadlock-proofing: a human
+            // winner can never be required to mark "done".
+            assert!(
+                p.all_humans_done_bidding(),
+                "the standing-winner human is implicitly done (never shown the button)"
             );
         }
         other => panic!(
@@ -2984,4 +2991,206 @@ fn test_all_bot_table_proceeds_immediately_when_bot_holds_bid() {
         }
     }
     panic!("an all-bot table never advanced past the Draw phase (possible deadlock)");
+}
+
+/// Regression for the production FREEZE: a HUMAN holds the standing (winning) bid
+/// in a table with at least one OTHER human plus bots. The standing winner is
+/// never shown a "Done bidding" button (they finalize by picking up the kitty), so
+/// requiring THEM to mark done would make `all_humans_done_bidding` impossible to
+/// satisfy -> the deferred driver would park forever -> deadlock.
+///
+/// We assert that, once every OTHER human has marked done, the game does NOT hang:
+/// the human winner is implicitly done, so `all_humans_done_bidding` is true, the
+/// driver hands the kitty pickup to the human winner (parks WITHOUT stealing it),
+/// and the human can finalize into the exchange phase.
+#[test]
+fn test_human_standing_winner_does_not_deadlock() {
+    use shengji_mechanics::types::cards::{C_3, C_4, C_5, C_6, S_2, S_3, S_4, S_5};
+
+    let logger = null_logger();
+
+    // Two humans + two bots.
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".to_string()).unwrap();
+    let (other_human, _) = game.register("other".to_string()).unwrap();
+    let mut bot_ids = vec![];
+    for _ in 0..2 {
+        let msgs = game
+            .interact(
+                Action::AddAIPlayer {
+                    difficulty: BotDifficulty::Easy,
+                },
+                host,
+                &logger,
+            )
+            .unwrap();
+        bot_ids.push(added_bot_id(&msgs));
+    }
+    game.interact(Action::StartGame, host, &logger).unwrap();
+
+    // Patch into a fully-drawn Draw phase where the HUMAN `host` holds the standing
+    // bid (a bid of S_2). No landlord pre-selected; ByWinningBid is the default, so
+    // the standing winner is the last bidder = host. Give every other seat a
+    // throwaway hand so the bots/the other human have nothing stronger to bid.
+    let state = game.dump_state().unwrap();
+    let mut json = serde_json::to_value(&state).unwrap();
+    {
+        let draw = json.get_mut("Draw").expect("must be in Draw phase");
+        draw["deck"] = serde_json::json!([]);
+        // A single standing bid by the human host: S_2 (count 1).
+        draw["bids"] = serde_json::json!([{
+            "id": host.0, "card": S_2.as_char().to_string(), "count": 1, "epoch": 0
+        }]);
+        draw["autobid"] = serde_json::Value::Null;
+        draw["propagated"]["landlord"] = serde_json::Value::Null;
+
+        let s2 = S_2.as_char().to_string();
+        let s3 = S_3.as_char().to_string();
+        let s4 = S_4.as_char().to_string();
+        let s5 = S_5.as_char().to_string();
+        let c3 = C_3.as_char().to_string();
+        let c4 = C_4.as_char().to_string();
+        let c5 = C_5.as_char().to_string();
+        let c6 = C_6.as_char().to_string();
+
+        let mut hands_map = serde_json::Map::new();
+        for pl in draw["propagated"]["players"].as_array().unwrap() {
+            let id = pl["id"].as_u64().unwrap() as usize;
+            let hand = if id == host.0 {
+                // The host holds the S_2 they bid (plus filler).
+                serde_json::json!({ s2.clone(): 1, s3.clone(): 1, s4.clone(): 1, s5.clone(): 1 })
+            } else {
+                // Everyone else holds only weak off-suit singles: no legal outbid of
+                // the standing single S_2 by count, so nobody supersedes the human.
+                serde_json::json!({ c3.clone(): 1, c4.clone(): 1, c5.clone(): 1, c6.clone(): 1 })
+            };
+            hands_map.insert(id.to_string(), hand);
+        }
+        draw["hands"]["hands"] = serde_json::Value::Object(hands_map);
+    }
+    let patched: GameState = serde_json::from_value(json).expect("patched Draw must deserialize");
+    let mut game = InteractiveGame::new_from_state(patched);
+
+    // Sanity: the human host is the standing (winning) bidder.
+    match game.dump_state().unwrap() {
+        GameState::Draw(p) => {
+            assert!(p.done_drawing() && p.bid_decided());
+            assert_eq!(
+                p.next_player().unwrap(),
+                host,
+                "the human host must be the standing winner"
+            );
+            // The human winner is implicitly done; the OTHER human is not yet.
+            assert!(
+                !p.all_humans_done_bidding(),
+                "the other human has not marked done yet"
+            );
+        }
+        other => panic!("expected Draw, got {:?}", other),
+    }
+
+    // Drive the deferred (production) bot driver. It must NOT advance the game on
+    // the human winner's behalf, and must NOT loop/finalize: it parks waiting for
+    // the OTHER human to finish AND for the human winner to pick up the kitty.
+    let before = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+    advance_bots(&mut game, &logger, true).unwrap();
+    let after = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+    assert_eq!(
+        before, after,
+        "driver must not act for the human winner before the other human is done"
+    );
+
+    // The OTHER human clicks "Done bidding". Now EVERY non-winner human is done and
+    // the winner is implicitly done -> `all_humans_done_bidding` is satisfied.
+    game.interact(
+        Action::MarkBiddingDone { ready: true },
+        other_human,
+        &logger,
+    )
+    .unwrap();
+    match game.dump_state().unwrap() {
+        GameState::Draw(p) => {
+            assert!(
+                p.all_humans_done_bidding(),
+                "with the other human done and the winner excluded, all humans are done"
+            );
+            assert!(
+                !is_parked_awaiting_human_done_bidding(&game).unwrap(),
+                "must NOT be parked-awaiting-done: the human winner just needs to pick up the kitty"
+            );
+        }
+        other => panic!("expected Draw, got {:?}", other),
+    }
+
+    // Re-running the driver must STILL not steal the human winner's kitty pickup
+    // (it parks for a human winner), and must not deadlock/loop.
+    let before = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+    advance_bots(&mut game, &logger, true).unwrap();
+    let after = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+    assert_eq!(
+        before, after,
+        "the driver must hand the kitty pickup to the human winner, not finalize itself"
+    );
+
+    // The crucial anti-freeze guarantee: the human winner CAN finalize (pick up the
+    // kitty) and the game advances out of Draw. It is NOT wedged.
+    match game.dump_state().unwrap() {
+        GameState::Draw(_) => {}
+        other => panic!("expected still-in-Draw before pickup, got {:?}", other),
+    }
+    game.interact(Action::PickUpKitty, host, &logger).unwrap();
+    match game.dump_state().unwrap() {
+        GameState::Exchange(_) | GameState::Play(_) => {}
+        other => panic!(
+            "the human winner must be able to pick up the kitty and advance; got {:?}",
+            other
+        ),
+    }
+}
+
+/// Regression: EVERY play's game-log line must carry the actual cards played, via
+/// every bot code path (synchronous AND the deferred/paced production path). The
+/// frontend renders a "played" line from `MessageVariant::PlayedCards { cards }`,
+/// so an empty `cards` array would render "<player> played" with nothing. Drive a
+/// whole all-bot hand through the DEFERRED driver (the production handler path)
+/// and assert no PlayedCards broadcast is ever empty.
+#[test]
+fn test_every_played_broadcast_carries_cards_deferred_path() {
+    let logger = null_logger();
+    let (mut game, _bot_ids) = setup_all_bot_game_with(&logger, BotDifficulty::Easy);
+
+    let mut played = 0usize;
+    let check = |msgs: &[(crate::interactive::BroadcastMessage, String)], played: &mut usize| {
+        for (b, rendered) in msgs {
+            if let MessageVariant::PlayedCards { cards } = b.variant() {
+                *played += 1;
+                assert!(
+                    !cards.is_empty(),
+                    "a PlayedCards broadcast carried no cards (would render an empty play); rendered string was {:?}",
+                    rendered
+                );
+            }
+        }
+    };
+
+    for _ in 0..100_000 {
+        let r = advance_bots(&mut game, &logger, true).unwrap();
+        check(&r.messages, &mut played);
+        let mut pending = r.pause;
+        while pending.is_some() {
+            let r2 = finish_deferred_bot_trick(&mut game, &logger).unwrap();
+            check(&r2.messages, &mut played);
+            pending = r2.pause;
+        }
+        if let GameState::Play(p) = &game.dump_state().unwrap() {
+            if p.game_finished() {
+                break;
+            }
+        }
+    }
+
+    assert!(
+        played > 0,
+        "the hand should have produced at least one play"
+    );
 }
