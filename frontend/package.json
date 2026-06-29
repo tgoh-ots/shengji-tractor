@@ -26,7 +26,7 @@
     "react-select": "5",
     "react-tooltip": "^5.28.1",
     "styled-components": "^6.0.0",
-    "stylis": "^4.0.0",
+    "stylis": "^4.4.0",
     "ts-jest": "^29.2.5",
     "ts-loader": "^9.5.1",
     "typescript": "^5.7.2"
