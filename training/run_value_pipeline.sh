@@ -100,10 +100,17 @@ if [ "$missing" -ne 0 ]; then
 fi
 
 # ---- stage 3: concatenate shards (cheap; redo each run) ----
-say "stage3: concatenating $NUM_SHARDS shards -> data_full.csv"
+# CRITICAL: each shard numbers its `group` ids from 0, so a naive concat COLLIDES
+# the group namespace — the trainer would merge unrelated decisions under a shared
+# id, see sum(labels)>1, and drop nearly everything. Offset each shard's group id
+# (column 1) by i*1e9 (>> per-shard group count) so groups are globally unique.
+# Only $1 is modified, so the float feature columns are reprinted verbatim.
+say "stage3: concatenating $NUM_SHARDS shards (with per-shard group-id offsets) -> data_full.csv"
 head -1 "$WORKDIR/shard_0.csv" > "$FULL"
-for i in $(seq 0 $((NUM_SHARDS - 1))); do tail -n +2 "$WORKDIR/shard_$i.csv" >> "$FULL"; done
-say "stage3: dataset has $(wc -l < "$FULL") rows"
+for i in $(seq 0 $((NUM_SHARDS - 1))); do
+  awk -F, -v OFS=, -v off="$((i * 1000000000))" 'NR>1 { $1 = $1 + off; print }' "$WORKDIR/shard_$i.csv" >> "$FULL"
+done
+say "stage3: dataset has $(wc -l < "$FULL") rows, $(awk -F, 'NR>1{print $1}' "$FULL" | sort -u | wc -l | tr -d ' ') distinct decisions"
 
 # ---- stage 4: train value head (skip if model present) ----
 if [ ! -f "$MODEL" ]; then
