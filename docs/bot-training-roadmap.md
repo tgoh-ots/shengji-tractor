@@ -153,12 +153,15 @@ Assumes the substrate exists, so these are now measurable bets. Sequenced by dep
     DAgger pass below should precede/accompany this), and consider shorter `rollout_tricks` once the value net
     carries the leaf. The leaf net-call is at the rollout TERMINAL (once per candidate per world), not per-ply.
     Realistic **+3–8pp** once measured. **This is the change worth a month.**
-- [ ] **DAgger loop** (~5–7 days, after the value head + gate). Parameterize the data-gen `BEHAVIOUR` to a mix
-  including the Expert/Enoch search (down-budgeted; keep an Easy fraction for diversity), relabel with the
-  teacher, retrain, iterate **1–2 rounds with a win-rate non-regression gate per round.** Attacks the Easy-only
-  coverage. ⚠️ The labeler is still the unidentifiable cheater, so DAgger moves *where on the ceiling* you sit,
-  not the ceiling itself — and search-driven generation is hours, not minutes. A couple of rounds, **not** an
-  open-ended loop.
+- [~] **DAgger loop** — the data-gen MECHANISM is implemented (2026-06-29); the iterate-and-gate loop is the
+  manual run. `gen_training_data` now takes `GEN_BEHAVIOUR` (easy | expert | enoch | **mix**, + `GEN_MIX_SEARCH_FRAC`):
+  the chosen policy ADVANCES the game (the teacher still labels), so `mix` records states from the real search
+  distribution the net serves — and, because the per-GAME continuation is now strong play, it also sharpens the
+  VALUE target (addresses the value head's "calibrate on Expert/Enoch states, not the Easy split" de-risk).
+  Default `easy` is rng-stream-identical to before. **Remaining:** actually iterate —
+  generate(`GEN_BEHAVIOUR=mix`) → train → paired-gate → repeat **1–2 rounds**, NOT open-ended. ⚠️ The labeler is
+  still the unidentifiable cheater, so DAgger moves *where on the ceiling* you sit, not the ceiling; and
+  search-driven generation is hours, not minutes (the search behaviour shares the teacher's budget).
 - [ ] **PUCT/ISMCTS + progressive widening** (~6–9 days) — **only after the value head.** Flat averaging gives
   every truncated candidate equal world budget and never searches rank-7+. PUCT concentrates the 144 worlds on
   the contested candidates and uncaps width — but with the crude leaf it mostly reshuffles bad estimates, and

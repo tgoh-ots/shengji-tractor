@@ -152,12 +152,16 @@ Pipeline: Rust self-play data export → PyTorch training → ONNX → embedded 
 (`include_bytes!`, run via `tract-onnx` — no C/onnxruntime dependency, builds in
 the musl deploy image). See `training/README.md`.
 ```bash
-# 1. Generate distillation data (Omniscient teacher labels; Easy bots drive the
-#    game for diverse states). Writes training/data.csv (group, f0..f35, label).
-#    GEN_TEACHER_BUDGET_MS (default 400) sets the teacher search budget = label
-#    QUALITY independently of any inherited SHENGJI_BOT_BUDGET_MS. It also prints
-#    skipped-decision counts (degenerate / teacher-no-play / teacher-outside).
-GEN_GAMES=5000 GEN_TEACHER_BUDGET_MS=400 \
+# 1. Generate distillation data. Writes training/data.csv (group, f0..f35, label,
+#    value). GEN_TEACHER_BUDGET_MS (default 400) sets the teacher search budget =
+#    label QUALITY, independent of any inherited SHENGJI_BOT_BUDGET_MS; it also
+#    prints skipped-decision counts (degenerate / teacher-no-play / teacher-outside).
+#    GEN_BEHAVIOUR (easy | expert | enoch | mix; default easy) picks which policy
+#    ADVANCES the game = the recorded STATE DISTRIBUTION (a DAgger knob): `mix`
+#    (GEN_MIX_SEARCH_FRAC, default 0.5) advances some games with the real search
+#    tier so states match what the net actually serves — also sharpens the value
+#    target. A search behaviour shares the teacher budget and is MUCH slower.
+GEN_GAMES=5000 GEN_TEACHER_BUDGET_MS=400 GEN_BEHAVIOUR=mix \
   cargo run --release --example gen_training_data
 
 # 1b. (optional) Estimate the behavioral-cloning CEILING before training: the

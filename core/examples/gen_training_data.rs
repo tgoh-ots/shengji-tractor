@@ -23,15 +23,23 @@
 //!     SHENGJI_BOT_BUDGET_MS=10 GEN_GAMES=300 \
 //!         cargo run --release --example gen_training_data
 //!
+//! Each row also carries a `value` column: the realized terminal point-differential
+//! (oriented for the acting team, normalized by `expert::VALUE_NORM`), back-filled
+//! at game end — the regression target for the learned VALUE head.
+//!
 //! Env knobs:
 //!   GEN_GAMES   number of self-play hands to export (default 200)
 //!   GEN_OUT     output CSV path (default training/data.csv)
 //!   GEN_TEACHER_BUDGET_MS  teacher (Omniscient) perfect-info search budget per
 //!               decision, in ms (default 400). This directly sets LABEL QUALITY:
-//!               an 8ms label is near-noise. Applied via SHENGJI_BOT_BUDGET_MS
-//!               (the only search in this all-Easy-driven process is the teacher's).
+//!               an 8ms label is near-noise. Applied via SHENGJI_BOT_BUDGET_MS.
+//!   GEN_BEHAVIOUR  which policy ADVANCES the game = the recorded STATE
+//!               DISTRIBUTION (DAgger): easy | expert | enoch | mix (default easy).
+//!   GEN_MIX_SEARCH_FRAC  for GEN_BEHAVIOUR=mix, fraction of GAMES advanced by the
+//!               search tier (default 0.5; the rest by Easy). A search behaviour
+//!               shares the teacher's budget and is MUCH slower (hours, not minutes).
 //!   SHENGJI_BOT_BUDGET_MS  if set explicitly, OVERRIDES GEN_TEACHER_BUDGET_MS
-//!               (back-compat).
+//!               (back-compat). Caps BOTH the teacher and any search behaviour.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -51,11 +59,80 @@ use shengji_mechanics::types::{Card, PlayerID};
 /// The teacher tier whose (perfect-information) choice provides the label.
 const TEACHER: BotDifficulty = BotDifficulty::Omniscient;
 
-/// The behaviour tier used to actually ADVANCE the game between recorded
-/// decisions. We mix a noisy tier so the exported states are diverse (not just
-/// the on-policy trajectory of one strong bot). The teacher's pick is still
-/// recorded as the label at every decision regardless of who is acting.
-const BEHAVIOUR: BotDifficulty = BotDifficulty::Easy;
+/// Which policy ADVANCES the game between recorded decisions — i.e. which state
+/// DISTRIBUTION the exported data covers. The teacher's pick is recorded as the
+/// label at every decision regardless of who is acting, so changing this is a
+/// DAgger-style move: relabel-with-the-teacher on a new state distribution.
+///
+/// The legacy default (`Easy`) means the net is trained on states the WEAKEST
+/// tier reaches but served as the prior of a strong determinized search — a
+/// train/serve covariate shift. `GEN_BEHAVIOUR` lets a DAgger pass advance with
+/// the actual search tier (or a mix) so recorded states match the serving
+/// distribution; it ALSO sharpens the VALUE target (the realized margin is now
+/// under strong play, not Easy play).
+#[derive(Clone, Copy)]
+enum BehaviourMode {
+    /// Advance every game with `Easy` (legacy default; rng-stream-identical to the
+    /// pre-DAgger exporter, so old policy-only data reproduces byte-for-byte).
+    Easy,
+    /// Advance every game with a single search tier (`Expert` / `Enoch`).
+    Tier(BotDifficulty),
+    /// Advance each GAME with `tier` with probability `frac`, else `Easy`. Mixing
+    /// per-GAME (not per-decision) keeps each trajectory coherent so the value
+    /// target is a clean single-policy playout, while spanning BOTH the
+    /// strong-search and the noisy-Easy state distributions across the corpus.
+    Mix { tier: BotDifficulty, frac: f64 },
+}
+
+impl BehaviourMode {
+    /// Parse `GEN_BEHAVIOUR` (easy | expert | enoch | mix; default easy) and, for
+    /// `mix`, `GEN_MIX_SEARCH_FRAC` (default 0.5).
+    fn from_env() -> Self {
+        match std::env::var("GEN_BEHAVIOUR").ok().as_deref() {
+            Some("expert") => BehaviourMode::Tier(BotDifficulty::Expert),
+            Some("enoch") => BehaviourMode::Tier(BotDifficulty::Enoch),
+            Some("mix") => {
+                let frac = std::env::var("GEN_MIX_SEARCH_FRAC")
+                    .ok()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(0.5)
+                    .clamp(0.0, 1.0);
+                BehaviourMode::Mix {
+                    tier: BotDifficulty::Expert,
+                    frac,
+                }
+            }
+            _ => BehaviourMode::Easy,
+        }
+    }
+
+    fn label(self) -> String {
+        match self {
+            BehaviourMode::Easy => "Easy".to_string(),
+            BehaviourMode::Tier(d) => format!("{d:?}"),
+            BehaviourMode::Mix { tier, frac } => {
+                format!("mix({tier:?} {frac:.0}% / Easy)", frac = frac * 100.0)
+            }
+        }
+    }
+
+    /// The tier that drives THIS game, chosen once per game. For `Easy`/`Tier` it
+    /// does NOT consume `rng` (so the default-Easy rng stream — and thus the deal
+    /// sequence — is unchanged); `Mix` consumes one `gen_bool` per game.
+    fn pick(self, rng: &mut StdRng) -> BotDifficulty {
+        match self {
+            BehaviourMode::Easy => BotDifficulty::Easy,
+            BehaviourMode::Tier(d) => d,
+            BehaviourMode::Mix { tier, frac } => {
+                if rng.gen_bool(frac) {
+                    tier
+                } else {
+                    BotDifficulty::Easy
+                }
+            }
+        }
+    }
+}
 
 struct Row {
     group: u64,
@@ -104,6 +181,15 @@ fn main() {
         std::env::var("SHENGJI_BOT_BUDGET_MS").unwrap_or_default(),
         teacher_budget_ms,
     );
+    // DAgger knob: which policy advances the game (= the recorded state
+    // distribution). Default Easy (legacy). A search behaviour shares the teacher's
+    // SHENGJI_BOT_BUDGET_MS and makes generation MUCH slower (a search per move on
+    // top of the teacher search per decision) — expect hours, not minutes.
+    let behaviour = BehaviourMode::from_env();
+    eprintln!(
+        "behaviour: GEN_BEHAVIOUR={} (advances the game; teacher still labels)",
+        behaviour.label()
+    );
     let games: usize = std::env::var("GEN_GAMES")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -124,6 +210,7 @@ fn main() {
             &mut rows,
             &mut decisions,
             &mut drops,
+            behaviour,
         );
         if g % 25 == 0 {
             eprintln!(
@@ -181,7 +268,13 @@ fn play_one_hand_collecting(
     rows: &mut Vec<Row>,
     decisions: &mut usize,
     drops: &mut DropStats,
+    behaviour: BehaviourMode,
 ) {
+    // The tier that advances THIS game (chosen once, before the deal RNG, so the
+    // continuation — and thus the value target — is a coherent single-policy
+    // playout). `Easy`/`Tier` don't consume rng here, keeping the default deal
+    // sequence unchanged.
+    let game_behaviour = behaviour.pick(rng);
     let n = 4;
     let mut init = InitializePhase::new();
     let mut seats: Vec<PlayerID> = vec![];
@@ -264,7 +357,7 @@ fn play_one_hand_collecting(
             GameState::Exchange(s) => {
                 let landlord = s.landlord();
                 let view = GameState::Exchange(s.clone()).for_player(landlord);
-                match policy::select_action(&view, landlord, BEHAVIOUR)
+                match policy::select_action(&view, landlord, game_behaviour)
                     .ok()
                     .flatten()
                 {
@@ -329,10 +422,10 @@ fn play_one_hand_collecting(
                             drops,
                         );
 
-                        // Advance with the (noisy) behaviour policy from the
+                        // Advance with this game's behaviour policy from the
                         // honest redacted view.
                         let view = GameState::Play(s.clone()).for_player(actor);
-                        let cards = match policy::select_action(&view, actor, BEHAVIOUR)
+                        let cards = match policy::select_action(&view, actor, game_behaviour)
                             .ok()
                             .flatten()
                         {
