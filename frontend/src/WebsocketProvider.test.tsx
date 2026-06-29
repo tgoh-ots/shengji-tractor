@@ -226,3 +226,48 @@ describe("WebsocketProvider host resolution with baked fallback", () => {
     expect(resolve(undefined, "", loc)).toBe("wss://example.com/game/api");
   });
 });
+
+// The sticky room id makes reconnect-by-name robust: on boot we prefer the URL
+// hash (shareable links / deliberate go-home win), and fall back to the last
+// room persisted in localStorage when there is no usable hash. This mirrors the
+// `roomNameState` resolver in AppStateProvider.tsx exactly (the node test env has
+// no real `window`, so we re-implement the pure logic, same as the URL tests).
+describe("sticky room id resolution (roomNameState)", () => {
+  const resolveRoom = (
+    hashValue: string,
+    storedValue: string | null | undefined,
+  ): string => {
+    const fromHash = hashValue.slice(1, 17); // strip leading '#', cap at 16
+    if (fromHash.length === 16) {
+      return fromHash;
+    }
+    return typeof storedValue === "string" && storedValue.length === 16
+      ? storedValue
+      : "";
+  };
+
+  const room = "0123456789abcdef"; // 16 chars
+  const other = "fedcba9876543210";
+
+  it("prefers a valid 16-char URL hash over localStorage", () => {
+    expect(resolveRoom("#" + room, other)).toBe(room);
+  });
+
+  it("recovers the persisted room when there is no hash", () => {
+    expect(resolveRoom("", room)).toBe(room);
+  });
+
+  it("recovers the persisted room when the hash is empty ('#')", () => {
+    expect(resolveRoom("#", room)).toBe(room);
+  });
+
+  it("returns empty (-> JoinRoom) when neither hash nor storage is a room", () => {
+    expect(resolveRoom("", null)).toBe("");
+    expect(resolveRoom("", undefined)).toBe("");
+    expect(resolveRoom("", "short")).toBe("");
+  });
+
+  it("ignores a non-16-char hash and falls back to storage", () => {
+    expect(resolveRoom("#tooShort", room)).toBe(room);
+  });
+});

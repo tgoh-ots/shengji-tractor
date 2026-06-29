@@ -1235,10 +1235,26 @@ fn test_deal_one_human_three_bots_normal() {
             if turn == host {
                 game.interact(Action::DrawCard, host, &logger).unwrap();
             } else {
-                // Exactly one bot action (the draw for this seat).
                 let (bot_id, action) = next_bot_action(&mut game, false)
                     .unwrap()
-                    .expect("a bot must be able to draw on its turn");
+                    .expect("a bot must be able to act on its turn");
+                // A bot may DECLARE a trump suit mid-draw (an opening declaration
+                // as cards come out — bidding is not turn-based). That is NOT a
+                // draw: it consumes no card and does not change whose turn it is to
+                // draw, so apply it and re-loop WITHOUT advancing the draw
+                // bookkeeping. The strict round-robin DRAW order is asserted at the
+                // top of the loop on the unchanged `next_player`, so it still holds.
+                if matches!(action, Action::Bid(..)) {
+                    game.interact(action, bot_id, &logger).unwrap();
+                    steps += 1;
+                    assert!(
+                        steps <= drawable + 10,
+                        "trial {}: drawing exceeded the deck size (stuck looping)",
+                        trial
+                    );
+                    continue;
+                }
+                // Otherwise it is exactly the draw for the seat whose turn it is.
                 assert_eq!(
                     bot_id, turn,
                     "trial {}: advance_bots tried to act for {:?} but it is {:?}'s turn",
@@ -1246,7 +1262,7 @@ fn test_deal_one_human_three_bots_normal() {
                 );
                 assert!(
                     matches!(action, Action::DrawCard),
-                    "trial {}: the only bot action mid-draw must be DrawCard, got {:?}",
+                    "trial {}: the only non-declaration bot action mid-draw must be DrawCard, got {:?}",
                     trial,
                     action
                 );
@@ -2390,14 +2406,18 @@ fn test_draws_are_not_paced_but_bid_decision_is() {
             break;
         }
 
-        // Stop once we have clearly progressed past the draw with no pause yet
-        // (e.g. a bot resolved the bid and we are already exchanging/playing).
-        if !drawing_ongoing
-            && !matches!(game.dump_state().unwrap(), GameState::Draw(_))
-            && first_pause_seen_after_draw_done.is_none()
-        {
-            // We left the Draw phase without ever pausing during it — that alone
-            // satisfies "draws are not paced". Done.
+        // Once the deck is fully drawn with no pause seen yet, the draw burst
+        // completed WITHOUT a per-draw pause — the invariant under test. This holds
+        // whether a bot DECLARED mid-draw and we are now PARKED in the Draw phase
+        // awaiting the human's "Done bidding" (a bot is the standing winner), or we
+        // already moved on to exchange/play. (Any pause that fired while drawing
+        // was still ongoing would have tripped the assertion above.)
+        let _ = drawing_ongoing;
+        let drawing_done = match &game.dump_state().unwrap() {
+            GameState::Draw(p) => p.done_drawing(),
+            _ => true, // left the Draw phase entirely
+        };
+        if drawing_done && first_pause_seen_after_draw_done.is_none() {
             first_pause_seen_after_draw_done = Some(true);
             break;
         }
@@ -2841,6 +2861,300 @@ fn test_human_not_robbed_of_counter_bid_by_strategic_bot_bid() {
             other
         ),
     }
+}
+
+// ===========================================================================
+// Regression: bots must DECLARE during the draw phase even when a landlord is
+// PINNED (every round after the first; `PlayPhase::finish_game` pins the next
+// round's landlord). The old `next_bot_action` short-circuited to "the landlord
+// reveals / park" the moment a landlord was set, so non-landlord bots could
+// never declare a trump suit — the reported "the bots don't bid during the draw
+// phase at all" bug, which only manifested from round two onward. It also wedged
+// a human-landlord round where the human declined to declare: the table parked
+// forever because no bot would ever declare to fix the trump.
+// ===========================================================================
+#[test]
+fn test_bots_declare_with_pinned_landlord() {
+    use shengji_mechanics::types::cards::{C_3, C_4, S_2, S_3, S_4, S_5, S_6, S_7, S_8, S_9};
+
+    let logger = null_logger();
+
+    // 1 human + 3 bots. Pin the landlord to a NON-host BOT, drain the deck, no
+    // bid yet, and give a DIFFERENT (non-landlord) bot a strong spade hand so it
+    // strategically WANTS to declare. The human is neither landlord nor bidder.
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".to_string()).unwrap();
+    let mut bot_ids = vec![];
+    for _ in 0..3 {
+        let msgs = game
+            .interact(
+                Action::AddAIPlayer {
+                    difficulty: BotDifficulty::Expert,
+                },
+                host,
+                &logger,
+            )
+            .unwrap();
+        bot_ids.push(added_bot_id(&msgs));
+    }
+    game.interact(Action::StartGame, host, &logger).unwrap();
+    let landlord_bot = bot_ids[0];
+    let declaring_bot = bot_ids[1];
+
+    let state = game.dump_state().unwrap();
+    let mut json = serde_json::to_value(&state).unwrap();
+    {
+        let draw = json.get_mut("Draw").expect("must be in Draw phase");
+        draw["deck"] = serde_json::json!([]);
+        draw["bids"] = serde_json::json!([]);
+        draw["autobid"] = serde_json::Value::Null;
+        // PINNED landlord = a bot that is NOT the strong bidder.
+        draw["propagated"]["landlord"] = serde_json::json!(landlord_bot.0);
+
+        let s2 = S_2.as_char().to_string();
+        let s3 = S_3.as_char().to_string();
+        let s4 = S_4.as_char().to_string();
+        let s5 = S_5.as_char().to_string();
+        let s6 = S_6.as_char().to_string();
+        let s7 = S_7.as_char().to_string();
+        let s8 = S_8.as_char().to_string();
+        let s9 = S_9.as_char().to_string();
+        let c3 = C_3.as_char().to_string();
+        let c4 = C_4.as_char().to_string();
+
+        let mut hands_map = serde_json::Map::new();
+        for pl in draw["propagated"]["players"].as_array().unwrap() {
+            let id = pl["id"].as_u64().unwrap() as usize;
+            let hand = if id == declaring_bot.0 {
+                // Strong spade hand (pair of S_2 + a long spade run): clears the
+                // strategic-declaration threshold at the landlord's level (2).
+                serde_json::json!({
+                    s2.clone(): 2, s3.clone(): 1, s4.clone(): 1, s5.clone(): 1,
+                    s6.clone(): 1, s7.clone(): 1, s8.clone(): 1, s9.clone(): 1,
+                })
+            } else {
+                // Un-biddable junk for the landlord bot, the host, and the 3rd bot.
+                serde_json::json!({ c3.clone(): 2, c4.clone(): 2 })
+            };
+            hands_map.insert(id.to_string(), hand);
+        }
+        draw["hands"]["hands"] = serde_json::Value::Object(hands_map);
+    }
+    let patched: GameState = serde_json::from_value(json).expect("patched Draw must deserialize");
+    let game = InteractiveGame::new_from_state(patched);
+
+    // The driver must now have a NON-landlord bot DECLARE, NOT short-circuit to
+    // the landlord's reveal. (Before the fix this returned the landlord's
+    // RevealCard and the non-landlord bot never got to bid.)
+    let (actor, action) = next_bot_action(&game, true)
+        .expect("next_bot_action must not error")
+        .expect("a bot must act in the no-bid draw phase even with a pinned landlord");
+    assert_eq!(
+        actor, declaring_bot,
+        "the strong non-landlord bot must be the one to declare"
+    );
+    assert!(
+        matches!(action, Action::Bid(card, _) if card == S_2),
+        "the bot must declare spades trump from its strong spade holding (S_2), got {:?}",
+        action
+    );
+
+    // The cheap classifier must agree there is paceable bot work here (so the
+    // non-blocking driver actually plans/applies the declaration rather than
+    // stalling).
+    assert_eq!(
+        classify_next_bot_work(&game, true).unwrap(),
+        NextBotWork::Paceable,
+        "a declarable no-bid draw phase must classify as paceable bot work"
+    );
+}
+
+// Regression companion: with a pinned BOT landlord and NO bot strong enough to
+// declare, the landlord bot must still REVEAL the bottom (auto-bid) so the table
+// makes progress — the fallback the merge must preserve.
+#[test]
+fn test_pinned_bot_landlord_reveals_when_no_declaration() {
+    use shengji_mechanics::types::cards::{C_3, C_4};
+
+    let logger = null_logger();
+
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".to_string()).unwrap();
+    let mut bot_ids = vec![];
+    for _ in 0..3 {
+        let msgs = game
+            .interact(
+                Action::AddAIPlayer {
+                    difficulty: BotDifficulty::Expert,
+                },
+                host,
+                &logger,
+            )
+            .unwrap();
+        bot_ids.push(added_bot_id(&msgs));
+    }
+    game.interact(Action::StartGame, host, &logger).unwrap();
+    let landlord_bot = bot_ids[0];
+
+    let state = game.dump_state().unwrap();
+    let mut json = serde_json::to_value(&state).unwrap();
+    {
+        let draw = json.get_mut("Draw").expect("must be in Draw phase");
+        draw["deck"] = serde_json::json!([]);
+        draw["bids"] = serde_json::json!([]);
+        draw["autobid"] = serde_json::Value::Null;
+        draw["propagated"]["landlord"] = serde_json::json!(landlord_bot.0);
+
+        let c3 = C_3.as_char().to_string();
+        let c4 = C_4.as_char().to_string();
+        // Everyone holds un-biddable junk (no rank-2s / jokers), so no seat can
+        // legally declare at the landlord's level — forcing the reveal fallback.
+        let mut hands_map = serde_json::Map::new();
+        for pl in draw["propagated"]["players"].as_array().unwrap() {
+            let id = pl["id"].as_u64().unwrap() as usize;
+            hands_map.insert(
+                id.to_string(),
+                serde_json::json!({ c3.clone(): 2, c4.clone(): 2 }),
+            );
+        }
+        draw["hands"]["hands"] = serde_json::Value::Object(hands_map);
+    }
+    let patched: GameState = serde_json::from_value(json).expect("patched Draw must deserialize");
+    let game = InteractiveGame::new_from_state(patched);
+
+    let (actor, action) = next_bot_action(&game, true)
+        .expect("next_bot_action must not error")
+        .expect("the pinned bot landlord must reveal the bottom when nobody declares");
+    assert_eq!(
+        actor, landlord_bot,
+        "the reveal must be issued by the pinned landlord bot"
+    );
+    assert!(
+        matches!(action, Action::RevealCard),
+        "with no declaration possible, the landlord bot must RevealCard, got {:?}",
+        action
+    );
+}
+
+// ===========================================================================
+// Regression: bots DECLARE DURING THE DRAW (before the deck is fully drawn),
+// as cards come out — not only after drawing completes. Bidding is not
+// turn-based, so any bot with an already-strong (partial) hand may make an
+// OPENING declaration mid-draw.
+// ===========================================================================
+#[test]
+fn test_bots_declare_during_the_draw() {
+    use shengji_mechanics::types::cards::{C_3, C_4, S_2, S_3, S_4, S_5, S_6, S_7, S_8, S_9};
+
+    let logger = null_logger();
+
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".to_string()).unwrap();
+    let mut bot_ids = vec![];
+    for _ in 0..3 {
+        let msgs = game
+            .interact(
+                Action::AddAIPlayer {
+                    difficulty: BotDifficulty::Expert,
+                },
+                host,
+                &logger,
+            )
+            .unwrap();
+        bot_ids.push(added_bot_id(&msgs));
+    }
+    game.interact(Action::StartGame, host, &logger).unwrap();
+    let strong_bot = bot_ids[0];
+
+    let state = game.dump_state().unwrap();
+    let mut json = serde_json::to_value(&state).unwrap();
+    {
+        let draw = json.get_mut("Draw").expect("must be in Draw phase");
+        // Drawing is STILL ONGOING: a non-empty deck, and it is a BOT's turn to
+        // draw (position 1 = the first bot; seat 0 is the human host). No bid yet,
+        // no pinned landlord (round one).
+        let c3 = C_3.as_char().to_string();
+        let c4 = C_4.as_char().to_string();
+        draw["deck"] = serde_json::json!([c3.clone(), c4.clone(), c3.clone(), c4.clone()]);
+        draw["position"] = serde_json::json!(1);
+        draw["bids"] = serde_json::json!([]);
+        draw["autobid"] = serde_json::Value::Null;
+        draw["propagated"]["landlord"] = serde_json::Value::Null;
+
+        let s2 = S_2.as_char().to_string();
+        let s3 = S_3.as_char().to_string();
+        let s4 = S_4.as_char().to_string();
+        let s5 = S_5.as_char().to_string();
+        let s6 = S_6.as_char().to_string();
+        let s7 = S_7.as_char().to_string();
+        let s8 = S_8.as_char().to_string();
+        let s9 = S_9.as_char().to_string();
+
+        let mut hands_map = serde_json::Map::new();
+        for pl in draw["propagated"]["players"].as_array().unwrap() {
+            let id = pl["id"].as_u64().unwrap() as usize;
+            let hand = if id == strong_bot.0 {
+                // Already-strong PARTIAL spade hand: clears the declaration
+                // threshold even though drawing isn't done.
+                serde_json::json!({
+                    s2.clone(): 2, s3.clone(): 1, s4.clone(): 1, s5.clone(): 1,
+                    s6.clone(): 1, s7.clone(): 1, s8.clone(): 1, s9.clone(): 1,
+                })
+            } else {
+                serde_json::json!({ c3.clone(): 2, c4.clone(): 2 })
+            };
+            hands_map.insert(id.to_string(), hand);
+        }
+        draw["hands"]["hands"] = serde_json::Value::Object(hands_map);
+    }
+    let patched: GameState = serde_json::from_value(json).expect("patched Draw must deserialize");
+    let game = InteractiveGame::new_from_state(patched);
+
+    // Sanity: drawing is genuinely still ongoing.
+    if let GameState::Draw(p) = &game.dump_state().unwrap() {
+        assert!(!p.done_drawing(), "deck must still have cards (mid-draw)");
+        assert!(!p.bid_decided(), "no bid should be decided yet");
+    } else {
+        panic!("expected a Draw phase");
+    }
+
+    // The driver must DECLARE mid-draw (the strong bot's opening declaration),
+    // NOT just draw a card. Before the fix, bots only ever declared once the deck
+    // was fully drawn.
+    let (actor, action) = next_bot_action(&game, true)
+        .expect("next_bot_action must not error")
+        .expect("a bot must act mid-draw");
+    assert_eq!(
+        actor, strong_bot,
+        "the strong bot must be the one to declare mid-draw"
+    );
+    assert!(
+        matches!(action, Action::Bid(card, _) if card == S_2),
+        "the bot must declare spades (S_2) mid-draw, got {:?}",
+        action
+    );
+
+    // The cheap classifier treats all `!done_drawing()` draw work as an un-paced
+    // BURST, and a freshly-planned mid-draw declaration must still APPLY (not be
+    // dropped by the re-check, even though the declaring seat is not the drawer).
+    assert_eq!(
+        classify_next_bot_work(&game, true).unwrap(),
+        NextBotWork::Burst,
+        "mid-draw work (incl. a declaration) must classify as an un-paced burst"
+    );
+    let mut game2 = game;
+    let step = plan_next_bot_action(&game2, true).unwrap().unwrap();
+    assert!(
+        step.pause.is_none(),
+        "a mid-draw declaration must be un-paced (part of the draw burst), got {:?}",
+        step.pause
+    );
+    assert!(
+        apply_planned_bot_action(&mut game2, &step, true, &logger)
+            .unwrap()
+            .is_some(),
+        "a freshly-planned mid-draw declaration must apply, not be dropped"
+    );
 }
 
 /// Build the exact parked position from the test above: a fully-drawn DrawPhase

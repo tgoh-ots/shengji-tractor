@@ -95,7 +95,7 @@ const WebsocketProvider: React.FunctionComponent<
   const deliberateCloseRef = React.useRef<boolean>(false);
   const reconnectAttemptsRef = React.useRef<number>(0);
   const reconnectTimerRef = React.useRef<number | null>(null);
-  const connectRef = React.useRef<(isReconnect: boolean) => void>(() => {});
+  const connectRef = React.useRef<() => void>(() => {});
 
   // Because state/updateState are passed in and change every time something
   // happens, we need to maintain a reference to these props to prevent stale
@@ -174,11 +174,11 @@ const WebsocketProvider: React.FunctionComponent<
       reconnectAttemptsRef.current = attempt + 1;
       reconnectTimerRef.current = window.setTimeout(() => {
         reconnectTimerRef.current = null;
-        connectRef.current(true);
+        connectRef.current();
       }, delay);
     };
 
-    const connect = (isReconnect: boolean): void => {
+    const connect = (): void => {
       const ws = new WebSocket(computeUri());
       wsRef.current = ws;
       setWebsocket(ws);
@@ -190,10 +190,19 @@ const WebsocketProvider: React.FunctionComponent<
           everConnected: true,
           reconnecting: false,
         });
-        // On a reconnect the JoinRoom form (which normally sends the handshake)
-        // isn't mounted, so replay it here to reclaim the seat by name.
+        // Auto-replay the JoinRoom handshake whenever we already have a sticky
+        // room + name. This covers BOTH:
+        //   * a reconnect after an unexpected drop (the JoinRoom form isn't
+        //     mounted, so it can't send the handshake itself), and
+        //   * a fresh page load / tab restore where the room was recovered from
+        //     the URL hash or localStorage — we silently reclaim the same seat by
+        //     name instead of dumping the player back on the JoinRoom screen.
+        // The server treats a rejoin under an existing name as idempotent (see
+        // shengji_handler::register_user), so this is safe even if we're the
+        // first to (re)create the room. If we have no sticky room/name yet, we
+        // skip this and let the JoinRoom form drive the first handshake.
         const { roomName, name } = stateRef.current;
-        if (isReconnect && roomName.length === 16 && name.length > 0) {
+        if (roomName.length === 16 && name.length > 0) {
           ws.send(
             JSON.stringify({
               room_name: roomName,
@@ -269,7 +278,7 @@ const WebsocketProvider: React.FunctionComponent<
     };
 
     connectRef.current = connect;
-    connect(false);
+    connect();
 
     return () => {
       if (timerRef.current !== null) {
@@ -308,7 +317,7 @@ const WebsocketProvider: React.FunctionComponent<
       reconnectTimerRef.current = null;
     }
     updateStateRef.current({ reconnecting: true });
-    connectRef.current(true);
+    connectRef.current();
   };
 
   // TODO(read this from consumers instead of globals)

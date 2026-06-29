@@ -251,24 +251,21 @@ fn expected_bot_responsibility(
                         }
                     }
                 }
-            } else if let Some(landlord) = state.propagated().landlord {
-                match bot_for(&state, landlord) {
-                    Some(_) => Ok(Some((landlord, BotResponsibility::RevealCard))),
-                    None => Ok(None),
-                }
             } else {
-                // No bid and no landlord yet: a bot may bid. We can't know which
-                // bot (or whether any) wants to bid without the policy, so we
-                // classify this as a generic "a bot should act" keyed on the seat
-                // the planner will pick. To keep the re-check cheap AND precise we
-                // re-derive the SAME first-able-bot the planner uses below; but
-                // because the bid choice itself needs the policy, the planner
-                // resolves the concrete seat. For the re-check we accept ANY bot
-                // bid here (the bid window logic is unchanged), so we report the
-                // first seated bot as the responsible seat.
+                // No bid decided yet. A seated bot may either DECLARE a trump
+                // (place a bid) — legal whether or not a landlord is pinned — or,
+                // if the landlord is a bot and no one declares, REVEAL the bottom.
+                // Which one (and which seat) the planner picks needs the policy
+                // (`choose_bid`), which is too expensive for this cheap re-check.
+                // So we report a single generic "declare or reveal" key for any
+                // seated bot; `apply_planned_bot_action` accepts either a bid
+                // (from any seated bot) or the landlord bot's reveal, and the key
+                // being `DeclareOrReveal` still invalidates the step if the phase
+                // moved on (e.g. a bid landed, advancing to the bid-decided arm).
+                // If no bot is seated, nobody can act, so report None.
                 for player in state.propagated().players() {
                     if bot_for(&state, player.id).is_some() {
-                        return Ok(Some((player.id, BotResponsibility::Bid)));
+                        return Ok(Some((player.id, BotResponsibility::DeclareOrReveal)));
                     }
                 }
                 Ok(None)
@@ -318,10 +315,13 @@ enum BotResponsibility {
     ResetGame,
     /// The standing-bid bot finalizes the landlord by picking up the kitty.
     PickUpKitty,
-    /// The pre-selected-landlord bot reveals the bottom (auto-bid).
-    RevealCard,
-    /// A bot may place a bid (no bid/landlord yet).
-    Bid,
+    /// No bid is decided yet: a seated bot may either DECLARE a trump (place a
+    /// bid — legal whether or not a landlord is pinned) or, if the landlord is a
+    /// bot and nobody declares, REVEAL the bottom. The concrete action and seat
+    /// are policy-dependent, so the re-check (see [`Self::matches_action`] and
+    /// the dedicated arm in [`apply_planned_bot_action`]) accepts either a bid
+    /// from any seated bot or the landlord bot's reveal.
+    DeclareOrReveal,
     /// The winning bot finishes a completed, bot-won trick.
     EndTrick,
     /// A policy-selected move (draw, exchange step, or play). The concrete action
@@ -336,8 +336,9 @@ impl BotResponsibility {
         match self {
             BotResponsibility::ResetGame => matches!(action, Action::ResetGame),
             BotResponsibility::PickUpKitty => matches!(action, Action::PickUpKitty),
-            BotResponsibility::RevealCard => matches!(action, Action::RevealCard),
-            BotResponsibility::Bid => matches!(action, Action::Bid(..)),
+            BotResponsibility::DeclareOrReveal => {
+                matches!(action, Action::Bid(..) | Action::RevealCard)
+            }
             BotResponsibility::EndTrick => matches!(action, Action::EndTrick),
             // A policy-selected move: any of the per-phase select actions. We do
             // not over-constrain here; `interact` enforces concrete legality.
@@ -389,14 +390,20 @@ pub fn plan_next_bot_action(
         None => return Ok(None),
     };
 
+    // A declaration made WHILE the deck is still being drawn is part of the draw
+    // BURST (it fast-forwards with the deal, exactly like the bot draws), so it
+    // must NOT be paced — otherwise this disagrees with `classify_next_bot_work`,
+    // which classifies all `!done_drawing()` draw-phase work as Burst (no pause).
+    // Only post-draw declarations / plays / kitty decisions are paced.
+    let in_draw_burst = matches!(game.dump_state()?, GameState::Draw(ref p) if !p.done_drawing());
     let pause = if defer_bot_trick_finish && matches!(action, Action::EndTrick) {
         // Stop BEFORE applying the winning bot's EndTrick (longer pause).
         Some(BotPause::TrickClear)
-    } else if defer_bot_trick_finish && is_paceable_bot_action(&action) {
+    } else if defer_bot_trick_finish && !in_draw_burst && is_paceable_bot_action(&action) {
         // Apply, then a short per-action pause.
         Some(BotPause::Action)
     } else {
-        // A burst step (draw / reset): apply with no pause.
+        // A burst step (draw / mid-draw declaration / reset): apply with no pause.
         None
     };
 
@@ -436,17 +443,38 @@ pub fn apply_planned_bot_action(
 ) -> Result<Option<Vec<(BroadcastMessage, String)>>, Error> {
     let expected = expected_bot_responsibility(game, respect_human_bid_window)?;
     let still_valid = match expected {
-        Some((bot_id, BotResponsibility::Bid)) => {
-            // Opening-bid case: which seat bids is policy-dependent (the planner
-            // picks the first bot that WANTS to bid, which may not be the first
-            // seated bot reported cheaply here). So we accept ANY seated bot's bid
-            // as long as the world still expects an opening bid and the planned
-            // actor is itself a bot. `interact` re-validates the concrete bid's
-            // legality. We still require the cheap key to BE `Bid` so a phase
-            // change since planning correctly invalidates the step.
+        Some((bot_id, BotResponsibility::DeclareOrReveal)) => {
+            // No-bid draw arm: the planner may either have ANY seated bot DECLARE
+            // (which seat bids is policy-dependent, not necessarily the first
+            // seated bot reported cheaply here) or have the pinned landlord (a
+            // bot) REVEAL the bottom. Accept either: a bid from any seated bot, or
+            // a reveal by the landlord seat. `interact` re-validates the concrete
+            // move's legality, and the cheap key being `DeclareOrReveal` already
+            // invalidates the step if the phase moved on since planning (e.g. a
+            // bid landed, advancing to the bid-decided arm).
             let _ = bot_id;
-            matches!(step.action, Action::Bid(..))
-                && bot_for(&game.dump_state()?, step.bot_id).is_some()
+            let state = game.dump_state()?;
+            match &step.action {
+                Action::Bid(..) => bot_for(&state, step.bot_id).is_some(),
+                Action::RevealCard => {
+                    state.propagated().landlord == Some(step.bot_id)
+                        && bot_for(&state, step.bot_id).is_some()
+                }
+                _ => false,
+            }
+        }
+        Some((_, BotResponsibility::Select)) if matches!(step.action, Action::Bid(..)) => {
+            // Mid-draw OPENING declaration. While the deck is still being drawn the
+            // cheap classifier reports `(drawer, Select)`, but a bot may DECLARE a
+            // trump mid-draw (declaration isn't turn-based), so the declaring seat
+            // won't match the reported drawer. Accept any seated bot's bid as long
+            // as the world is still a not-yet-done Draw phase with no bid decided
+            // (so a declaration that already landed during the off-lock compute is
+            // correctly dropped — the planner only opens once). `interact`
+            // re-validates the concrete bid's legality.
+            let s = game.dump_state()?;
+            matches!(&s, GameState::Draw(p) if !p.done_drawing() && !p.bid_decided())
+                && bot_for(&s, step.bot_id).is_some()
         }
         Some((bot_id, responsibility)) => {
             bot_id == step.bot_id && responsibility.matches_action(&step.action)
@@ -479,8 +507,7 @@ fn is_unpaced_burst_responsibility(state: &GameState, kind: BotResponsibility) -
         // Exchange / Play phases a `Select` is a paceable, possibly-expensive move.
         BotResponsibility::Select => matches!(state, GameState::Draw(_)),
         BotResponsibility::PickUpKitty
-        | BotResponsibility::RevealCard
-        | BotResponsibility::Bid
+        | BotResponsibility::DeclareOrReveal
         | BotResponsibility::EndTrick => false,
     }
 }
@@ -679,8 +706,12 @@ pub fn advance_bots(
         // bid, kitty/landlord/exchange decision) is APPLIED and then we stop so it
         // can be published and a SHORT pause lets the human register it before the
         // next bot acts. Draws and the reset confirmation are NOT paced — they
-        // fall through and keep bursting in this same call.
-        let pace_after = defer_bot_trick_finish && is_paceable_bot_action(&action);
+        // fall through and keep bursting in this same call. A declaration made
+        // mid-draw is likewise part of the draw burst (see `plan_next_bot_action`),
+        // so it is not paced either.
+        let pace_after = defer_bot_trick_finish
+            && is_paceable_bot_action(&action)
+            && !matches!(game.dump_state()?, GameState::Draw(ref p) if !p.done_drawing());
 
         let msgs = game.interact(action, bot_id, logger)?;
         out.extend(msgs);
@@ -827,6 +858,41 @@ fn next_bot_action(
                 let next_player = p.next_player()?;
                 match bot_for(&state, next_player) {
                     Some(difficulty) => {
+                        // DECLARE DURING THE DRAW. Bidding is not turn-based: any
+                        // seat may declare a trump suit as its cards come out. So
+                        // before this bot takes its draw, let ANY bot make an
+                        // OPENING declaration if its (partial) hand is already
+                        // strong enough (`choose_bid` only fires on a genuinely
+                        // strong holding, and Enoch additionally waits until most
+                        // of its hand is dealt — see its "don't declare too early"
+                        // guard). We gate on `!bid_decided()` so only the OPENING
+                        // declaration is made mid-draw; counters / finalization
+                        // happen once the deck is fully drawn (the branches below),
+                        // which keeps the mid-draw burst free of bidding wars.
+                        //
+                        // We run this only while it is a BOT's turn to draw so the
+                        // cheap classifier (`expected_bot_responsibility`, which
+                        // reports `Select` here and `None` on a human's draw turn)
+                        // stays consistent with this planner. On a human's draw
+                        // turn we defer the check to the next bot draw — an
+                        // imperceptible delay since the human is drawing in a burst.
+                        //
+                        // Honest: `choose_bid` reads only the acting bot's OWN hand
+                        // and valid bids (never another seat's cards), exactly like
+                        // the post-draw declaration path below.
+                        if !p.bid_decided() {
+                            for player in state.propagated().players() {
+                                if let Some(d) = bot_for(&state, player.id) {
+                                    if let Some(bid) = policy::choose_bid(p, player.id, d) {
+                                        return Ok(Some((
+                                            player.id,
+                                            Action::Bid(bid.card, bid.count),
+                                        )));
+                                    }
+                                }
+                            }
+                        }
+                        // No declaration: the bot whose turn it is draws its card.
                         let view = observed_state(game, next_player, difficulty)?;
                         Ok(policy::select_action(&view, next_player, difficulty)?
                             .map(|action| (next_player, action)))
@@ -897,21 +963,23 @@ fn next_bot_action(
                         }
                     }
                 }
-            } else if let Some(landlord) = state.propagated().landlord {
-                // No bid yet, but a landlord has been pre-selected: mirror
-                // simulate_play's no-bid path by revealing the bottom (auto-bid) if
-                // the landlord is a bot.
-                match bot_for(&state, landlord) {
-                    Some(_) => Ok(Some((landlord, Action::RevealCard))),
-                    None => Ok(None),
-                }
             } else {
-                // No bid and no landlord yet. Let bots bid by strength: each bot
-                // evaluates its hand and bids only if it has a genuinely strong
-                // trump holding (so we don't overbid weak hands). To guarantee
-                // the table always makes progress, if NO bot wants a strategic
-                // bid we fall back to the lowest-count legal bid from the first
-                // able bot. If no bot can bid at all, stop and let humans act.
+                // No bid decided yet (whether or NOT a landlord has been
+                // pre-selected). FIRST, let any seated bot place a STRATEGIC
+                // declaration: each bot evaluates its hand and bids only if it
+                // has a genuinely strong trump holding (so we don't overbid weak
+                // hands).
+                //
+                // Crucially this runs EVEN WHEN A LANDLORD IS PINNED. The pinned
+                // landlord (every round after the first; see
+                // `PlayPhase::finish_game`, which sets `propagated.landlord` to
+                // the next round's landlord) does NOT consume the bidding round —
+                // declaring the trump SUIT is open to all seats, who bid at the
+                // landlord's level. The previous code short-circuited to "the
+                // landlord reveals / park" the moment a landlord was set, so
+                // non-landlord bots could never declare. That is the reported
+                // "the bots don't bid during the draw phase at all" bug: it only
+                // manifested from round two onward, once a landlord was pinned.
                 for player in state.propagated().players() {
                     if let Some(difficulty) = bot_for(&state, player.id) {
                         if let Some(bid) = policy::choose_bid(p, player.id, difficulty) {
@@ -919,16 +987,27 @@ fn next_bot_action(
                         }
                     }
                 }
-                // No bot wanted a strategic bid. The minimal legal-bid FALLBACK
-                // below exists ONLY to keep a pure all-bot table from deadlocking
-                // when the deck is drawn but nobody has bid. We must NOT fire it
-                // when a HUMAN is seated: doing so robs the human of their bidding
-                // turn (a bot would force a weak bid and immediately resolve the
+
+                // No bot wanted a strategic declaration. Resolve the remaining
+                // no-bid path by whether a landlord is pinned:
+                if let Some(landlord) = state.propagated().landlord {
+                    // A landlord is pinned. If it is a BOT, it reveals the bottom
+                    // (auto-bid) to fix the trump and proceed; if it is a HUMAN,
+                    // PARK so they can reveal / declare / pick up via the UI.
+                    return match bot_for(&state, landlord) {
+                        Some(_) => Ok(Some((landlord, Action::RevealCard))),
+                        None => Ok(None),
+                    };
+                }
+
+                // No landlord pre-selected (round one). The minimal legal-bid
+                // FALLBACK below exists ONLY to keep a pure all-bot table from
+                // deadlocking when the deck is drawn but nobody has bid. We must
+                // NOT fire it when a HUMAN is seated: doing so robs the human of
+                // their bidding turn (a bot would force a weak bid and resolve the
                 // landlord, racing the deal into play before the human can bid).
                 // With a human present we instead PARK here (return None) so the
-                // human can bid, reveal the bottom, or pass via the UI. (A
-                // pre-selected landlord or a human bid takes a different branch
-                // above; this branch is reached only when the human can still act.)
+                // human can bid, reveal the bottom, or pass via the UI.
                 let any_human_seat = state
                     .propagated()
                     .players()
@@ -1075,6 +1154,22 @@ fn enoch_flip_bid(
             .count()
     };
 
+    // The bidding level is the PINNED landlord's rank when one is set (every
+    // round after the first — all seats declare at the landlord's level), and
+    // only falls back to each seat's own rank in round one (no landlord). Using
+    // the seat's own rank when a landlord was pinned mis-defined the trump (the
+    // wrong trump-number cards counted), which is exactly the counter-declaration
+    // this function evaluates — so the standing/new strength comparison and the
+    // "more cards in the new suit" guard were both computed against a wrong trump.
+    let pinned_level = state.propagated().landlord.and_then(|l| {
+        state
+            .propagated()
+            .players()
+            .iter()
+            .find(|pl| pl.id == l)
+            .map(|pl| pl.rank())
+    });
+
     for player in state.propagated().players() {
         let seat = player.id;
         if seat == standing_winner {
@@ -1083,7 +1178,7 @@ fn enoch_flip_bid(
         if !matches!(bot_for(state, seat), Some(BotDifficulty::Enoch)) {
             continue; // only Enoch flips
         }
-        let level = player.rank();
+        let level = pinned_level.unwrap_or_else(|| player.rank());
         let hand: Vec<Card> = match p.hands().get(seat) {
             Ok(h) => Card::cards(h.iter()).copied().collect(),
             Err(_) => continue,

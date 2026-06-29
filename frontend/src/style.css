@@ -476,15 +476,24 @@ label {
   }
 }
 
-/* On phones, fan/overlap the hand harder so ~25 cards always fit. */
+/* On phones the hand previously scrolled horizontally in a single row
+ * (white-space: nowrap + overflow-x: auto), which clipped/hid most of the hand
+ * off-screen. Instead, let the cards LINE-BREAK onto multiple rows so the whole
+ * hand is always visible without horizontal overflow.
+ *
+ * The cards (and the suit-group wrappers) are inline-block elements, so reverting
+ * to normal inline flow (white-space: normal) makes them wrap naturally — this
+ * works whether cards are split into per-suit groups or flattened into one group
+ * (the "don't separate by suit" setting). text-align centers each wrapped row.
+ * The intentional negative-margin overlap within a row is preserved. */
 @media (max-width: 640px) {
   .hand .unselected-cards,
   .hand .selected-cards {
     padding: 0 4px;
-    white-space: nowrap;
-    overflow-x: auto;
+    white-space: normal;
+    text-align: center;
+    overflow-x: visible;
     overflow-y: visible;
-    -webkit-overflow-scrolling: touch;
   }
 }
 

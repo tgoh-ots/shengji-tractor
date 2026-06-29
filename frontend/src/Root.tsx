@@ -65,7 +65,16 @@ const Root = (): JSX.Element => {
   // socket left behind. This mirrors the existing hash-based navigation used by
   // ResetButton / Initialize.
   const goHome = (): void => {
+    // Clear BOTH the hash and the persisted sticky room id, otherwise the next
+    // boot would silently recover the old room from localStorage (see
+    // AppStateProvider's roomNameState) and defeat "go home".
     window.location.hash = "";
+    try {
+      window.localStorage.removeItem("room_name");
+    } catch {
+      // Ignore storage failures (private mode / disabled storage); the hash
+      // clear + reload still drops us back on JoinRoom.
+    }
     window.location.reload();
   };
 

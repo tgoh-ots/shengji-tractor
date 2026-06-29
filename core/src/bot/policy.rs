@@ -595,13 +595,19 @@ pub fn choose_bid(
     if valid.is_empty() {
         return None;
     }
-    // The trump number for a bid is the bidder's own rank when there is no
-    // landlord yet (which is the only situation where the driver invokes us).
+    // The trump number a declaration establishes is the LANDLORD's rank when a
+    // landlord is pinned (every round after the first — all seats bid at the
+    // landlord's level, mirroring `Bid::valid_bids` / `DrawPhase::advance`),
+    // otherwise the bidder's own rank (round one, no landlord). Using `me`'s rank
+    // unconditionally mis-scored the candidate trump (it counted the wrong
+    // trump-number cards) once a landlord was pinned, now that bots declare in
+    // those rounds too.
+    let level_seat = p.propagated().landlord().unwrap_or(me);
     let level = p
         .propagated()
         .players()
         .iter()
-        .find(|pl| pl.id == me)
+        .find(|pl| pl.id == level_seat)
         .map(|pl| pl.rank())
         .unwrap_or(Rank::Number(Number::Two));
     let hand: Vec<Card> = p

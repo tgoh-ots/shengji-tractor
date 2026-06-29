@@ -117,11 +117,30 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
 
     let next =
       this.props.state.propagated.players[this.props.state.position].id;
-    if (
-      this.props.state.deck.length === 0 &&
-      this.props.state.bids.length > 0
-    ) {
-      next = this.props.state.bids[this.props.state.bids.length - 1].id;
+    if (this.props.state.deck.length === 0) {
+      // Deck fully drawn: the seat that finalizes bidding (picks up the kitty)
+      // is the landlord. This MUST mirror the backend's DrawPhase::next_player
+      // exactly. A pinned landlord (every round after the first, and any
+      // pre-selected first landlord) takes precedence over the bids; only when
+      // no landlord is pinned is the winner resolved from the bids by the
+      // configured first-landlord-selection policy.
+      //
+      // The old code used the last *bidder* unconditionally, which was wrong
+      // whenever a landlord was pinned: a human who DECLARED as a NON-landlord
+      // looked like the standing winner here, so `isStandingWinner` was true,
+      // their "Done bidding" button was hidden, and the game deadlocked — the
+      // bot landlord parked forever waiting for a "Done bidding" click the human
+      // could never make.
+      const landlord = this.props.state.propagated.landlord;
+      if (landlord !== null && landlord !== undefined) {
+        next = landlord;
+      } else if (this.props.state.bids.length > 0) {
+        next =
+          this.props.state.propagated.first_landlord_selection_policy ===
+          "ByFirstBid"
+            ? this.props.state.bids[0].id
+            : this.props.state.bids[this.props.state.bids.length - 1].id;
+      }
     }
 
     const players: { [playerId: number]: Player } = {};
