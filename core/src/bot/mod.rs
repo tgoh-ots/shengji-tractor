@@ -54,7 +54,14 @@ pub enum BotDifficulty {
     /// scoring legal candidates from HONEST features only, used as the prior of a
     /// time-boxed determinized search. Falls back to the shared hand-written
     /// heuristic prior if the model can't run. See [`crate::bot::expert`].
+    ///
+    /// `serde(alias = "Hard")`: the former `Hard` tier was removed; any persisted
+    /// state, saved setting, or in-flight client message that still names "Hard"
+    /// (e.g. a room created before the tier was dropped) deserializes as `Expert`
+    /// (its closest surviving equivalent — search over the heuristic) instead of
+    /// failing with "unknown variant `Hard`".
     #[default]
+    #[serde(alias = "Hard")]
     Expert,
     /// Strongest HONEST tier: the same determinized search over the improved
     /// heuristic, plus an "enoch mode" full-game playbook (pair-aware declaring,

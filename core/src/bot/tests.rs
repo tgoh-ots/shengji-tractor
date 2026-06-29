@@ -3392,3 +3392,37 @@ fn test_classify_next_bot_work_agrees_with_planner() {
         "expected at least one paceable step (bid/play/etc.)"
     );
 }
+
+/// Regression (do not delete): the `Hard` bot tier was removed. Any persisted
+/// room state, saved setting, or in-flight client message that still names
+/// "Hard" MUST keep deserializing — as `Expert` (via `#[serde(alias = "Hard")]`
+/// on `BotDifficulty::Expert`) — instead of failing with "unknown variant
+/// `Hard`". That failure froze clients mid-game (the wasm state-sync rejects the
+/// whole update) and rejected actions on the server. serde applies the alias
+/// wherever `BotDifficulty` is nested, so guarding the enum + one nested message
+/// layer covers every path. If another variant is ever removed, add the same
+/// alias shim and a case here.
+#[test]
+fn legacy_hard_difficulty_deserializes_as_expert() {
+    // Enum level.
+    assert_eq!(
+        serde_json::from_str::<BotDifficulty>("\"Hard\"").unwrap(),
+        BotDifficulty::Expert,
+    );
+    // Nested in a real client->server action (the actual failure mode: an
+    // AddAIPlayer carrying the legacy "Hard").
+    match serde_json::from_str::<Action>(r#"{"AddAIPlayer":{"difficulty":"Hard"}}"#).unwrap() {
+        Action::AddAIPlayer { difficulty } => assert_eq!(difficulty, BotDifficulty::Expert),
+        _ => panic!("expected AddAIPlayer"),
+    }
+    // Surviving variants still round-trip cleanly.
+    for v in [
+        BotDifficulty::Easy,
+        BotDifficulty::Expert,
+        BotDifficulty::Enoch,
+        BotDifficulty::Omniscient,
+    ] {
+        let s = serde_json::to_string(&v).unwrap();
+        assert_eq!(serde_json::from_str::<BotDifficulty>(&s).unwrap(), v);
+    }
+}
