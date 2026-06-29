@@ -865,6 +865,49 @@ fn enoch_lead_bonus(
     };
     let early = ctx.my_hand_size >= 14;
 
+    // --- Never OPEN with high trump (Trip Holder) --------------------------
+    // "Stop opening as a big trump. Stop opening with jokers. Never play a naked
+    //  joker to start. Never start with the small joker or the trump-rank card.
+    //  This should be a 0% frequency." Because `score_lead` only runs for the
+    //  player OPENING a trick, every lead here is a trick opening, so we apply a
+    //  heavy penalty to a single (naked) joker, the trump-rank (trump-number)
+    //  card, or any big trump lead. The ONLY exception is the rare "bleed" line:
+    //  when Enoch is sitting on ~15+ trump cards it may open high trump to strip
+    //  everyone else of trump. That exception is gated on `my_trump_count >= 15`.
+    let bleed_exception = ctx.my_trump_count >= 15;
+    if trumping && !bleed_exception {
+        let s = boss_strength(trump, lead);
+        let is_naked_joker = s >= 999 && len < 2.0;
+        let is_trump_rank = matches!(
+            lead,
+            Card::Suited { number, .. } if trump.number() == Some(number)
+        );
+        // A "big trump" here is any trump at or above a high spot card (Jack+ of
+        // the trump suit, the trump-number cards, or the jokers).
+        let is_big_trump = s >= 11;
+        // The shared scorer credits a high card's raw strength (`+0.05*strength`,
+        // ≈ +50 for a joker / trump-number) and gives jokers a guaranteed-top
+        // bonus, so the open-penalty must be LARGE enough to drive these clearly
+        // negative — and below any reasonable ace open — for a true ~0% frequency.
+        if is_naked_joker {
+            bonus -= 90.0; // a naked joker open is the worst offender → ~0%
+        } else if is_trump_rank {
+            bonus -= 85.0; // opening the trump-rank card is forbidden
+        } else if is_big_trump {
+            bonus -= 30.0; // any other big trump open is strongly discouraged
+        }
+    }
+
+    // --- Ace-first single leading (Trip Holder) ----------------------------
+    // "Open up with your aces, which is good — prioritize aces, then pairs,
+    //  tractors, high pairs, then low pairs." A single non-trump BOSS (a side-suit
+    //  ace, or any uncatchable single) is the textbook opener: it cashes a winner
+    //  and draws out opponents' high cards risk-free. Give it a clean bump so a
+    //  cashable ace opens ahead of a speculative low pair.
+    if !trumping && len < 2.0 && is_boss {
+        bonus += 4.0;
+    }
+
     // --- Tractor-first (and strong-pair-first) leading ---------------------
     // A multi-card non-trump unit is a pair (len 2) or a tractor (len >= 4 with
     // consecutive pairs). Leading these EARLY, before they fragment, is the
@@ -928,19 +971,30 @@ fn enoch_lead_bonus(
         }
     }
 
-    // --- Defender low-trump hand-off ---------------------------------------
-    // A defender, LATE in the hand and once its boss cards are spent, leading a
-    // SMALL non-boss trump deliberately burns the attackers' trump and tosses the
-    // lead to a partner who can then run a suit. The shared scorer penalizes a
-    // non-boss trump lead (-5) for the defending side; for Enoch defenders late in
-    // the game we PARTIALLY offset that so the hand-off becomes a deliberate tool
-    // rather than a reflexive blunder. Gated to the very late game and to the case
-    // where we have NO boss lead available (no high cards to cash first).
+    // --- Defender low-trump hand-off (Trip Holder) -------------------------
+    // For the mid/late-game partner HAND-OFF — "pass it to your partner with a
+    //  LOW trump card, like a two, three, or four, something small, non-points;
+    //  NEVER a joker or the trump-rank number" — a defender, once its boss cards
+    //  are spent, leads a SMALL non-point trump to burn the attackers' trump and
+    //  toss the lead to a partner who can then run a suit. The shared scorer
+    //  penalizes a non-boss trump lead (-5) for the defending side; we PARTIALLY
+    //  offset that ONLY for a genuinely small, non-point, non-rank trump so the
+    //  hand-off becomes a deliberate tool rather than a reflexive blunder. Gated
+    //  to the late game and to the case where we have NO boss lead available (no
+    //  high cards to cash first).
     if trumping && !is_boss && !ctx.me_is_attacker && len < 2.0 && late >= 1.0 {
-        let max_boss = boss_strength(trump, lead);
+        let s = boss_strength(trump, lead);
+        // A small trump: low trump-suit spot card (2/3/4 ⇒ strength 2..=4), and
+        // never a joker / trump-number card (those are >= 997) nor a point card.
+        let is_small_trump = s <= 4;
+        let is_trump_rank = matches!(
+            lead,
+            Card::Suited { number, .. } if trump.number() == Some(number)
+        );
         let have_boss_lead = my_best_nontrump_is_boss(ctx, p);
-        if max_boss < 100 && !have_boss_lead {
-            // Offset most (not all) of the -5 hoard penalty: a deliberate hand-off.
+        if is_small_trump && !is_trump_rank && !is_point(lead) && !have_boss_lead {
+            // Offset most (not all) of the -5 hoard penalty: a deliberate hand-off
+            // with a SMALL trump (never a joker / rank card).
             bonus += 4.0;
         }
     }
@@ -1303,6 +1357,43 @@ pub fn score_follow(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
     }
 
     if ctx.enoch {
+        // --- Dump points to a WINNING PARTNER (Trip Holder) ----------------
+        // "If your partner is winning — dropping a big joker / small joker and
+        //  winning the trick — then it's OK to drop points. You should be dropping
+        //  points instead of saving them. Why are you saving them?" When our
+        //  partner currently holds the trick, ADD to the shared partner-feed
+        //  reward so Enoch actively sheds 10s/Ks/5s rather than hoarding them. We
+        //  feed hardest when the partner is LOCKED (the trick is theirs for sure)
+        //  and a touch more cautiously when an opponent can still steal.
+        if partner_winning && my_point_contribution > 0 && !would_beat {
+            if winner_locked || !opp_after_me {
+                // Partner has it for sure: shed every point we can.
+                score += my_point_contribution as f64 * 2.0;
+            } else {
+                // Stealable: still favor dumping, but a smaller bump.
+                score += my_point_contribution as f64 * 0.8;
+            }
+        }
+
+        // --- Smallest card when we CANNOT win (Trip Holder) ----------------
+        // "If you don't think you can win the trick, just play the smallest
+        //  possible card. Don't waste your high trumps / jokers for no reason." If
+        //  no opponent-/partner-winning consideration calls for strength here (we
+        //  can't beat the current winner, and we're not feeding a winning partner),
+        //  penalize spending strength so Enoch ducks with its LOWEST card and never
+        //  burns a high trump or joker on a trick it can't take.
+        let feeding_partner = partner_winning && my_point_contribution > 0;
+        if !would_beat && !feeding_partner {
+            // Scale by the strength of what we'd spend; jokers / high trump hurt
+            // most, so a low card is strictly preferred. This is on TOP of the
+            // shared can't-win duck term, making the smallest-card duck decisive.
+            score -= max_strength as f64 * 0.08;
+            if trumping_in {
+                // Wasting a trump on an unwinnable trick is the worst case.
+                score -= 6.0;
+            }
+        }
+
         // Endgame kitty protection (follow side). If WE buried a point-rich kitty
         // (only the exchanger knows this), in the late game we should HOARD trump
         // / high cards to win the LAST trick rather than spend them ruffing a
@@ -1689,11 +1780,19 @@ pub fn choose_kitty(hand: &[Card], trump: Trump, kitty_size: usize) -> Vec<Card>
 /// How many POINT cards' worth of points the Enoch playbook is willing to bury in
 /// the kitty, given the landlord's hand strength. The kitty is doubled when the
 /// attacking side wins the last trick, so points are only safe to bury when we
-/// expect to TAKE that last trick — which is a function of jokers + trump length:
+/// expect to TAKE that last trick — which is a function of jokers + trump length.
 ///
-/// * ~4 jokers and lots of trump → bury freely (cap high).
-/// * 1-3 jokers and a decent trump holding → up to ~20-30 points.
-/// * below-average trump (~8-10) → 0-5 points.
+/// Trip Holder: "How come you never put any points in the kitty as a declarer? If
+/// you have a decent amount of trumps or a few jokers, you SHOULD be putting
+/// points in the kitty." The old budget was far too stingy (it demanded jokers
+/// before allowing more than 5 points), so a strong-but-jokerless hand buried
+/// nothing. We loosen it so a strong hand buries a HEALTHY amount of points while
+/// a weak hand still buries none:
+///
+/// * dominant (~4 jokers + lots of trump) → bury freely (cap high).
+/// * a few jokers OR a long trump holding → up to ~20-25 points.
+/// * a decent trump holding (jokerless) → up to ~10-15 points.
+/// * below-average trump → a small allowance.
 /// * a weak hand → bury no points.
 ///
 /// Returns the maximum total point-VALUE to allow in the kitty.
@@ -1708,25 +1807,47 @@ fn enoch_point_budget(hand: &[Card], trump: Trump) -> usize {
         .sum();
 
     // The enthusiast's "average trump you'll hold is ~8-10"; treat 9 as average.
+    // A strong hand expects to win the last trick (and reclaim the doubled kitty),
+    // so it should sink points rather than strand them in play.
     if jokers >= 4 && trump_count >= 12 {
         // Dominant: confident of the last trick; bury as much as we like.
         100
-    } else if jokers >= 1 && trump_count >= 10 {
-        30
+    } else if jokers >= 2 || trump_count >= 12 {
+        // Strong: a couple of jokers OR a long trump holding.
+        25
+    } else if jokers >= 1 || trump_count >= 10 {
+        // Good: a joker or an above-average trump holding.
+        20
     } else if trump_count >= 8 {
-        5
+        // Decent (jokerless) trump holding still warrants burying real points.
+        15
+    } else if trump_count >= 6 {
+        // Below average: a small allowance.
+        10
     } else {
+        // Weak hand: bury no points.
         0
     }
 }
 
-/// Enoch's kitty-burial discipline (`docs/strategy/double-holder.txt`). Same
-/// "void a short side suit, bury low trash" backbone as [`choose_kitty`], but it
-/// HARD-PROTECTS the cards the enthusiast says never to bury — aces, strong pairs
-/// (jack-pair and higher), all trump, and the current bid-rank (trump-number)
-/// card — and only buries POINT cards up to a hand-strength-scaled budget (so a
-/// strong hand may sink points it expects to recover on the last trick, while a
-/// weak hand buries none). Honest — reads only `me`'s own combined pool.
+/// Enoch's kitty-burial discipline (Trip Holder refinement). Same "void a side
+/// suit, bury low trash" backbone as [`choose_kitty`], but it HARD-PROTECTS the
+/// cards the enthusiast says never to bury — aces, ALL pairs, all trump, and the
+/// current bid-rank (trump-number) card. Per Trip Holder:
+///
+/// * "Stop laying pairs in the kitty as a declarer — don't do that. You CAN do it
+///   at a low frequency if it helps you get rid of a suit." So EVERY pair is
+///   protected by default, and the protection is relaxed ONLY for a side suit we
+///   can FULLY void within the kitty (the sole sanctioned exception).
+/// * "Prioritize getting rid of an ENTIRE suit first." We detect which side suits
+///   can be wholly voided within the kitty and give all their cards a large void
+///   bonus, so completing a suit-void outranks scattering trash.
+/// * "It's OK to lay points in there if you have a decent amount of trumps / a few
+///   jokers." Point burial is gated by the hand-strength budget
+///   ([`enoch_point_budget`]), so a strong hand sinks real points while a weak
+///   hand buries none.
+///
+/// Honest — reads only `me`'s own combined pool.
 pub fn choose_kitty_enoch(hand: &[Card], trump: Trump, kitty_size: usize) -> Vec<Card> {
     if kitty_size == 0 {
         return vec![];
@@ -1738,12 +1859,49 @@ pub fn choose_kitty_enoch(hand: &[Card], trump: Trump, kitty_size: usize) -> Vec
     let trump_number = trump.number();
     let point_budget = enoch_point_budget(hand, trump);
 
+    // --- Identify side suits we can FULLY void within the kitty -------------
+    // Voiding an ENTIRE side suit (so we can later ruff it) is the top kitty
+    // priority. A suit is a void target if it is a NON-trump side suit whose whole
+    // length fits in the kitty AND it contains no ace (we never bury an ace, so a
+    // suit holding one can't be cleanly voided). Among the eligible suits, prefer
+    // the SHORTEST (cheapest to void) and only mark as many as the kitty can hold.
+    let mut voidable: Vec<(usize, EffectiveSuit)> = by_suit
+        .iter()
+        .filter(|(suit, cards)| {
+            **suit != EffectiveSuit::Trump
+                && cards.len() <= kitty_size
+                && !cards.iter().any(|c| {
+                    matches!(
+                        c,
+                        Card::Suited {
+                            number: Number::Ace,
+                            ..
+                        }
+                    )
+                })
+        })
+        .map(|(suit, cards)| (cards.len(), *suit))
+        .collect();
+    voidable.sort_unstable();
+    // Greedily pick the shortest suits whose combined length fits the kitty; those
+    // are the suits whose pair-protection we relax (the sanctioned exception) and
+    // whose cards get the entire-suit void bonus.
+    let mut void_suits: std::collections::HashSet<EffectiveSuit> = std::collections::HashSet::new();
+    let mut void_budget = kitty_size;
+    for (len, suit) in voidable {
+        if len <= void_budget {
+            void_suits.insert(suit);
+            void_budget -= len;
+        }
+    }
+
     let mut scored: Vec<(f64, Card)> = hand
         .iter()
         .map(|&card| {
             let suit = trump.effective_suit(card);
             let strength = card_strength(trump, card);
             let held = counts.get(&card).copied().unwrap_or(0);
+            let in_void_suit = void_suits.contains(&suit);
             let mut bury = 0.0;
 
             // HARD protections (the enthusiast's "never bury these").
@@ -1762,28 +1920,50 @@ pub fn choose_kitty_enoch(hand: &[Card], trump: Trump, kitty_size: usize) -> Vec
                 if number == Number::Ace {
                     bury -= 1000.0; // never bury aces
                 }
-                // Strong pairs: jack-pair and higher held as a pair.
-                if held >= 2 && number.as_u32() >= Number::Jack.as_u32() {
-                    bury -= 1000.0;
+                // PAIRS: protect EVERY pair (not just jack-pair-and-higher), per
+                // Trip Holder. The only sanctioned exception is when the pair sits
+                // in a side suit we can fully VOID — relax the protection there so
+                // the entire-suit void can complete. (We still keep a mild cost so
+                // a void that does NOT need the pair prefers the singles.)
+                if held >= 2 {
+                    if in_void_suit {
+                        bury -= 5.0; // low-frequency exception: only to void a suit
+                    } else {
+                        bury -= 1000.0; // never bury a pair otherwise
+                    }
                 }
             }
             if strength >= 990 {
                 bury -= 1000.0; // jokers / trump-number tops
             }
 
-            // POINT cards: only buriable within the strength-scaled budget; the
-            // budget gate is enforced below, so here we just make them costly
-            // relative to plain trash (so trash is preferred first).
+            // POINT cards: their burial is gated by the hand-strength budget
+            // below. Trip Holder: a STRONG hand SHOULD bury points (they are safe
+            // in the kitty and come back doubled if it takes the last trick), so
+            // when we have a point budget we give points a POSITIVE burial
+            // incentive (ranked just under a clean suit-void). A weak hand has a
+            // zero budget, so the gate buries none regardless; the penalty there
+            // just keeps points from being attempted before trash.
             if is_point(card) {
-                bury -= 40.0;
+                if point_budget > 0 {
+                    bury += 15.0; // strong hand: deliberately sink points
+                } else {
+                    bury -= 40.0; // weak hand: never reach for points
+                }
             }
 
-            // Prefer to bury low cards and to VOID a short side suit (so we can
-            // ruff it later).
+            // Prefer to bury low cards and to VOID a side suit (so we can ruff it
+            // later). A suit we can FULLY void gets a big entire-suit bonus on
+            // every one of its cards, so completing the void outranks scattering
+            // trash across suits; otherwise fall back to the "shorter suit" nudge.
             bury += (15 - strength.min(15)) as f64;
             if suit != EffectiveSuit::Trump {
-                let len = suit_len.get(&suit).copied().unwrap_or(0);
-                bury += (6.0 - len as f64).max(0.0) * 2.0;
+                if in_void_suit {
+                    bury += 30.0; // prioritize getting rid of an ENTIRE suit
+                } else {
+                    let len = suit_len.get(&suit).copied().unwrap_or(0);
+                    bury += (6.0 - len as f64).max(0.0) * 2.0;
+                }
             }
             (bury, card)
         })
@@ -2380,6 +2560,400 @@ mod tests {
         assert!(
             ctx_attacker.kitty_points.is_none(),
             "a non-exchanger must NOT see the kitty (honesty boundary)"
+        );
+    }
+
+    // =======================================================================
+    // Trip Holder refinements (Enoch-only). Each test maps to one refinement.
+    // =======================================================================
+
+    /// Trip Holder #1 — "never OPEN with high trump". When Enoch is opening a
+    /// trick it must NOT lead a naked joker, the trump-rank (trump-number) card, or
+    /// a big trump; it should prefer to open with an ace (a side-suit boss). We
+    /// score the candidate opens directly for the Enoch leader (seat 0).
+    #[test]
+    fn test_enoch_never_opens_with_high_trump() {
+        // Seat 0 (Enoch leader) holds a side-suit ace, a naked small joker, the
+        // trump-rank (Two of hearts = trump number), a big trump (King of hearts),
+        // and a low trump. Trump is Hearts/2.
+        let ace_s = card(Number::Ace, Suit::Spades); // side-suit boss (1 deck)
+        let small_joker = Card::SmallJoker;
+        let trump_rank = card(Number::Two, Suit::Hearts); // trump-number card
+        let big_trump = card(Number::King, Suit::Hearts); // big trump-suit card
+        let low_trump = card(Number::Three, Suit::Hearts);
+        let (pp, ids) = make_play_phase([
+            vec![ace_s, small_joker, trump_rank, big_trump, low_trump],
+            vec![card(Number::Four, Suit::Spades)],
+            vec![card(Number::Five, Suit::Spades)],
+            vec![card(Number::Six, Suit::Spades)],
+        ]);
+        let ctx = EvalCtx::build_enoch(&pp, ids[0]);
+        let ace = score_lead(&ctx, &pp, &[ace_s]);
+        let joker = score_lead(&ctx, &pp, &[small_joker]);
+        let rank = score_lead(&ctx, &pp, &[trump_rank]);
+        let big = score_lead(&ctx, &pp, &[big_trump]);
+
+        // The ace open must outrank every high-trump open by a wide margin.
+        assert!(
+            ace > joker && ace > rank && ace > big,
+            "Enoch should open the ace ({}) over a naked joker ({}), the \
+             trump-rank ({}), or a big trump ({})",
+            ace,
+            joker,
+            rank,
+            big
+        );
+        // Each forbidden high-trump open is heavily negative (≈0% frequency).
+        assert!(
+            joker < -20.0,
+            "naked joker open must be heavily penalized: {}",
+            joker
+        );
+        assert!(
+            rank < -20.0,
+            "trump-rank open must be heavily penalized: {}",
+            rank
+        );
+        assert!(big < -10.0, "big-trump open must be penalized: {}", big);
+
+        // And the greedy Enoch lead actually opens the ace, not high trump.
+        let played = choose_play_direct_enoch(&pp, ids[0]).unwrap();
+        assert_eq!(
+            played,
+            vec![ace_s],
+            "Enoch's greedy open should be the side-suit ace; got {:?}",
+            played
+        );
+    }
+
+    /// Trip Holder #1 (exception) — Enoch MAY open high trump only when sitting on
+    /// ~15+ trump cards (the rare "bleed everyone of trump" line). With a huge
+    /// trump holding the big-trump-open penalty is LIFTED, so the same big-trump
+    /// open scores strictly HIGHER than it does from a normal (non-flooded) hand.
+    #[test]
+    fn test_enoch_high_trump_open_allowed_when_trump_flooded() {
+        let big_trump = card(Number::King, Suit::Hearts);
+
+        // FLOODED: 12 trump-suit hearts + 2 jokers + the trump-number = 15 trumps.
+        let flood: Vec<Card> = vec![
+            card(Number::Three, Suit::Hearts),
+            card(Number::Four, Suit::Hearts),
+            card(Number::Five, Suit::Hearts),
+            card(Number::Six, Suit::Hearts),
+            card(Number::Seven, Suit::Hearts),
+            card(Number::Eight, Suit::Hearts),
+            card(Number::Nine, Suit::Hearts),
+            card(Number::Ten, Suit::Hearts),
+            card(Number::Jack, Suit::Hearts),
+            card(Number::Queen, Suit::Hearts),
+            card(Number::King, Suit::Hearts),
+            card(Number::Ace, Suit::Hearts),
+            Card::SmallJoker,
+            Card::BigJoker,
+            card(Number::Two, Suit::Hearts), // trump-number (effective trump)
+        ];
+        let (pp_flood, ids_f) = make_play_phase([
+            flood,
+            vec![card(Number::Four, Suit::Clubs)],
+            vec![card(Number::Five, Suit::Clubs)],
+            vec![card(Number::Six, Suit::Clubs)],
+        ]);
+        let ctx_flood = EvalCtx::build_enoch(&pp_flood, ids_f[0]);
+        assert!(
+            ctx_flood.my_trump_count >= 15,
+            "fixture must flood trump (got {})",
+            ctx_flood.my_trump_count
+        );
+        let big_flooded = score_lead(&ctx_flood, &pp_flood, &[big_trump]);
+
+        // NORMAL: only a few trumps (incl. the same K♥), so the open penalty bites.
+        let (pp_norm, ids_n) = make_play_phase([
+            vec![
+                big_trump,
+                card(Number::Three, Suit::Hearts),
+                card(Number::Four, Suit::Hearts),
+                card(Number::Nine, Suit::Spades),
+            ],
+            vec![card(Number::Four, Suit::Clubs)],
+            vec![card(Number::Five, Suit::Clubs)],
+            vec![card(Number::Six, Suit::Clubs)],
+        ]);
+        let ctx_norm = EvalCtx::build_enoch(&pp_norm, ids_n[0]);
+        assert!(ctx_norm.my_trump_count < 15, "normal hand has < 15 trumps");
+        let big_normal = score_lead(&ctx_norm, &pp_norm, &[big_trump]);
+
+        // The flood lifts the -30 forbidden-open penalty, so the bleed open scores
+        // markedly higher than from a normal hand.
+        assert!(
+            big_flooded > big_normal + 20.0,
+            "with 15+ trumps the big-trump bleed open ({}) must beat the penalized \
+             normal-hand open ({}) by the lifted penalty",
+            big_flooded,
+            big_normal
+        );
+    }
+
+    /// Trip Holder #1 (hand-off) — the defender mid/late-game hand-off must use a
+    /// SMALL trump (2/3/4 non-point), never a joker or the trump-rank card. We
+    /// build a late-game defender with its bosses spent and check that a low trump
+    /// hand-off outscores a joker / trump-rank "hand-off".
+    #[test]
+    fn test_enoch_handoff_uses_small_trump_not_joker() {
+        // Seat 0 is a defender (landlord team). Late game (small hand), no boss
+        // non-trump lead available. Holds a low trump (3♥), the trump-rank (2♥),
+        // and a small joker. A small-trump hand-off should beat a joker / rank one.
+        let low_trump = card(Number::Three, Suit::Hearts);
+        let trump_rank = card(Number::Two, Suit::Hearts);
+        let small_joker = Card::SmallJoker;
+        let (pp, ids) = make_play_phase([
+            vec![
+                low_trump,
+                trump_rank,
+                small_joker,
+                card(Number::Six, Suit::Clubs),
+            ],
+            vec![card(Number::Four, Suit::Spades)],
+            vec![card(Number::Five, Suit::Spades)],
+            vec![card(Number::Six, Suit::Spades)],
+        ]);
+        let ctx = EvalCtx::build_enoch(&pp, ids[0]);
+        assert!(!ctx.me_is_attacker, "seat 0 is a defender");
+        assert!(ctx.my_hand_size <= 8, "must be late game for the hand-off");
+        let small = score_lead(&ctx, &pp, &[low_trump]);
+        let joker = score_lead(&ctx, &pp, &[small_joker]);
+        let rank = score_lead(&ctx, &pp, &[trump_rank]);
+        assert!(
+            small > joker && small > rank,
+            "hand-off with a SMALL trump ({}) must beat a joker ({}) or \
+             trump-rank ({}) hand-off",
+            small,
+            joker,
+            rank
+        );
+    }
+
+    /// Trip Holder #3 — dump points to a WINNING PARTNER. When our partner is
+    /// winning the trick (here with a locked boss), Enoch should DROP a 10-point
+    /// card rather than hoard a low card. The Enoch follow bonus must raise the
+    /// point-feed above the low dump (and above the plain heuristic's feed).
+    #[test]
+    fn test_enoch_dumps_points_to_winning_partner() {
+        // Seat 0 (our partner, same team as seat 2) leads the boss Ace of spades;
+        // seat 1 (opp) follows low; seat 2 (Enoch) must follow with K (10pts) or a
+        // low spade. The partner Ace is locked, so dump the King.
+        let king_s = card(Number::King, Suit::Spades); // 10-pt feed
+        let low_s = card(Number::Three, Suit::Spades); // trash
+        let (mut pp, ids) = make_play_phase([
+            vec![card(Number::Ace, Suit::Spades)], // seat0 partner leads boss
+            vec![card(Number::Four, Suit::Spades)], // seat1 opp
+            vec![king_s, low_s],                   // seat2 Enoch
+            vec![card(Number::Five, Suit::Spades)], // seat3 opp still to act
+        ]);
+        pp.play_cards(ids[0], &[card(Number::Ace, Suit::Spades)])
+            .unwrap();
+        pp.play_cards(ids[1], &[card(Number::Four, Suit::Spades)])
+            .unwrap();
+        let ctx_enoch = EvalCtx::build_enoch(&pp, ids[2]);
+        let ctx_plain = EvalCtx::build(&pp, ids[2]);
+        let feed_king_enoch = score_follow(&ctx_enoch, &pp, &[king_s]);
+        let dump_low_enoch = score_follow(&ctx_enoch, &pp, &[low_s]);
+        let feed_king_plain = score_follow(&ctx_plain, &pp, &[king_s]);
+        assert!(
+            feed_king_enoch > dump_low_enoch,
+            "Enoch should DUMP the 10-pt King ({}) to the winning partner over a \
+             low dump ({})",
+            feed_king_enoch,
+            dump_low_enoch
+        );
+        assert!(
+            feed_king_enoch > feed_king_plain,
+            "Enoch's winning-partner point-dump bonus must raise the feed ({}) \
+             above the plain heuristic ({})",
+            feed_king_enoch,
+            feed_king_plain
+        );
+        // The greedy Enoch follow actually feeds the King.
+        let played = choose_play_direct_enoch(&pp, ids[2]).unwrap();
+        assert_eq!(
+            played,
+            vec![king_s],
+            "Enoch's greedy follow should feed the King; got {:?}",
+            played
+        );
+    }
+
+    /// Trip Holder #3 — play the SMALLEST card when we cannot win. An opponent is
+    /// winning with a card we cannot beat; Enoch must duck with its lowest card and
+    /// NEVER waste a high trump / joker on a trick it can't take.
+    #[test]
+    fn test_enoch_plays_smallest_when_cannot_win() {
+        // Seat 0 (opp of seat 1) leads the boss Ace of spades. Seat 1 (Enoch,
+        // attacker) is void in spades and must discard: it holds a low club, a
+        // small joker (high trump), and nothing in spades. Ducking the low club
+        // (can't win, mustn't waste the joker) is correct.
+        let low_club = card(Number::Three, Suit::Clubs);
+        let small_joker = Card::SmallJoker; // high trump — must not be wasted
+        let (mut pp, ids) = make_play_phase([
+            vec![card(Number::Ace, Suit::Spades)], // seat0 leads boss spade
+            vec![low_club, small_joker],           // seat1 Enoch void in spades
+            vec![card(Number::Four, Suit::Spades)], // seat2
+            vec![card(Number::Five, Suit::Spades)], // seat3
+        ]);
+        pp.play_cards(ids[0], &[card(Number::Ace, Suit::Spades)])
+            .unwrap();
+        let ctx = EvalCtx::build_enoch(&pp, ids[1]);
+        assert!(ctx.me_is_attacker, "seat 1 is an attacker");
+        let duck_low = score_follow(&ctx, &pp, &[low_club]);
+        let waste_joker = score_follow(&ctx, &pp, &[small_joker]);
+        assert!(
+            duck_low > waste_joker,
+            "Enoch must duck the low club ({}) rather than waste the joker ({}) \
+             on a trick it can't win",
+            duck_low,
+            waste_joker
+        );
+        let played = choose_play_direct_enoch(&pp, ids[1]).unwrap();
+        assert_eq!(
+            played,
+            vec![low_club],
+            "Enoch's greedy follow should duck the lowest card; got {:?}",
+            played
+        );
+    }
+
+    /// Trip Holder #2 — a STRONG declarer hand buries real points in the kitty
+    /// (the old budget left them "never putting points in the kitty"), still never
+    /// buries trump / aces / pairs, and prioritizes voiding an entire side suit.
+    #[test]
+    fn test_enoch_kitty_buries_points_when_strong() {
+        let trump = std_trump(Suit::Hearts);
+        // STRONG pool: 4 jokers + a heart trump holding ⇒ a healthy point budget.
+        // A 10-pt King + low club trash, an ace + a spade pair (both protected),
+        // and a SHORT diamonds side suit (a clean void target with no points/aces).
+        let pool = vec![
+            Card::BigJoker,
+            Card::BigJoker,
+            Card::SmallJoker,
+            Card::SmallJoker,
+            card(Number::Three, Suit::Hearts), // trump
+            card(Number::Four, Suit::Hearts),  // trump
+            card(Number::Five, Suit::Hearts),  // trump
+            card(Number::Six, Suit::Hearts),   // trump
+            card(Number::Seven, Suit::Hearts), // trump
+            card(Number::Ace, Suit::Spades),   // ace (protected)
+            card(Number::Eight, Suit::Spades), // spade pair (protected)
+            card(Number::Eight, Suit::Spades),
+            card(Number::King, Suit::Clubs), // 10-pt point (buriable when strong)
+            card(Number::Three, Suit::Clubs), // low club trash (non-point)
+            card(Number::Six, Suit::Clubs),  // low club trash (non-point)
+            card(Number::Seven, Suit::Clubs), // low club trash (non-point)
+            card(Number::Three, Suit::Diamonds), // SHORT diamonds: void target
+            card(Number::Four, Suit::Diamonds),
+        ];
+        let buried = choose_kitty_enoch(&pool, trump, 4);
+        assert_eq!(buried.len(), 4);
+        // Never trump.
+        assert!(
+            !buried.iter().any(|c| is_trump(trump, *c)),
+            "must never bury trump; buried {:?}",
+            buried
+        );
+        // Never an ace.
+        assert!(
+            !buried.iter().any(|c| matches!(
+                c,
+                Card::Suited {
+                    number: Number::Ace,
+                    ..
+                }
+            )),
+            "must never bury an ace; buried {:?}",
+            buried
+        );
+        // Never the protected spade pair.
+        assert!(
+            !buried.iter().any(|c| matches!(
+                c,
+                Card::Suited {
+                    number: Number::Seven,
+                    suit: Suit::Spades,
+                }
+            )),
+            "must never bury the protected pair; buried {:?}",
+            buried
+        );
+        // STRONG hand ⇒ it DOES bury real points now (the King of clubs, 10 pts).
+        let pts: usize = buried.iter().filter_map(|c| c.points()).sum();
+        assert!(
+            pts >= 10,
+            "a strong hand must bury real points; buried {} pts ({:?})",
+            pts,
+            buried
+        );
+        // And it voids the ENTIRE short diamonds suit (both diamonds buried).
+        let diamonds_buried = buried
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Card::Suited {
+                        suit: Suit::Diamonds,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            diamonds_buried, 2,
+            "should void the entire short diamonds suit; buried {:?}",
+            buried
+        );
+    }
+
+    /// Trip Holder #2 — pairs are protected by default: a hand with a low side-suit
+    /// PAIR and enough trash to bury must NOT bury the pair (the old code only
+    /// protected jack-pair-and-higher).
+    #[test]
+    fn test_enoch_kitty_protects_all_pairs() {
+        let trump = std_trump(Suit::Hearts);
+        // A low club PAIR (4-4) inside a LONG club suit (6 cards — too long to void
+        // within a 3-card kitty), plus plenty of spade-singles trash to absorb the
+        // burial. So there is no void need that would relax the pair protection.
+        let pool = vec![
+            card(Number::Four, Suit::Clubs), // low club PAIR (protected)
+            card(Number::Four, Suit::Clubs),
+            card(Number::Six, Suit::Clubs), // club singles → clubs is 6 long
+            card(Number::Seven, Suit::Clubs),
+            card(Number::Eight, Suit::Clubs),
+            card(Number::Nine, Suit::Clubs),
+            card(Number::Three, Suit::Spades), // spade-singles trash to bury
+            card(Number::Six, Suit::Spades),
+            card(Number::Seven, Suit::Spades),
+            card(Number::Eight, Suit::Spades),
+            card(Number::Three, Suit::Hearts), // trump
+            card(Number::Four, Suit::Hearts),  // trump
+        ];
+        let buried = choose_kitty_enoch(&pool, trump, 3);
+        assert_eq!(buried.len(), 3);
+        // The low club pair must survive: clubs (6 long) and spades (4 long) are
+        // both too long to fully void within a 3-card kitty, so the void exception
+        // does NOT apply and EVERY pair stays protected.
+        let club_fours = buried
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Card::Suited {
+                        number: Number::Four,
+                        suit: Suit::Clubs,
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            club_fours, 0,
+            "Enoch must protect the low club pair; buried {:?}",
+            buried
         );
     }
 }
