@@ -10,6 +10,14 @@ The headline differentiator is a **four-tier bot ladder** (`Easy < Expert <= Eno
 
 ## Commands
 
+> ⚠️ **Toolchain:** this repo's deps need **rustc ≥ 1.87**, but the machine's default
+> `stable` may be older (it is 1.80.1 in the current dev env). Prefix EVERY `cargo`
+> command below with the right toolchain — e.g. `cargo +1.92.0 test --all`,
+> `cargo +1.92.0 build --bin shengji`. Running bare `cargo` on the old default
+> fails with dependency build errors (`is_multiple_of`/edition mismatches). The
+> bare `cargo …` shown below is for brevity; add `+1.92.0` (or your installed ≥1.87
+> toolchain) in this environment.
+
 ### Development
 ```bash
 # Run frontend in development mode with hot reloading
@@ -92,8 +100,10 @@ cargo run --release --example budget_benchmark
 
 # Paired-on-mirrored-deck A/B with Wilson + bootstrap CIs and a minimum-detectable
 # -effect (the statistically-sound measurement substrate). Each deck is played in
-# BOTH orientations to cancel deal luck. `fast` = search-less matchups; `search`
-# honors SHENGJI_BOT_BUDGET_MS. See docs/bot-eval-baseline.md.
+# BOTH orientations to cancel deal luck. 3rd arg `which`: `fast` = search-less
+# matchups; `search` = Expert-vs-Easy + Enoch-vs-Expert (honors SHENGJI_BOT_BUDGET_MS);
+# `expert-easy` = ONLY Expert-vs-Easy (the value-blend A/B; half the wall-clock);
+# `all` (default) = fast + search. See docs/bot-eval-baseline.md.
 cargo run --release --example paired_eval -- 400 0x5EED fast
 SHENGJI_BOT_BUDGET_MS=400 cargo run --release --example paired_eval -- 200 0x5EED search
 
@@ -158,7 +168,9 @@ cd frontend && yarn types && yarn prettier --write && yarn lint --fix
 The Expert tier's prior is a small MLP distilled from the Omniscient teacher.
 Pipeline: Rust self-play data export → PyTorch training → ONNX → embedded in Rust
 (`include_bytes!`, run via `tract-onnx` — no C/onnxruntime dependency, builds in
-the musl deploy image). See `training/README.md`.
+the musl deploy image). **This section (CLAUDE.md) is the source of truth for the
+current pipeline**; `training/README.md` is older high-level background and may lag
+(e.g. the value head, DAgger, and the runner are documented here, not there).
 ```bash
 # 1. Generate distillation data. Writes training/data.csv (group, f0..f35, label,
 #    value). GEN_TEACHER_BUDGET_MS (default 400) sets the teacher search budget =
@@ -169,6 +181,10 @@ the musl deploy image). See `training/README.md`.
 #    (GEN_MIX_SEARCH_FRAC, default 0.5) advances some games with the real search
 #    tier so states match what the net actually serves — also sharpens the value
 #    target. A search behaviour shares the teacher budget and is MUCH slower.
+#    GEN_SEED (default 0xD157111) is the deal-RNG seed; DISTINCT seeds give disjoint
+#    deals, so a run can be SHARDED across processes (GEN_SEED=base+i per shard) for
+#    parallel/reproducible generation — this is what run_value_pipeline.sh does.
+#    GEN_OUT (default training/data.csv) sets the output path.
 GEN_GAMES=5000 GEN_TEACHER_BUDGET_MS=400 GEN_BEHAVIOUR=mix \
   cargo run --release --example gen_training_data
 
@@ -288,8 +304,10 @@ The project maintains type safety between Rust and TypeScript by:
 2. **Keep the honesty invariant**: never read another seat's cards outside the single `observed_state()` Omniscient branch. Re-run `e2e_game_no_hidden_card_leakage` after any bot change.
 3. Don't remove the `#[serde(alias = "Hard")]` on `Expert` or the `legacy_hard_difficulty_deserializes_as_expert` test — live rooms created before `Hard` was dropped still send "Hard" and the wasm state-sync rejects the whole update if it fails to deserialize.
 4. The bot move-selection (`plan_next_bot_action`) runs OFF the game lock; if you add expensive work, keep it in the plan step, not in `apply_planned_bot_action`, so chat/UI don't lag.
-5. Validate strength changes with the `core/examples/` benchmarks (see Commands), not just unit tests.
-6. If you change the Expert net's feature encoding, update `FEATURE_DIM` in BOTH `core/src/bot/expert.rs` and `training/train_expert.py`, then regenerate data + retrain.
+5. Validate strength changes with the `core/examples/` benchmarks (see Commands), not just unit tests. The statistically-sound path is the **paired-on-mirrored-deck harness** (`core/src/bot/harness.rs` via the `paired_eval` example) — it reports win-rate with CIs + a minimum-detectable-effect. Benchmarks are NOT byte-reproducible (per-process `HashMap` order), so compare **CIs, not byte-diffs** (see `docs/bot-eval-baseline.md`). Add a NEW benchmark by configuring `Seat`s on the shared harness — do NOT copy-paste a driver.
+6. If you change the shared scorer (`score_lead`/`score_follow`) or the Easy knobs, **re-run the committed strength gate** `cargo +1.92.0 test -p shengji-core --test baseline_gate`; if a baseline genuinely moved, update the floors in `core/tests/baseline_gate.rs` AND `docs/bot-eval-baseline.md` in the same change.
+7. Build/test with **`cargo +1.92.0`** (deps need rustc ≥ 1.87; the env default may be older) — the honesty test, the gate, and the examples all need it.
+8. If you change the Expert net's feature encoding, update `FEATURE_DIM` in BOTH `core/src/bot/expert.rs` and `training/train_expert.py`, then regenerate data + retrain. (The VALUE head adds the `expert::VALUE_NORM` contract — shared by data-gen + `search::evaluate_position`; see the retrain section.)
 
 ### Notable game-flow details:
 - **"Done bidding" flow** (`core/src/game_state/draw_phase.rs` + `bot/mod.rs`): after a bot bids, the landlord is finalized only once ALL HUMANS confirm "done bidding" (a new bid re-opens the window and clears everyone's done flag). The standing bid winner is treated as implicitly done (so a human winner isn't frozen waiting for themselves); bots are always implicitly done. This replaced the old timed counter-bid grace.

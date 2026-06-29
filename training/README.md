@@ -1,5 +1,23 @@
 # Expert tier training (distillation → ONNX → tract)
 
+> ⚠️ **PARTIALLY SUPERSEDED — `CLAUDE.md` (the "Retrain the Expert net" section) is
+> the source of truth for the CURRENT pipeline.** This file is accurate on the
+> distillation *concept* but lags on specifics. What changed since:
+> - The net is now **multi-task**: a policy head **and** an optional `tanh` **VALUE
+>   head**, exported as a **2-output ONNX** (`score`, `value`) when value targets
+>   are present. The CSV is now `group, f0..f35, label, value` (a `value` column).
+> - The leaf-eval **value blend** is gated by `SHENGJI_VALUE_WEIGHT` (default 0=OFF);
+>   inference reads ONNX `output[1]`, scaled by `expert::VALUE_NORM`.
+> - **DAgger**: `GEN_BEHAVIOUR` (easy|expert|enoch|mix) picks the data-gen state
+>   distribution; `GEN_TEACHER_BUDGET_MS` (default 400) sets label quality;
+>   `GEN_SEED` shards data-gen.
+> - The whole generate→train→A/B run is automated + **resumable** by
+>   `training/run_value_pipeline.sh`.
+> - Build/run with `cargo +1.92.0` (deps need rustc ≥ 1.87).
+> - The tiers are `Easy < Expert <= Enoch < Omniscient` (the old **"Hard" tier was
+>   removed** — ignore any "Hard" mention below).
+> Treat the architecture/CSV/tier/invocation details below as historical.
+
 The **Expert** bot difficulty is a small learned neural net that scores each
 legal candidate play and picks the best. It is trained by **behavioral cloning /
 distillation** of the **Omniscient** (perfect-information) teacher: for every
