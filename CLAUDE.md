@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Shengji Online (升级 Online) is an online implementation of the Chinese trick-taking card game 升级 ("Tractor" or "Finding Friends"). It is an open-source fork of the rbtying/shengji engine (MIT), adding cheat-proof AI opponents, a redesigned responsive bilingual UI, and Fly.io deployment. The live site is **https://shengji-tractor.fly.dev** (live and actively iterated). It features a Rust backend with WebSocket support and a React TypeScript frontend with WebAssembly integration.
 
-The headline differentiator is a **four-tier bot ladder** (`Easy < Expert <= Enoch < Omniscient`) with a hard **honesty invariant** (only the opt-in cheater tier may see hidden hands), a re-distilled learned-net Expert tier, an `Enoch` tier that follows a transcribed human strategy playbook, and a non-blocking bot driver so the search never lags chat/UI. See "Bot Architecture" below and `PROGRESS.md` for current status.
+The headline differentiator is a **five-tier bot ladder** (`Easy < Expert <= Enoch < Grandmaster <= Omniscient`) with a hard **honesty invariant** (only the opt-in cheater tier may see hidden hands), a re-distilled learned-net Expert tier, an `Enoch` tier that follows a transcribed human strategy playbook, a calculation-driven `Grandmaster` tier (a deep full-hand-rollout search that plays a distinct style from Enoch at equal strength), and a non-blocking bot driver so the search never lags chat/UI. See "Bot Architecture" below and `PROGRESS.md` for current status.
 
 ## Commands
 
@@ -79,8 +79,13 @@ All live in `core/examples/`. Run in `--release` (debug is far slower) and set
 `SHENGJI_BOT_BUDGET_MS` to control the per-decision search budget (production
 default is 2200ms; benchmarks usually lower it).
 ```bash
-# Full round-robin win-rate matrix across all four tiers
+# Full round-robin win-rate matrix across all five tiers
 cargo run --release --example tournament
+
+# Grandmaster vs Enoch (and sanity checks) — duplicate-free, multi-threaded,
+# Wilson-CI win-rate. Tunable via the GM_* env knobs (see policy.rs).
+#   cargo run --release --example gm_benchmark -- [num_games] [seed] [pairs]
+cargo run --release --example gm_benchmark
 
 # Expert-net A/B: does the embedded expert_model.onnx beat the heuristic prior?
 # (swap core/src/bot/expert_model.onnx between runs to compare nets)
@@ -239,12 +244,13 @@ train + embed a value-head net. See `docs/bot-training-roadmap.md` (1-month plan
 - **frontend/shengji-wasm/**: WebAssembly bindings for client-side game mechanics.
 
 ### Bot Architecture (`core/src/bot/`)
-A **four-tier, user-selectable strength ladder `Easy < Expert <= Enoch < Omniscient`** (the `Hard` tier was REMOVED). All four are surfaced in the lobby (`frontend/src/AddAIPlayer.tsx`), Expert is the default.
+A **five-tier, user-selectable strength ladder `Easy < Expert <= Enoch < Grandmaster <= Omniscient`** (the `Hard` tier was REMOVED). All five are surfaced in the lobby (`frontend/src/AddAIPlayer.tsx`), Expert is the default; `Grandmaster` is the apex HONEST tier (a distinct, calculation-driven style, ~tied with Enoch), `Omniscient` the opt-in cheater on top.
 
 - **Easy** — the bare shared heuristic played noisily: occasional blunders (ε ≈ 0.06), a warm softmax over the top moves (temp ≈ 1.1), no card memory, no search. Clearly the weakest/beatable tier.
 - **Expert** (default) — a small MLP (`core/src/bot/expert_model.onnx`, distilled from the **Omniscient** teacher via `training/train_expert.py` + `core/examples/gen_training_data.rs`) scores each legal candidate from **HONEST features only** and serves as the **prior** of a time-boxed **determinized (ISMCTS-style) search** over sampled worlds. AlphaZero-lite: net = root policy prior, fast heuristic = rollout policy, static leaf evaluator. If the net can't load/run, the prior transparently falls back to the shared hand-written heuristic, so Expert is never illegal/None.
-- **Enoch** — the **strongest HONEST tier**. Same determinized search, but driven by the boss-/partner-aware heuristic plus a full-game **"playbook"** transcribed from a strong player (`docs/strategy/double-holder.txt`, `docs/strategy/trip-holder.txt`): pair-prioritized trump declaring, point-scaled kitty discipline, **no high-trump opens**, tractor-first / long-suit leading, partner point-dumping, a defender low-trump hand-off, endgame kitty protection, and perfect play-memory. Honest — consults only its own redacted per-player view.
-- **Omniscient** — a deliberate, opt-in, clearly-badged **CHEATER**: a perfect-information search over the single true world (it sees every opponent's hand). For testing and an "impossible" practice opponent.
+- **Enoch** — driven by the boss-/partner-aware heuristic plus a full-game **"playbook"** transcribed from a strong player (`docs/strategy/double-holder.txt`, `docs/strategy/trip-holder.txt`): pair-prioritized trump declaring, point-scaled kitty discipline, **no high-trump opens**, tractor-first / long-suit leading, partner point-dumping, a defender low-trump hand-off, endgame kitty protection, and perfect play-memory. Honest — consults only its own redacted per-player view.
+- **Grandmaster** — the apex HONEST tier, with a deliberately **different play style from Enoch at equal strength**. Where Enoch greedily obeys its defensive playbook, Grandmaster is **calculation-driven**: it uses the Enoch playbook only to PROPOSE candidate moves (and to key the perfect-memory determinization) but then commits to whatever its **full-hand determinized rollouts** value highest, with a **neutral** (non-playbook) leaf evaluation — so it breaks the playbook's instincts when the simulation disagrees. Search knobs: full-hand rollouts (`GM_ROLLOUT=0`), 8 candidates, 400-world cap, `GM_BUDGET_MULT` (default 3×). Self-play (n=1200): **statistically TIED with Enoch** (~50–52%) — equal strength, different decisions. A careful policy sweep found NO variant reliably out-scores Enoch (it shares Enoch's heuristic space, so it can only out-*search*, which deal variance washes out); env knobs `GM_PRIOR` / `GM_ROLLOUT_POLICY` / `GM_WORLDS` / `GM_CANDS` / `GM_BUDGET_MULT` expose the space. Honest — own redacted view only; it *samples* hidden hands and never reaches the perfect-information bypass.
+- **Omniscient** — a deliberate, opt-in, clearly-badged **CHEATER**: a perfect-information search over the single true world (it sees every opponent's hand). To actually exploit that it runs the **Enoch playbook policy** (prior + full-hand rollouts over the real hands), NOT the bare heuristic — with the plain heuristic it was observed to *lose* to playbook-driven Enoch (better strategy beat better information). It is allowed to think the longest of any tier (`OMNI_BUDGET_MULT`, default 5×, capped ~15s). Result vs the strong Enoch tier: **~61% / +13 pts** — clearly the top of the ladder. For testing and an "impossible" practice opponent.
 
 **HONESTY INVARIANT (core design rule):** Only `Omniscient` may see hidden hands. The cheat is centralized in ONE place — the `sees_perfect_information()` predicate (only true for Omniscient) gates the single `observed_state()` branch in `bot/mod.rs` that hands a bot the unredacted state; every honest tier gets `dump_state_for_player` (opponents' cards are `Card::Unknown`, kitty hidden). Adding a future honest tier cannot leak cards unless it opts in. The `backend/tests/e2e_game.rs::e2e_game_no_hidden_card_leakage` test enforces this every build — **any bot change must keep it passing.**
 
@@ -265,7 +271,7 @@ React 19 + TypeScript + Webpack 5 + `shengji-wasm`. `gen-types.d.ts` is auto-gen
 - **frontend/src/Play.tsx**: Main gameplay component (wires up the compass table).
 - **frontend/src/Table.tsx** + **Trick.tsx**: the **compass (N/S/E/W) trick layout** — a CSS grid that rotates the local player to the south seat and lays each player's played cards out at their own compass point reaching toward an empty center hub. `Table.tsx` also derives the **team-color role** per seat (`declarer`/`teammate`/`opponent`/`unknown`); `style.css` holds the grid/seat/compass/team-color CSS.
 - **frontend/src/Players.tsx**, **StatusRail.tsx**: lobby team coloring and the declarer/points/turn status rail.
-- **frontend/src/AddAIPlayer.tsx**: lobby UI for adding bots — offers the four tiers `Easy / Expert / Enoch / Omniscient` (default Expert).
+- **frontend/src/AddAIPlayer.tsx**: lobby UI for adding bots — offers the five tiers `Easy / Expert / Enoch / Grandmaster / Omniscient` (default Expert).
 - **frontend/src/BidArea.tsx**: bidding UI incl. the **"Done bidding"** button (see Development Notes).
 - **frontend/src/i18n.tsx**, **GameMode.tsx**: bilingual 中文/English (custom React-context i18n, `localStorage["lang"]`, single en/zh toggle — **English mode shows no Chinese**).
 - **frontend/src/ChatMessage.tsx**, **Chat.tsx**: in-game chat + game-log rendering (incl. the kitty-points line).

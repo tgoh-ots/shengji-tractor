@@ -31,10 +31,11 @@ use shengji_core::bot::harness::{play_one_hand, Seat};
 use shengji_core::bot::BotDifficulty;
 
 /// The four tiers, in nominal ladder order (weakest -> strongest).
-const TIERS: [BotDifficulty; 4] = [
+const TIERS: [BotDifficulty; 5] = [
     BotDifficulty::Easy,
     BotDifficulty::Expert,
     BotDifficulty::Enoch,
+    BotDifficulty::Grandmaster,
     BotDifficulty::Omniscient,
 ];
 

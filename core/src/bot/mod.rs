@@ -64,15 +64,47 @@ pub enum BotDifficulty {
     #[default]
     #[serde(alias = "Hard")]
     Expert,
-    /// Strongest HONEST tier: the same determinized search over the improved
+    /// Strong HONEST tier: the same determinized search over the improved
     /// heuristic, plus an "enoch mode" full-game playbook (pair-aware declaring,
     /// scaled kitty burial, tractor-first / long-suit leading, defender low-trump
     /// hand-off, endgame kitty protection). Honest — own redacted view only. See
     /// `docs/strategy/double-holder.txt` and [`crate::bot::policy`].
     Enoch,
-    /// CHEATER tier: sees all opponents' hands and plays with perfect
-    /// information. The ONLY difficulty for which [`observed_state`] returns the
-    /// true, unredacted state.
+    /// Apex HONEST tier with a deliberately DIFFERENT play style from Enoch, at
+    /// equal strength. Enoch greedily obeys its hand-coded defensive playbook;
+    /// Grandmaster is **calculation-driven** — it uses the Enoch playbook only to
+    /// PROPOSE candidate moves (and to key the perfect play-memory determinization),
+    /// then commits to whatever its deep search values highest, so it will break the
+    /// playbook's instincts whenever the simulation disagrees. Concretely:
+    ///
+    /// * **Full-hand determinized rollouts** — every sampled world is played to the
+    ///   LAST card, so each candidate is scored by its EXACT terminal point outcome
+    ///   (no truncation bias, unlike Enoch's 12-trick rollout + static estimate).
+    /// * **Neutral leaf evaluation** — rollouts use the plain boss-/partner-aware
+    ///   heuristic rather than the playbook, so the value estimate is decoupled from
+    ///   the playbook's defensive bias (the source of its different decisions).
+    /// * **Wider, deeper search** — 8 root candidates, 400-world cap, and a larger
+    ///   budget (`GM_BUDGET_MULT`, default 3×): the apex tier simply thinks longer
+    ///   (honest extra computation, never extra information).
+    ///
+    /// Self-play (`core/examples/gm_benchmark.rs`, n=1200): statistically TIED with
+    /// Enoch on win-rate (~50–52%) — equal strength, different decisions. (A careful
+    /// sweep found NO policy variant reliably out-scores Enoch: it shares Enoch's
+    /// heuristic space, so it can only out-search, which deal variance largely
+    /// washes out.) Still strictly HONEST: it consults only its own redacted
+    /// per-player view and *samples* hidden hands — it never reaches the
+    /// [`observed_state`] perfect-information bypass. See [`crate::bot::policy`].
+    Grandmaster,
+    /// CHEATER tier: sees all opponents' hands and plays a perfect-information
+    /// search over the single TRUE world. The ONLY difficulty for which
+    /// [`observed_state`] returns the true, unredacted state. To actually EXPLOIT
+    /// that information it runs the strongest available POLICY — the Enoch playbook
+    /// (prior + full-hand rollouts over the real hands) — not the bare heuristic
+    /// (which, despite perfect information, was observed to LOSE to playbook-driven
+    /// Enoch: better strategy beats better information). It is also allowed to think
+    /// the longest of any tier (`OMNI_BUDGET_MULT`, default 5×, capped ~15s). Result
+    /// vs the strong Enoch tier: ~61% / +13 pts per hand — clearly the top of the
+    /// ladder, as a cheater should be. See [`crate::bot::policy`].
     Omniscient,
 }
 
@@ -82,6 +114,7 @@ impl BotDifficulty {
             BotDifficulty::Easy => "Easy",
             BotDifficulty::Expert => "Expert",
             BotDifficulty::Enoch => "Enoch",
+            BotDifficulty::Grandmaster => "Grandmaster",
             BotDifficulty::Omniscient => "Omniscient",
         }
     }

@@ -33,7 +33,48 @@ section) drove two commits, both pushed to `master` and deployed:
   the unauthenticated `/api/rpc` (CPU DoS) and a frontend render-index-crash
   cluster (both medium).
 
-### Bot ladder overhaul (prior major work — shipped)
+### Grandmaster tier + Omniscient fix (latest, shipped) — rebased on the strengthened Enoch (`7ca6b02`)
+Added a 5th tier: **`Easy < Expert <= Enoch < Grandmaster <= Omniscient`**. Built on
+top of the improved Enoch (full-memory search, void-aware play, flip-bidding,
+declare gate). Self-play harness: `core/examples/gm_benchmark.rs` (multi-threaded,
+Wilson-CI win-rate; a tier configured == its opponent scores ~50%).
+
+**Grandmaster — a DIFFERENT play style at EQUAL strength (the stated goal).**
+Enoch greedily obeys its hand-coded defensive playbook; Grandmaster is
+**calculation-driven** — it uses the Enoch playbook only to PROPOSE candidates (and
+to key the perfect-memory determinization), then commits to whatever its **full-hand
+determinized rollouts** value highest, with a **neutral (non-playbook) leaf
+evaluation**, so it breaks the playbook's instincts when the simulation disagrees.
+Knobs: full-hand rollouts (`GM_ROLLOUT=0`), 8 candidates, 400-world cap, 3× budget
+(`GM_BUDGET_MULT`); prior/rollout policy are env-selectable (`GM_PRIOR`,
+`GM_ROLLOUT_POLICY`). Lives entirely in `policy.rs` (knobs + dispatch) + the enum in
+`mod.rs`; search/determinize shared with Enoch.
+
+- **Empirical (n=1200, paired):** Grandmaster is **statistically TIED with the
+  strong Enoch (~50–52% win-rate)** — equal strength, different decisions. A careful
+  policy sweep (prior × rollout ∈ {heuristic, net, enoch}) found **NO variant
+  reliably out-scores Enoch**: GM shares Enoch's heuristic space, so it can only
+  out-*search*, and the enormous deal variance washes that out. (An n=300 "neutral
+  rollout = 57%" reading was a sampling fluke — it regressed to ~50% at n=1200.
+  `GM_PRIOR=net` is clearly WORSE, ~38%, since it forgoes full-memory determinization
+  and the net is weak.) The win-rate ceiling here is genuinely low.
+
+**Omniscient — FIXED (was quietly broken).** It was running the *plain heuristic*
+policy and, despite perfect information, **LOST to the playbook-driven Enoch (44.8%
+/ −2.6 pts)** — better strategy beat better information. Fix: run the **Enoch
+playbook policy** (prior + full-hand rollouts over the real hands) + a bigger budget
+(`OMNI_BUDGET_MULT`, default 5×, capped ~15s) + 32 rollouts/candidate. Result vs the
+strong Enoch: **~61% / +13 pts** — clearly the top of the ladder again. (Enoch
+rollout beat neutral rollout for Omniscient, 61% vs 57%, the opposite of what helps
+the honest tiers — with true hands the playbook's wisdom pays off.)
+
+Honesty invariant preserved (`e2e_game_no_hidden_card_leakage` green); the 5-tier
+ladder is surfaced in the lobby (`AddAIPlayer.tsx`, i18n en/zh, regenerated
+`gen-types`). **Key lesson:** in this 2-deck game deal variance dominates, so
+win-rate gaps between strong policies are tiny (even the cheater is only ~61%);
+point-margin and large-n CIs are the reliable signals, and small samples mislead.
+
+### Bot ladder overhaul (earlier major work — shipped)
 The bot tiers were redesigned from `Easy/Hard/Expert/Omniscient` into a cleaner
 **four-tier ladder `Easy < Expert <= Enoch < Omniscient`**. (See `CLAUDE.md` →
 "Bot Architecture" for the full description; this is the status summary.)

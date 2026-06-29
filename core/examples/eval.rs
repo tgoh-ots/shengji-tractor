@@ -48,6 +48,7 @@ impl Brain {
             Brain::Tier(BotDifficulty::Easy) => "Easy",
             Brain::Tier(BotDifficulty::Expert) => "Expert",
             Brain::Tier(BotDifficulty::Enoch) => "Enoch",
+            Brain::Tier(BotDifficulty::Grandmaster) => "Grandmaster",
             Brain::Tier(BotDifficulty::Omniscient) => "Omniscient",
             Brain::AlwaysDumpPoints => "DumpPoints",
             Brain::AlwaysTrump => "AlwaysTrump",

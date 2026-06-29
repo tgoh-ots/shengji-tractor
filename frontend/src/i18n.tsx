@@ -77,6 +77,7 @@ const en: Dict = {
   "ai.difficulty.Easy": "Easy",
   "ai.difficulty.Expert": "Expert",
   "ai.difficulty.Enoch": "Enoch",
+  "ai.difficulty.Grandmaster": "Grandmaster",
   "ai.difficulty.Omniscient": "Omniscient",
   "ai.botLabel": "Bot",
 
@@ -245,6 +246,7 @@ const zh: Dict = {
   "ai.difficulty.Easy": "简单",
   "ai.difficulty.Expert": "专家",
   "ai.difficulty.Enoch": "Enoch（大师）",
+  "ai.difficulty.Grandmaster": "宗师",
   "ai.difficulty.Omniscient": "全知",
   "ai.botLabel": "机器人",
 

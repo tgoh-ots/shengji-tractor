@@ -7,12 +7,13 @@
 //! The honest tiers share a single heuristic backbone ([`crate::bot::heuristics`])
 //! and differ in a small set of *knobs* (and, for `Expert`, a learned net):
 //!
-//! | tier      | card memory | blunder ε | softmax temp | determinized search    |
-//! |-----------|-------------|-----------|--------------|------------------------|
-//! | Easy      | none        | ~6%       | warm         | no                     |
-//! | Expert    | yes (voids) | ~0%       | greedy       | learned-net prior      |
-//! | Enoch     | yes (voids) | ~0%       | greedy       | playbook heuristic     |
-//! | Omniscient| (cheats)    | 0%        | greedy       | perfect-info search    |
+//! | tier       | card memory  | blunder ε | softmax temp | determinized search          |
+//! |------------|--------------|-----------|--------------|------------------------------|
+//! | Easy       | none         | ~6%       | warm         | no                           |
+//! | Expert     | yes (voids)  | ~0%       | greedy       | learned-net prior            |
+//! | Enoch      | yes (voids)  | ~0%       | greedy       | playbook heuristic           |
+//! | Grandmaster| full history | 0%        | greedy       | playbook + full-hand rollout |
+//! | Omniscient | (cheats)     | 0%        | greedy       | perfect-info search          |
 //!
 //! `Expert` scores each legal candidate with a small MLP distilled from the
 //! `Omniscient` teacher's choices (see [`crate::bot::expert`]); it consumes only
@@ -117,6 +118,30 @@ impl Knobs {
                 search_candidates: 6,
                 rollout_tricks: 12,
             },
+            // Grandmaster: the apex HONEST tier. Same determinized-search
+            // machinery and the Enoch-playbook policy (so it inherits Enoch's
+            // perfect play-memory determinization), but with a WIDER root (more
+            // candidates so it rarely prunes the right move), a higher world cap,
+            // full-hand rollouts (`GM_ROLLOUT=0`), and a larger budget
+            // (`GM_BUDGET_MULT`). Knobs are env-overridable (`GM_WORLDS` /
+            // `GM_CANDS` / `GM_ROLLOUT`) so the self-play harness can sweep the
+            // search shape without recompiling; the defaults below are the tuned
+            // production values. ε = 0, temperature = 0 (greedy on the search
+            // value).
+            BotDifficulty::Grandmaster => Knobs {
+                epsilon: 0.0,
+                temperature: 0.0,
+                // Tuned defaults (env-overridable for sweeps): a WIDE root (8
+                // candidates), a high world cap (400) so a large budget is fully
+                // used, and `GM_ROLLOUT=0` = roll every world out to the LAST card
+                // (exact terminal points — no truncation bias). Self-play showed the
+                // full-rollout shape ties Enoch at equal budget but converts a
+                // larger search budget into a clear win, whereas Enoch (capped at
+                // 144 worlds / 12-trick rollouts) plateaus. See `GM_BUDGET_MULT`.
+                search_worlds: env_usize("GM_WORLDS", 400),
+                search_candidates: env_usize("GM_CANDS", 8),
+                rollout_tricks: env_usize("GM_ROLLOUT", 0),
+            },
             // CHEATER (perfect information): plays a perfect-information search
             // over the SINGLE true world (no determinization, no sampling — it
             // already knows every opponent's cards via the centralized honesty
@@ -128,11 +153,13 @@ impl Knobs {
                 epsilon: 0.0,
                 temperature: 0.0,
                 // `search_worlds` here is reused as "rollouts per candidate" by
-                // `search_play_perfect_info`. With the larger off-lock budget we
-                // can average more full-hand rollouts per candidate, lowering the
-                // variance on the greedy pick. Each rollout is a full playout, so
-                // the budget still caps the work; this only raises the ceiling.
-                search_worlds: 12,
+                // `search_play_perfect_info`. With the larger off-lock budget
+                // (`OMNI_BUDGET_MULT`, up to ~15s) we average MANY full-hand
+                // rollouts per candidate, driving down the variance from the
+                // rollouts' exploration noise so the greedy pick over the TRUE
+                // world is reliable. Each rollout is a full playout; the budget
+                // still caps the work. Env-overridable (`OMNI_WORLDS`).
+                search_worlds: env_usize("OMNI_WORLDS", 32),
                 search_candidates: usize::MAX,
                 rollout_tricks: usize::MAX,
             },
@@ -209,6 +236,38 @@ fn search_budget_ms() -> u64 {
         .unwrap_or(2200)
 }
 
+/// Read a `usize` tuning knob from the environment, falling back to `default`
+/// when the variable is unset or unparseable. Used by the Grandmaster tier so the
+/// self-play harness can sweep its search shape without recompiling.
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+/// Read an `f64` tuning knob from the environment, falling back to `default` when
+/// unset/unparseable.
+fn env_f64(name: &str, default: f64) -> f64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(default)
+}
+
+/// Read a [`Policy`] tuning knob from the environment (`heuristic`/`net`/`enoch`,
+/// or `0`/`1`/`2`), falling back to `default`. Lets the self-play harness sweep
+/// Grandmaster's prior / rollout policy without recompiling.
+fn env_policy(name: &str, default: Policy) -> Policy {
+    match std::env::var(name).ok().as_deref() {
+        Some("heuristic") | Some("0") => Policy::Heuristic,
+        Some("net") | Some("1") => Policy::Net,
+        Some("enoch") | Some("2") => Policy::EnochHeuristic,
+        _ => default,
+    }
+}
+
 /// Seed an RNG deterministically from the (redacted) play state so that, given
 /// the same observable position, a bot behaves reproducibly. We derive the seed
 /// from the player id, their hand size, and the number of cards on the table —
@@ -248,14 +307,28 @@ fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Ca
     // search the single true world directly with full rollouts — see
     // `search_play_perfect_info`.
     if matches!(difficulty, BotDifficulty::Omniscient) {
+        // Omniscient sees the TRUE world, so to actually EXPLOIT that it must
+        // search with the strongest available POLICY — the Enoch full-game
+        // playbook — not the bare heuristic. (With the plain heuristic it was
+        // observed to LOSE to the playbook-driven Enoch even with perfect
+        // information: better strategy beat better information.) The playbook
+        // shapes both the candidate prior and the full-hand rollouts over the real
+        // hands, so each candidate is scored by its exact terminal outcome when
+        // every seat plays well. The cheater is also allowed to think the longest
+        // of any tier: `OMNI_BUDGET_MULT` (default 5×) scales its budget, capped at
+        // ~15s, run OFF the game lock by the non-blocking driver.
+        let omni_budget_ms =
+            ((search_budget_ms() as f64 * env_f64("OMNI_BUDGET_MULT", 5.0)) as u64).min(14_500);
         let config = SearchConfig {
-            time_budget: Duration::from_millis(search_budget_ms()),
+            time_budget: Duration::from_millis(omni_budget_ms),
             max_worlds: knobs.search_worlds.max(1),
             max_candidates: knobs.search_candidates,
             rollout_tricks: knobs.rollout_tricks,
             seed: rng.gen(),
-            policy: Policy::Heuristic,
-            rollout_policy: Policy::Heuristic,
+            // Prior + rollout policy are env-selectable for sweeps; default to the
+            // Enoch playbook prior (best candidate ranker on the true world).
+            policy: env_policy("OMNI_PRIOR", Policy::EnochHeuristic),
+            rollout_policy: env_policy("OMNI_ROLLOUT_POLICY", Policy::EnochHeuristic),
         };
         if let Some(cards) = search_play_perfect_info(p, me, config) {
             return cards;
@@ -289,40 +362,92 @@ fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Ca
     if knobs.search_worlds > 0 {
         // Enoch shapes BOTH the prior AND the rollout plies with its full-game
         // playbook; Expert uses the learned-net prior (which itself falls back to
-        // the bare hand-written heuristic if the net can't run).
+        // the bare hand-written heuristic if the net can't run). Grandmaster reuses
+        // the Enoch playbook policy — so it inherits Enoch's perfect-memory
+        // determinization for free (`search_play` keys full memory off the
+        // `EnochHeuristic` policy) — but searches DEEPER: full-hand rollouts, a
+        // wider candidate root, more worlds, and a larger time budget.
         let enoch = matches!(difficulty, BotDifficulty::Enoch);
+        let grandmaster = matches!(difficulty, BotDifficulty::Grandmaster);
+        // Grandmaster deliberately plays a DIFFERENT style from Enoch at equal
+        // strength. Its prior and rollout policy are independently selectable
+        // (`GM_PRIOR` / `GM_ROLLOUT_POLICY`: heuristic | net | enoch). The chosen
+        // identity is: Enoch-playbook PRIOR (so it proposes the same sensible
+        // candidate moves — no naked-joker opens, tractor-first, etc. — and keeps
+        // the perfect-memory determinization, which `search_play` keys off the
+        // Enoch prior) but NEUTRAL plain-heuristic ROLLOUTS for the leaf value. The
+        // effect: Enoch greedily obeys its hand-coded defensive playbook, whereas
+        // Grandmaster commits to whatever its full-hand SIMULATIONS value highest —
+        // a calculation-driven player that will break the playbook's instincts when
+        // the deep rollout disagrees. Self-play (n=1200, paired): statistically
+        // TIED with Enoch on win-rate (~50–52%) — equal strength, different
+        // decisions. (A non-Enoch *prior* loses full-memory determinization and
+        // tested clearly worse — `GM_PRIOR=net` ⇒ ~38% — so the prior stays Enoch.)
         let prior = if matches!(difficulty, BotDifficulty::Expert) {
             Policy::Net
+        } else if grandmaster {
+            env_policy("GM_PRIOR", Policy::EnochHeuristic)
         } else if enoch {
             Policy::EnochHeuristic
         } else {
             Policy::Heuristic
         };
+        let rollout_policy = if grandmaster {
+            env_policy("GM_ROLLOUT_POLICY", Policy::Heuristic)
+        } else if enoch {
+            Policy::EnochHeuristic
+        } else {
+            Policy::Heuristic
+        };
+        // Grandmaster: `GM_ROLLOUT=0` (its default) means "roll every sampled world
+        // out to the LAST card" (exact terminal points, no truncation bias) — the
+        // single biggest honest lever over Enoch's 12-trick truncated rollouts.
+        let rollout_tricks = if grandmaster && knobs.rollout_tricks == 0 {
+            usize::MAX
+        } else {
+            knobs.rollout_tricks
+        };
+        // Grandmaster is the apex tier and is allowed to *think longer* than the
+        // other tiers (a higher difficulty searches more worlds / deeper). This is
+        // honest — pure extra computation on its own redacted view, never extra
+        // information. `GM_BUDGET_MULT` scales its per-decision wall-clock budget;
+        // the default of 3× is what converts its full-hand-rollout search into a
+        // clear win over Enoch in self-play (Enoch, capped at 144 worlds / 12-trick
+        // rollouts, plateaus and cannot use the extra time). At the production base
+        // (2200ms) that is ~6.6s/decision, run OFF the game lock by the
+        // non-blocking bot driver and masked by the visible pacing, so it never
+        // lags chat/UI; lower `GM_BUDGET_MULT` (or `SHENGJI_BOT_BUDGET_MS`) to trade
+        // strength for speed.
+        let budget_ms = if grandmaster {
+            (search_budget_ms() as f64 * env_f64("GM_BUDGET_MULT", 3.0)) as u64
+        } else {
+            search_budget_ms()
+        };
         let config = SearchConfig {
-            time_budget: Duration::from_millis(search_budget_ms()),
+            time_budget: Duration::from_millis(budget_ms),
             max_worlds: knobs.search_worlds,
             max_candidates: knobs.search_candidates.max(1),
-            rollout_tricks: knobs.rollout_tricks,
+            rollout_tricks,
             seed: rng.gen(),
             policy: prior,
             // Rollouts use the cheap heuristic default policy (see the
-            // `rollout_policy` doc on `SearchConfig`) — except Enoch, which keeps
-            // its playbook in the rollouts too so the search values endgame /
-            // hand-off lines correctly.
-            rollout_policy: if enoch {
-                Policy::EnochHeuristic
-            } else {
-                Policy::Heuristic
-            },
+            // `rollout_policy` doc on `SearchConfig`) — Enoch keeps the playbook in
+            // its rollouts; Grandmaster deliberately rolls out with the NEUTRAL
+            // heuristic (calculation-driven, decoupled from the playbook's
+            // defensive instincts — see the prior/rollout selection above).
+            rollout_policy,
         };
         if let Some(cards) = search_play(p, me, config) {
             return cards;
         }
     }
 
-    // Heuristic backbone (Easy, and the search tiers' fallback). Enoch falls back
-    // to its own playbook-enabled greedy ranking.
-    let enoch = matches!(difficulty, BotDifficulty::Enoch);
+    // Heuristic backbone (Easy, and the search tiers' fallback). Enoch /
+    // Grandmaster fall back to the playbook-enabled greedy ranking.
+    let enoch = matches!(
+        difficulty,
+        BotDifficulty::Enoch | BotDifficulty::Grandmaster
+    );
     let ranked: Vec<ScoredPlay> = if leading {
         if enoch {
             heuristics::ranked_leads_enoch(p, me)
@@ -498,7 +623,10 @@ fn reconcile_kitty(
     // terminate. Enoch applies its stricter, point-budgeted burial discipline.
     let mut pool: Vec<Card> = hand_cards.to_vec();
     pool.extend_from_slice(kitty);
-    let desired = if matches!(difficulty, BotDifficulty::Enoch) {
+    let desired = if matches!(
+        difficulty,
+        BotDifficulty::Enoch | BotDifficulty::Grandmaster
+    ) {
         heuristics::choose_kitty_enoch(&pool, trump, kitty_size)
     } else {
         heuristics::choose_kitty(&pool, trump, kitty_size)
@@ -617,10 +745,13 @@ pub fn choose_bid(
         .map(|h| Card::cards(h.iter()).copied().collect())
         .unwrap_or_default();
 
-    // Enoch prioritizes the suit it holds the most PAIRS in (a trump pair is
-    // worth ~3-4 single trumps), per the playbook; the other tiers use the
+    // Enoch / Grandmaster prioritize the suit they hold the most PAIRS in (a trump
+    // pair is worth ~3-4 single trumps), per the playbook; the other tiers use the
     // length-/strength-weighted backbone.
-    let enoch = matches!(difficulty, BotDifficulty::Enoch);
+    let enoch = matches!(
+        difficulty,
+        BotDifficulty::Enoch | BotDifficulty::Grandmaster
+    );
 
     // Score each candidate bid by the trump it would establish.
     let mut best: Option<(f64, shengji_mechanics::bidding::Bid)> = None;
