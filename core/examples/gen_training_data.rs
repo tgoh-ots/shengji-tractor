@@ -30,6 +30,8 @@
 //! Env knobs:
 //!   GEN_GAMES   number of self-play hands to export (default 200)
 //!   GEN_OUT     output CSV path (default training/data.csv)
+//!   GEN_SEED    deal-RNG seed (default 0xD157111). Distinct seeds give disjoint
+//!               deals, so a run can be SHARDED across processes for parallelism.
 //!   GEN_TEACHER_BUDGET_MS  teacher (Omniscient) perfect-info search budget per
 //!               decision, in ms (default 400). This directly sets LABEL QUALITY:
 //!               an 8ms label is near-noise. Applied via SHENGJI_BOT_BUDGET_MS.
@@ -196,8 +198,15 @@ fn main() {
         .unwrap_or(200);
     let out_path = std::env::var("GEN_OUT").unwrap_or_else(|_| "training/data.csv".to_string());
 
+    // Deal-RNG seed. Distinct seeds generate DISJOINT deal sequences, so a long
+    // run can be SHARDED across processes (GEN_SEED=base+i per shard) for parallel,
+    // resumable generation. Default keeps the original fixed seed (back-compat).
+    let gen_seed: u64 = std::env::var("GEN_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0xD157111);
     let start = std::time::Instant::now();
-    let mut rng = StdRng::seed_from_u64(0xD157111);
+    let mut rng = StdRng::seed_from_u64(gen_seed);
     let mut group_counter: u64 = 0;
     let mut rows: Vec<Row> = Vec::new();
     let mut decisions = 0usize;

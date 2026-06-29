@@ -192,6 +192,12 @@ python train_expert.py --data data.csv --out ../core/src/bot/expert_model.onnx
 SHENGJI_EXPERT_MODEL_PATH=$PWD/candidate.onnx SHENGJI_VALUE_WEIGHT=0.5 \
   cargo run --release --example paired_eval -- 200 0x5EED search
 ```
+The whole steps 1→3 chain (DAgger data-gen → train value head → A/B the blend) is
+automated + **resumable** by `training/run_value_pipeline.sh` — a checkpointed,
+parallel (sharded data-gen via `GEN_SEED`), reboot-safe runner. Re-run it to RESUME
+(completed shards/train/A/B are skipped via markers in `$HOME/.shengji-value-run`);
+`STATUS=1 bash training/run_value_pipeline.sh` reports progress.
+
 CONTRACT: `FEATURE_DIM` (currently 36) is defined in `core/src/bot/expert.rs`
 (`candidate_features`) AND hardcoded in `train_expert.py`; the value-augmented CSV
 has `1 + FEATURE_DIM + 1 (label) + 1 (value)` columns (the trainer also accepts the

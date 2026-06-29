@@ -98,7 +98,9 @@ fn main() {
         print_paired_ab(&r);
     }
 
-    if which == "all" || which == "search" {
+    // `expert-easy` runs ONLY the Expert-vs-Easy matchup — the relevant one for a
+    // value-blend A/B (SHENGJI_VALUE_WEIGHT on vs off) — to halve the wall-clock.
+    if which == "all" || which == "search" || which == "expert-easy" {
         println!("\n-- search matchups (honor SHENGJI_BOT_BUDGET_MS; slower) --");
         let r = run_paired_ab(
             &Contestant::tier(BotDifficulty::Expert),
@@ -107,12 +109,14 @@ fn main() {
             base_seed,
         );
         print_paired_ab(&r);
-        let r = run_paired_ab(
-            &Contestant::tier(BotDifficulty::Enoch),
-            &Contestant::tier(BotDifficulty::Expert),
-            pairs,
-            base_seed,
-        );
-        print_paired_ab(&r);
+        if which != "expert-easy" {
+            let r = run_paired_ab(
+                &Contestant::tier(BotDifficulty::Enoch),
+                &Contestant::tier(BotDifficulty::Expert),
+                pairs,
+                base_seed,
+            );
+            print_paired_ab(&r);
+        }
     }
 }
