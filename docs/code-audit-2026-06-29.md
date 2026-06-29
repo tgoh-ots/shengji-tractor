@@ -8,6 +8,42 @@
 
 ---
 
+## Remediation status (updated 2026-06-29, shipped to production)
+
+Two commits landed on `master` and were deployed to https://shengji-tractor.fly.dev
+(verified live: `/full_state.json` now returns 404, lobby/app 200).
+
+**Fixed — commit `fix: security + reliability act-first set` (act-first):**
+- ✅ #1 critical `/full_state.json` leak — route removed; on-disk recovery dump
+  still runs via the 60s `periodically_dump_state` timer; regression test added
+  (`backend/tests/e2e_game.rs::full_state_json_route_is_not_exposed`).
+- ✅ #2 `jack_variation` save/load data-loss bug.
+- ✅ #3 `check_jacks_last_trick` panic guard.
+- ✅ #4 zstd `FrameDecoder` poisoning (rebuild-on-error).
+- ✅ #6 binary-WebSocket decode `try/catch` (folded in — completes #4).
+
+**Fixed — commit `chore: hygiene sweep` (clippy gate + dead code/deps + toolchain):**
+clippy gate restored (0 warnings/errors); dead code (`should_bid`,
+`Suit::unicode_offset`, `_get_cards` gated) & unused deps removed
+(`lazy_static`, `axum-macros`, `@sentry/tracing`, `hook-shell-script…`,
+`tempdir`→`tempfile`); `rust-toolchain.toml` pins rustc 1.92.0 (#9); prettier
+conflict resolved (`.prettierrc` deleted; codebase is on prettier defaults);
+dependabot cargo+npm; `tsconfig` skipLibCheck; `release.sh` shebang; `substr`,
+`rel="noreferrer"`. **Note:** `Action::Beep` (core-gamestate-2) was flagged dead
+but is LIVE (BeepButton sends it) — intentionally kept.
+
+**Accepted risk (will NOT fix):**
+- ⏸️ #5 name-based seat takeover — accepted for a casual site (any name-only
+  heuristic also blocks the legitimate owner / breaks fast-refresh reconnect; the
+  real fix is a per-seat token, a wire-protocol change).
+
+**Deferred (open follow-ups):**
+- ⬜ #7 unauthenticated `/api/rpc` + unbounded trick-matcher CPU DoS (medium).
+- ⬜ #8 frontend render-tree index-crash cluster (medium).
+- ⬜ ~102 low-severity items below (cleanliness/best-practice tail), as desired.
+
+---
+
 ## Top priorities
 
 1. **🟥 CRITICAL — Unauthenticated `/full_state.json` leaks every player's hidden hand** *(Security; ids: backend-1, security-deep-1)*

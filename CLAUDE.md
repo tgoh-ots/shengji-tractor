@@ -10,13 +10,14 @@ The headline differentiator is a **four-tier bot ladder** (`Easy < Expert <= Eno
 
 ## Commands
 
-> ⚠️ **Toolchain:** this repo's deps need **rustc ≥ 1.87**, but the machine's default
-> `stable` may be older (it is 1.80.1 in the current dev env). Prefix EVERY `cargo`
-> command below with the right toolchain — e.g. `cargo +1.92.0 test --all`,
-> `cargo +1.92.0 build --bin shengji`. Running bare `cargo` on the old default
-> fails with dependency build errors (`is_multiple_of`/edition mismatches). The
-> bare `cargo …` shown below is for brevity; add `+1.92.0` (or your installed ≥1.87
-> toolchain) in this environment.
+> ⚠️ **Toolchain:** a committed **`rust-toolchain.toml` pins this repo to rustc
+> 1.92.0** (deps need **≥ 1.87**) and includes `rustfmt`, `clippy`, and the
+> `wasm32-unknown-unknown` target. Because of that file, **bare `cargo` in this
+> directory auto-selects 1.92.0 via rustup** — no `+1.92.0` prefix needed, and
+> rustup will install the toolchain on first use. The explicit `cargo +1.92.0 …`
+> in the commands below is now just belt-and-suspenders (and what you'd use to
+> override the pin). The pin also makes the `#![deny(warnings)]` deploy build
+> deterministic — bump it deliberately (then re-run fmt/clippy/test), don't float.
 
 ### Development
 ```bash
@@ -121,8 +122,8 @@ stats). Add a new benchmark by configuring `Seat`s, NOT by re-copying the loop.
 > order is per-process and leaks into tie-breaks). Compare CIs/distributions, never
 > a byte-diff. See `docs/bot-eval-baseline.md`.
 
-> Toolchain: build/test with `cargo +1.92.0 …` in this repo's dev env — deps need
-> rustc ≥ 1.87 and the machine's default `stable` may be older.
+> Toolchain: `rust-toolchain.toml` pins rustc 1.92.0, so bare `cargo` works here
+> (rustup auto-switches); `cargo +1.92.0 …` is equivalent. Deps need rustc ≥ 1.87.
 
 Useful bot debug env vars: `SHENGJI_EXPERT_MODEL_PATH` (load a candidate ONNX at
 runtime — A/B a net with no rebuild), `SHENGJI_SEARCH_TRACE=1` (log per-decision

@@ -1,15 +1,39 @@
 # Shengji Online — Project Progress & Recovery Log
 
 > Durable status doc so work can resume after a crashed/restarted session.
-> **Last updated: 2026-06-28.** Update this at every milestone boundary.
+> **Last updated: 2026-06-29.** Update this at every milestone boundary.
 >
 > **Status: LIVE & actively iterated** at https://shengji-tractor.fly.dev.
 > The original milestones (M0–M6) are all done; work since then has been a
-> **bot-ladder overhaul** and a round of **UI/game-flow polish** (both shipped).
+> **bot-ladder overhaul**, a round of **UI/game-flow polish**, and a
+> **security/reliability audit + hygiene sweep** (all shipped).
 
-## Current state (2026-06-28)
+## Current state (2026-06-29)
 
-### Bot ladder overhaul (latest major work — shipped)
+### 2026-06-29 — Security/reliability audit + hygiene sweep (shipped & deployed)
+A multi-agent code audit (`docs/code-audit-2026-06-29.md`, with a remediation-status
+section) drove two commits, both pushed to `master` and deployed:
+- **Act-first fixes**: closed a **critical** unauthenticated `/full_state.json`
+  leak (it served every room's un-redacted hands — route removed; the on-disk
+  recovery dump still runs on the 60s `periodically_dump_state` timer; regression
+  test added). Guarded a jack-variation last-trick `unwrap` panic (a server-crash
+  reachable from an untrusted message sequence). De-poisoned the wasm zstd decoder
+  + added a binary-WebSocket `try/catch` so one corrupt frame is survivable. Fixed
+  a `jack_variation` save/load data-loss bug.
+- **Hygiene sweep**: restored a clean `cargo clippy` gate (0 warnings/errors);
+  removed dead code (`should_bid`, `Suit::unicode_offset`, gated `_get_cards`) &
+  unused deps (`lazy_static`, `axum-macros`, `@sentry/tracing`,
+  `hook-shell-script…`, `tempdir`→`tempfile`); added **`rust-toolchain.toml`
+  pinning rustc 1.92.0** (bare `cargo` now auto-selects it; makes the
+  `#![deny(warnings)]` deploy build deterministic); resolved the prettier-config
+  conflict (deleted the never-applied `.prettierrc`; codebase is on defaults);
+  dependabot cargo+npm, `tsconfig` skipLibCheck, `release.sh` shebang.
+- **Accepted risk** (will NOT fix): name-based seat takeover — casual site; the
+  real fix is a per-seat-token wire-protocol change. **Open follow-ups**: harden
+  the unauthenticated `/api/rpc` (CPU DoS) and a frontend render-index-crash
+  cluster (both medium).
+
+### Bot ladder overhaul (prior major work — shipped)
 The bot tiers were redesigned from `Easy/Hard/Expert/Omniscient` into a cleaner
 **four-tier ladder `Easy < Expert <= Enoch < Omniscient`**. (See `CLAUDE.md` →
 "Bot Architecture" for the full description; this is the status summary.)
