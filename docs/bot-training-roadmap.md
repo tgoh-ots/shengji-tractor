@@ -171,9 +171,15 @@ Assumes the substrate exists, so these are now measurable bets. Sequenced by dep
   honest-vs-cheater ceiling *and* de-noises endgame teacher labels). Needs a conservative card-count threshold
   + node cap or Tractor's tractor/pair/throw branching blows the budget; **re-verify the honesty invariant** —
   it touches the perfect-info path.
-- [ ] **Kitty (扣底) distillation — Phase 1 only this month.** Export landlord bury decisions with the
-  teacher's choice and **measure the heuristic-vs-teacher disagreement rate.** Build the second model only if
-  that number is large.
+- [x] **Kitty (扣底) Phase-1 audit — DONE (2026-06-29); finding: deprioritize a kitty model.** The new
+  `core/examples/kitty_audit.rs` forces candidate burials (default `choose_kitty` / `choose_kitty_enoch` /
+  naive min-points) on the SAME deal and plays each out with a fixed greedy policy, isolating the burial. Result
+  (150 hands, greedy evaluator): the **default heuristic has the best MEAN landlord margin** of the three
+  (gap −2.3 pts/hand vs the best alternative) and buries 0 points — so a learned kitty model is **not** worth it
+  vs this baseline. ⚠️ Two real findings instead: (1) **`choose_kitty_enoch` buries ~19 points/hand** and does
+  slightly WORSE — a likely Enoch burial weakness worth fixing; (2) naive min-points burial is ~25 pts/hand
+  worse than default, confirming the default's void/shape value is real. Caveat: greedy evaluator — re-run with a
+  search evaluator before any strong claim. Phase-2 (a learned kitty model) is **not** justified by this.
 
 ---
 

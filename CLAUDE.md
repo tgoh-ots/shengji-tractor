@@ -96,6 +96,11 @@ cargo run --release --example budget_benchmark
 # honors SHENGJI_BOT_BUDGET_MS. See docs/bot-eval-baseline.md.
 cargo run --release --example paired_eval -- 400 0x5EED fast
 SHENGJI_BOT_BUDGET_MS=400 cargo run --release --example paired_eval -- 200 0x5EED search
+
+# Kitty (扣底) Phase-1 audit: force candidate burials on the SAME deal, play each
+# out with fixed greedy play, report whether the default burial leaks margin vs
+# alternatives (directs whether a learned kitty model is worth building).
+cargo run --release --example kitty_audit -- 300
 ```
 
 All of the above share ONE driver — `core/src/bot/harness.rs` (`seeded_draw_phase`
