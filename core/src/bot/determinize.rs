@@ -128,7 +128,7 @@ impl Knowledge {
             }
         }
 
-        let voids = Self::infer_voids(p, me);
+        let voids = Self::infer_voids(p, me, full_memory);
 
         Knowledge {
             seen,
@@ -141,9 +141,18 @@ impl Knowledge {
 
     /// Infer per-seat voids from the public history. A seat is void in the led
     /// suit of a trick if it followed with cards of a different effective suit
-    /// (i.e. it couldn't follow). We examine the current trick and the last
-    /// completed trick (the only history the engine retains).
-    fn infer_voids(p: &PlayPhase, me: PlayerID) -> HashMap<PlayerID, Vec<EffectiveSuit>> {
+    /// (i.e. it couldn't follow).
+    ///
+    /// With `full_memory` (the Enoch tier) we seed from the engine's accumulated
+    /// FULL-hand void log ([`PlayPhase::voids_this_hand`], every completed trick)
+    /// and then add the current in-progress trick. Otherwise (Easy/Expert) we use
+    /// only the current trick + the single retained last trick — the limited
+    /// history available without the log.
+    fn infer_voids(
+        p: &PlayPhase,
+        me: PlayerID,
+        full_memory: bool,
+    ) -> HashMap<PlayerID, Vec<EffectiveSuit>> {
         let trump = p.trick().trump();
         let mut voids: HashMap<PlayerID, Vec<EffectiveSuit>> = HashMap::new();
 
@@ -153,6 +162,19 @@ impl Knowledge {
                 entry.push(suit);
             }
         };
+
+        // Full memory (Enoch): seed from the accumulated full-hand void log — every
+        // completed trick, not just the last. Honest (off-suit follows are public).
+        if full_memory {
+            for (pid, suits) in p.voids_this_hand() {
+                if *pid == me {
+                    continue;
+                }
+                for suit in suits {
+                    note_void(*pid, *suit);
+                }
+            }
+        }
 
         let mut scan = |trick: &shengji_mechanics::trick::Trick| {
             let played = trick.played_cards();
@@ -183,9 +205,15 @@ impl Knowledge {
             }
         };
 
+        // Always scan the CURRENT (in-progress) trick: it is not yet in the
+        // completed-trick void log seeded above.
         scan(p.trick());
-        if let Some(last) = p.last_trick() {
-            scan(last);
+        // Limited memory also folds in the single retained last trick; full memory
+        // already covered every completed trick (incl. the last) from the log.
+        if !full_memory {
+            if let Some(last) = p.last_trick() {
+                scan(last);
+            }
         }
 
         voids
@@ -219,9 +247,19 @@ impl Knowledge {
 pub fn sample_hidden_hands<R: Rng>(
     view: &PlayPhase,
     me: PlayerID,
+    full_memory: bool,
     rng: &mut R,
 ) -> Option<DeterminizedWorld> {
-    let knowledge = Knowledge::from_play_view(view, me);
+    // The Enoch tier samples with PERFECT memory: every card played this hand is
+    // excluded from the hidden pool (so already-played cards are never re-dealt to
+    // an opponent) and voids are inferred over the full history. Easy/Expert keep
+    // the limited last-trick memory so the net's prior matches its training-time
+    // world model. Honest either way — only publicly-played cards are excluded.
+    let knowledge = if full_memory {
+        Knowledge::from_play_view_full_memory(view, me)
+    } else {
+        Knowledge::from_play_view(view, me)
+    };
     let trump = knowledge.trump;
 
     let mut pool = knowledge.hidden_pool();

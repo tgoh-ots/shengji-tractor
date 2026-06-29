@@ -379,6 +379,15 @@ impl DrawPhase {
         self.autobid.is_some() || !self.bids.is_empty()
     }
 
+    /// The current standing (winning) bid, if any. Public so the bot driver can
+    /// let an Enoch bot evaluate whether to "flip" (counter-bid) the standing
+    /// declaration with a trump suit its own hand is stronger in.
+    pub fn winning_bid(&self) -> Option<Bid> {
+        Bid::first_and_winner(&self.bids, self.autobid)
+            .ok()
+            .map(|(_, winner)| winner)
+    }
+
     pub fn advance(&self, id: PlayerID) -> Result<ExchangePhase, Error> {
         if !self.deck.is_empty() {
             bail!("deck has cards remaining")

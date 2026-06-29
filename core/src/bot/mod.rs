@@ -837,6 +837,17 @@ fn next_bot_action(
                 // bottom). The winning bidder advances into the exchange phase. We
                 // only do this automatically if that player is a bot; otherwise we
                 // stop and let the human pick up the kitty.
+                //
+                // FLIP / counter-bid (Enoch only): before finalizing, let an Enoch
+                // bot that is NOT the standing bidder reclaim the declaration with a
+                // trump suit its own hand is genuinely stronger in (the playbook's
+                // "flipping"). `enoch_flip_bid` enforces the playbook guard (strictly
+                // more cards in the new suit than the standing suit) plus a strength
+                // margin; `valid_bids` returns only strictly-higher legal bids, so a
+                // chain of flips ascends a finite bid lattice and cannot loop.
+                if let Some(flip) = enoch_flip_bid(p, &state) {
+                    return Ok(Some(flip));
+                }
                 let responsible = p.next_player()?;
                 match bot_for(&state, responsible) {
                     // The human is the standing (winning) bidder: it is THEIR call
@@ -1030,4 +1041,90 @@ fn observed_state(
 /// Look up the bot difficulty for the given player id, if it is a registered bot.
 fn bot_for(state: &GameState, id: PlayerID) -> Option<BotDifficulty> {
     state.propagated().is_bot(id)
+}
+
+/// If an Enoch bot (other than the current standing bidder) can profitably FLIP
+/// the standing trump declaration — the playbook's counter-bid — return the
+/// `(seat, Action::Bid)` to do so, else `None`.
+///
+/// Guards (both required): the bot must hold strictly MORE cards in the new
+/// trump's suit than in the standing trump's suit (the playbook's primary "more
+/// cards in the new suit" rule), and its Enoch pair-aware bid strength must
+/// improve by a clear margin. Joker / NoTrump standing bids and joker/NT
+/// counter-bids are skipped (no suit to compare). HONEST — reads only each
+/// candidate seat's own hand. Because `valid_bids` returns only strictly-higher
+/// legal bids, a chain of flips strictly ascends the finite bid lattice and
+/// terminates (the driver's iteration cap is a further backstop).
+fn enoch_flip_bid(
+    p: &crate::game_state::draw_phase::DrawPhase,
+    state: &GameState,
+) -> Option<(PlayerID, Action)> {
+    use shengji_mechanics::types::{Card, EffectiveSuit, Trump};
+
+    let standing = p.winning_bid()?;
+    let standing_suit = match standing.card {
+        Card::Suited { suit, .. } => suit,
+        _ => return None, // joker / NT standing bid: no suit to out-hold
+    };
+    let standing_winner = standing.id;
+
+    let count_in_trump = |hand: &[Card], t: Trump| -> usize {
+        hand.iter()
+            .filter(|c| t.effective_suit(**c) == EffectiveSuit::Trump)
+            .count()
+    };
+
+    for player in state.propagated().players() {
+        let seat = player.id;
+        if seat == standing_winner {
+            continue; // never flip our own standing bid
+        }
+        if !matches!(bot_for(state, seat), Some(BotDifficulty::Enoch)) {
+            continue; // only Enoch flips
+        }
+        let level = player.rank();
+        let hand: Vec<Card> = match p.hands().get(seat) {
+            Ok(h) => Card::cards(h.iter()).copied().collect(),
+            Err(_) => continue,
+        };
+        let standing_trump = heuristics::trump_for(level, Some(standing_suit));
+        let my_in_standing = count_in_trump(&hand, standing_trump);
+        let standing_strength = heuristics::bid_strength_enoch(&hand, standing_trump);
+
+        let valid = match p.valid_bids(seat) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let mut best: Option<(f64, shengji_mechanics::bidding::Bid)> = None;
+        for bid in valid {
+            let new_suit = match bid.card {
+                Card::Suited { suit, .. } => suit,
+                _ => continue, // skip joker / NT counter-bids
+            };
+            if new_suit == standing_suit {
+                continue; // reinforcing the same suit isn't a flip
+            }
+            let new_trump = heuristics::trump_for(level, Some(new_suit));
+            // PRIMARY playbook guard: strictly more cards in the new suit.
+            if count_in_trump(&hand, new_trump) <= my_in_standing {
+                continue;
+            }
+            // SECONDARY: a clear pair-aware strength improvement over the standing.
+            let new_strength = heuristics::bid_strength_enoch(&hand, new_trump);
+            if new_strength < standing_strength + 4.0 {
+                continue;
+            }
+            if best
+                .as_ref()
+                .map(|(bs, _)| new_strength > *bs)
+                .unwrap_or(true)
+            {
+                best = Some((new_strength, bid));
+            }
+        }
+        if let Some((_, bid)) = best {
+            return Some((seat, Action::Bid(bid.card, bid.count)));
+        }
+    }
+    None
 }

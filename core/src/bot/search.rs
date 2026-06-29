@@ -158,7 +158,11 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, config: SearchConfig) -> Option<
         }
         // Sample one world; reuse it across all candidates for a fair, paired
         // comparison (variance reduction).
-        let world = match sample_hidden_hands(p, me, &mut rng) {
+        // Enoch samples worlds with PERFECT memory (no already-played card is
+        // re-dealt to an opponent, voids inferred over the full hand); Expert keeps
+        // the limited last-trick memory its net prior was trained against.
+        let full_memory = config.policy == Policy::EnochHeuristic;
+        let world = match sample_hidden_hands(p, me, full_memory, &mut rng) {
             Some(w) => w,
             None => {
                 worlds_done += 1;
@@ -188,24 +192,63 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, config: SearchConfig) -> Option<
         worlds_done += 1;
     }
 
-    // Pick the candidate with the best average value; break ties toward the
-    // higher heuristic score (candidates are already heuristic-sorted, so the
-    // earliest index wins ties).
-    let mut best_idx = 0;
-    let mut best_avg = f64::NEG_INFINITY;
-    for idx in 0..candidates.len() {
-        let avg = if counts[idx] > 0 {
-            totals[idx] / counts[idx] as f64
-        } else {
-            // No simulations ran for this candidate; fall back to its heuristic
-            // score so it isn't unfairly ignored.
-            candidates[idx].score
+    // Per-candidate mean leaf value (a candidate that never got simulated falls
+    // back to its heuristic score so it isn't unfairly ignored).
+    let avgs: Vec<f64> = (0..candidates.len())
+        .map(|idx| {
+            if counts[idx] > 0 {
+                totals[idx] / counts[idx] as f64
+            } else {
+                candidates[idx].score
+            }
+        })
+        .collect();
+
+    // Pick the best candidate. Candidates are heuristic-sorted, so the earliest
+    // index wins ties.
+    let best_idx = if config.policy == Policy::EnochHeuristic {
+        // Enoch: the static leaf evaluator ([`evaluate_position`]) is playbook-
+        // BLIND (points + generic control only), so on its own the search can
+        // silently override the Enoch playbook among near-equal candidates — e.g.
+        // pick a play the playbook heavily penalized once it survives into the
+        // top-K (late game / few legal options). Blend a small amount of the
+        // (min-max normalized) Enoch heuristic prior back into the FINAL selection
+        // so the playbook breaks near-ties toward its move while a clearly-better
+        // search value still wins. `candidates[i].score` is the playbook prior.
+        const LAMBDA: f64 = 0.2;
+        let norm = |xs: &[f64]| -> Vec<f64> {
+            let lo = xs.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let span = hi - lo;
+            if !span.is_finite() || span <= 0.0 {
+                vec![0.0; xs.len()]
+            } else {
+                xs.iter().map(|&x| (x - lo) / span).collect()
+            }
         };
-        if avg > best_avg {
-            best_avg = avg;
-            best_idx = idx;
+        let norm_avg = norm(&avgs);
+        let norm_heur = norm(&candidates.iter().map(|c| c.score).collect::<Vec<_>>());
+        let mut bi = 0;
+        let mut best = f64::NEG_INFINITY;
+        for idx in 0..candidates.len() {
+            let combined = norm_avg[idx] + LAMBDA * norm_heur[idx];
+            if combined > best {
+                best = combined;
+                bi = idx;
+            }
         }
-    }
+        bi
+    } else {
+        let mut bi = 0;
+        let mut best = f64::NEG_INFINITY;
+        for (idx, &avg) in avgs.iter().enumerate() {
+            if avg > best {
+                best = avg;
+                bi = idx;
+            }
+        }
+        bi
+    };
 
     Some(candidates[best_idx].cards.clone())
 }

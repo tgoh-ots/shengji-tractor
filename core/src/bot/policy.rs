@@ -654,7 +654,27 @@ pub fn choose_bid(
         } else {
             drawn as f64 / full_hand as f64
         };
-        let overwhelming = best.map(|(s, _)| s >= 22.0).unwrap_or(false);
+        // "Overwhelming" enough to declare BEFORE the deal completes requires
+        // genuine PAIR STRUCTURE (the playbook values a trump pair at ~3-4 singles),
+        // not merely a high length-driven strength score — a long-but-unpaired suit
+        // that happens to reach the old ~22 threshold must still wait for the rest
+        // of the deal, exactly the "declared too early / wrong structure" failure
+        // the playbook warns about. Demand >=2 trump pairs (or a trump tractor) AND
+        // a still-high strength.
+        let overwhelming = best
+            .map(|(s, bid)| {
+                if s < 18.0 {
+                    return false;
+                }
+                let candidate_trump = match bid.card {
+                    Card::SmallJoker | Card::BigJoker => heuristics::trump_for(level, None),
+                    Card::Suited { suit, .. } => heuristics::trump_for(level, Some(suit)),
+                    Card::Unknown => return false,
+                };
+                let (pairs, tractor) = heuristics::trump_pair_structure(&hand, candidate_trump);
+                pairs >= 2 || tractor
+            })
+            .unwrap_or(false);
         if fraction < 0.6 && !overwhelming {
             return None;
         }

@@ -11,7 +11,7 @@ use shengji_mechanics::scoring::{compute_level_deltas, next_threshold_reachable,
 use shengji_mechanics::trick::{
     PlayCards, PlayCardsMessage, PlayedCards, Trick, TrickEnded, TrickUnit,
 };
-use shengji_mechanics::types::{Card, PlayerID, Rank, Trump};
+use shengji_mechanics::types::{Card, EffectiveSuit, PlayerID, Rank, Trump};
 
 use crate::bot::BotDifficulty;
 use crate::message::MessageVariant;
@@ -64,6 +64,16 @@ pub struct PlayPhase {
     /// still deserialize without breaking wasm state-sync.
     #[serde(default)]
     played_this_hand: HashMap<Card, usize>,
+    /// Per-seat suit voids established this hand: a seat is recorded void in the
+    /// led effective suit of a completed trick when it could not follow (it played
+    /// an off-suit card). HONEST/public — off-suit follows are watched by every
+    /// seat. A runtime-only aid for the Enoch bot's FULL-history void inference
+    /// (the engine otherwise retains only `last_trick`). `#[serde(skip)]` keeps it
+    /// off the wire and out of the serialized state schema (so it never touches the
+    /// frontend types); it rebuilds trick-by-trick, so the only cost is a reset
+    /// across a serialized dump/reload — which self-heals as the hand continues.
+    #[serde(skip, default)]
+    voids_this_hand: HashMap<PlayerID, Vec<EffectiveSuit>>,
     game_ended_early: bool,
     #[serde(default)]
     removed_cards: Vec<Card>,
@@ -117,6 +127,7 @@ impl PlayPhase {
             game_ended_early: false,
             last_trick: None,
             played_this_hand: HashMap::new(),
+            voids_this_hand: HashMap::new(),
             player_requested_reset: None,
         })
     }
@@ -164,6 +175,16 @@ impl PlayPhase {
     /// boss-card / guaranteed-winner detection across the whole hand.
     pub fn played_this_hand(&self) -> &HashMap<Card, usize> {
         &self.played_this_hand
+    }
+
+    /// Per-seat suit voids established across ALL completed tricks this hand (a
+    /// seat that played off the led suit is void in it). HONEST/public — off-suit
+    /// follows are watched by every seat, so this is included unchanged in the
+    /// redacted per-player view. Used by the Enoch bot for full-history void
+    /// inference (partner-ruff / trump-drain leads, tighter world sampling) since
+    /// the engine itself only retains `last_trick`.
+    pub fn voids_this_hand(&self) -> &HashMap<PlayerID, Vec<EffectiveSuit>> {
+        &self.voids_this_hand
     }
 
     /// The number of decks in play.
@@ -457,6 +478,29 @@ impl PlayPhase {
                 *self.played_this_hand.entry(*card).or_insert(0) += 1;
             }
         }
+        // Record, for the full hand, any seat that could NOT follow this trick's
+        // led suit (it played an off-suit card) — it is void in the led suit.
+        // HONEST: off-suit follows are public. This is the same off-suit signal
+        // the determinizer's `infer_voids` uses, but accumulated across every
+        // completed trick (the engine keeps only `last_trick`).
+        {
+            let played = completed.played_cards();
+            if let Some(lead_card) = played.first().and_then(|pc| pc.cards.first()).copied() {
+                let led_suit = self.trump.effective_suit(lead_card);
+                for pc in played.iter().skip(1) {
+                    let played_off_suit = pc
+                        .cards
+                        .iter()
+                        .any(|c| *c != Card::Unknown && self.trump.effective_suit(*c) != led_suit);
+                    if played_off_suit {
+                        let entry = self.voids_this_hand.entry(pc.id).or_default();
+                        if !entry.contains(&led_suit) {
+                            entry.push(led_suit);
+                        }
+                    }
+                }
+            }
+        }
         self.last_trick = Some(completed);
 
         Ok(msgs)
@@ -714,12 +758,23 @@ impl PlayPhase {
             self.propagated.jack_variation,
         ));
 
-        // Flavor: every Enoch bot on the LOSING side of the just-finished hand
-        // posts its catchphrase in chat.
+        // Flavor: only when the MATCH ends — a team runs the rank ladder past
+        // `max_rank`, bumping its metalevel (see `Player::advance`) — does every
+        // Enoch bot on the LOSING side post its catchphrase. `compute_player_level_deltas`
+        // above already advanced `propagated.players`, so a metalevel that grew
+        // relative to the pre-advancement `self.propagated.players` means this
+        // hand won/lost the whole game (not just bumped ranks within it).
+        let match_ended = self
+            .propagated
+            .players
+            .iter()
+            .zip(propagated.players.iter())
+            .any(|(before, after)| after.metalevel > before.metalevel);
         msgs.extend(Self::enoch_loser_chat(
             &propagated,
             &self.landlords_team[..],
             landlord_won,
+            match_ended,
         ));
 
         let mut idx = (landlord_idx + 1) % propagated.players.len();
@@ -744,8 +799,10 @@ impl PlayPhase {
         ))
     }
 
-    /// Flavor catchphrase: for each Enoch bot on the LOSING side of a finished
-    /// hand, emit a `BotChat` line attributed to that bot.
+    /// Flavor catchphrase: when the MATCH is over (`match_ended`), every Enoch
+    /// bot on the LOSING side emits a `BotChat` line attributed to that bot. On an
+    /// ordinary hand that only bumped ranks (`!match_ended`), nobody speaks — the
+    /// catchphrase fires once per lost *game*, not once per lost *hand*.
     ///
     /// "Losing" mirrors [`PlayerGameFinishedResult::won_game`] (which is set to
     /// `landlord_won == is_defending`): a player lost iff
@@ -757,8 +814,12 @@ impl PlayPhase {
         propagated: &PropagatedState,
         landlords_team: &[PlayerID],
         landlord_won: bool,
+        match_ended: bool,
     ) -> Vec<MessageVariant> {
         let mut msgs = vec![];
+        if !match_ended {
+            return msgs;
+        }
         for player in &propagated.players {
             let is_defending = landlords_team.contains(&player.id);
             let lost_hand = landlord_won != is_defending;
@@ -881,7 +942,7 @@ mod enoch_chat_tests {
         let landlords_team = vec![ids[0]];
 
         // Landlord (defending) won -> the attacking Enoch bot lost the hand.
-        let msgs = PlayPhase::enoch_loser_chat(&propagated, &landlords_team, true);
+        let msgs = PlayPhase::enoch_loser_chat(&propagated, &landlords_team, true, true);
 
         assert_eq!(
             bot_chat_lines(&msgs),
@@ -897,7 +958,7 @@ mod enoch_chat_tests {
         let landlords_team = vec![ids[0]];
 
         // Defending team won -> the Enoch bot is on the WINNING side, so silent.
-        let msgs = PlayPhase::enoch_loser_chat(&propagated, &landlords_team, true);
+        let msgs = PlayPhase::enoch_loser_chat(&propagated, &landlords_team, true, true);
 
         assert!(bot_chat_lines(&msgs).is_empty());
     }
@@ -914,7 +975,7 @@ mod enoch_chat_tests {
         let landlords_team = vec![ids[0]];
 
         // Defending team won -> seats 1..=3 (all non-Enoch) lost, but none speak.
-        let msgs = PlayPhase::enoch_loser_chat(&propagated, &landlords_team, true);
+        let msgs = PlayPhase::enoch_loser_chat(&propagated, &landlords_team, true, true);
 
         assert!(bot_chat_lines(&msgs).is_empty());
     }
@@ -928,7 +989,7 @@ mod enoch_chat_tests {
         ]);
         let landlords_team = vec![ids[0]];
 
-        let msgs = PlayPhase::enoch_loser_chat(&propagated, &landlords_team, true);
+        let msgs = PlayPhase::enoch_loser_chat(&propagated, &landlords_team, true, true);
 
         assert_eq!(
             bot_chat_lines(&msgs),
@@ -937,5 +998,20 @@ mod enoch_chat_tests {
                 ("enoch_b".to_string(), "fah i need a shot".to_string()),
             ],
         );
+    }
+
+    #[test]
+    fn losing_enoch_bot_silent_when_match_not_over() {
+        // A losing Enoch bot must stay SILENT on an ordinary hand loss; the
+        // catchphrase only fires when the whole match ends. Seats: 0 = landlord
+        // (human, defending), 1 = Enoch (attacking, lost the hand).
+        let (propagated, ids) =
+            make_state(&[("landlord", None), ("enoch", Some(BotDifficulty::Enoch))]);
+        let landlords_team = vec![ids[0]];
+
+        // landlord_won = true (Enoch lost the hand) but match_ended = false.
+        let msgs = PlayPhase::enoch_loser_chat(&propagated, &landlords_team, true, false);
+
+        assert!(bot_chat_lines(&msgs).is_empty());
     }
 }

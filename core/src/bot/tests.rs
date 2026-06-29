@@ -540,7 +540,8 @@ fn test_determinizer_respects_counts_and_seen_cards() {
     };
 
     let mut rng = StdRng::seed_from_u64(7);
-    let world = sample_hidden_hands(view_play, me, &mut rng).expect("sampling should succeed");
+    let world =
+        sample_hidden_hands(view_play, me, false, &mut rng).expect("sampling should succeed");
 
     // My sampled hand must match my real hand exactly.
     let my_real: std::collections::HashMap<Card, usize> =

@@ -978,6 +978,61 @@ fn enoch_lead_bonus(
         }
     }
 
+    // --- Void-aware leads: partner ruff + trump drain (Trip/Double Holder) --
+    // Honest: voids come from `ctx.k.voids`, inferred from PUBLIC off-suit follows
+    // (the full-hand void log for Enoch). Two named tactics, both for NON-TRUMP
+    // leads:
+    //   (a) "Lead a suit your partner is void in so they can ruff": if a teammate
+    //       is known void in the led suit AND at least one opponent must still
+    //       follow (so we are not simply gifting the trick to a void opponent),
+    //       lead a CHEAP card to hand the partner a free ruff. Scaled DOWN for high
+    //       cards — give partner a junk entry, don't waste a winner.
+    //   (b) "Drain trump": when EVERY opponent is known void in the led non-trump
+    //       suit, leading it forces them to burn trump (a PAIR/tractor of trump to
+    //       beat our pair/tractor); reward dumping the whole multi-card unit, which
+    //       is what makes the long-suit throw a real play. Gated to a multi-card
+    //       lead — a lone low card just gets ruffed for the trick.
+    if !trumping {
+        let eff = trump.effective_suit(lead);
+        let mut partner_void = false;
+        let mut opp_total = 0usize;
+        let mut opp_void = 0usize;
+        for player in p.propagated().players() {
+            let pid = player.id;
+            if pid == ctx.me {
+                continue;
+            }
+            let void_here = ctx
+                .k
+                .voids
+                .get(&pid)
+                .map(|v| v.contains(&eff))
+                .unwrap_or(false);
+            if same_team(p, ctx.me, pid) {
+                partner_void |= void_here;
+            } else {
+                opp_total += 1;
+                if void_here {
+                    opp_void += 1;
+                }
+            }
+        }
+        let some_opp_must_follow = opp_void < opp_total;
+
+        // (a) Partner ruff: hand a known-void teammate a cheap entry (non-boss).
+        if partner_void && some_opp_must_follow && !is_boss {
+            let s = boss_strength(trump, lead).min(998) as f64;
+            // ~1.0 for a 2, tapering to ~0 for an ace-high card.
+            let cheapness = (1.0 - (s / 14.0)).clamp(0.0, 1.0);
+            bonus += 2.0 + 3.0 * cheapness; // ~+2..+5
+        }
+
+        // (b) Trump drain: every opponent void → reward dumping the multi-card unit.
+        if opp_total > 0 && opp_void == opp_total && len >= 2.0 {
+            bonus += 2.0 + (len - 1.0) * 1.5;
+        }
+    }
+
     // --- Defender low-trump hand-off (Trip Holder) -------------------------
     // For the mid/late-game partner HAND-OFF — "pass it to your partner with a
     //  LOW trump card, like a two, three, or four, something small, non-points;
@@ -1459,13 +1514,83 @@ pub fn ranked_follows(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
     scored
 }
 
+/// Deduplicate identical card-sets in place (order-insensitive), preserving the
+/// first occurrence's card order. Used when merging the Enoch throw candidates
+/// with the shared single-unit candidates.
+fn dedup_card_sets(sets: &mut Vec<Vec<Card>>) {
+    let mut seen: std::collections::HashSet<Vec<Card>> = std::collections::HashSet::new();
+    sets.retain(|s| {
+        let mut key = s.clone();
+        key.sort_by_key(|c| c.as_char());
+        seen.insert(key)
+    });
+}
+
+/// Enoch-ONLY extra lead candidates: multi-unit "throws" (甩牌) — laying an entire
+/// non-trump side suit down at once. The shared [`lead_candidates`] emits only
+/// single trick units, so without this Enoch could never make the playbook's
+/// signature "lay out a long suit to drain everyone's trump" play. We only emit a
+/// full-suit throw when it is SAFE to lay down: either every card is an
+/// uncatchable boss (no opponent can beat any unit) OR every opponent is already
+/// known void in the suit (they can only ruff). The engine's [`PlayPhase::can_play_cards`]
+/// is the final arbiter of throw legality. HONEST — reads only our own hand +
+/// `ctx.k` (public memory). Returns nothing for non-Enoch tiers (never called by
+/// them).
+fn enoch_throw_candidates(ctx: &EvalCtx, p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
+    let trump = ctx.trump;
+    let hand = match p.hands().get(me) {
+        Ok(h) => h,
+        Err(_) => return vec![],
+    };
+    let opp_ids: Vec<PlayerID> = p
+        .propagated()
+        .players()
+        .iter()
+        .map(|pl| pl.id)
+        .filter(|id| *id != me && !same_team(p, me, *id))
+        .collect();
+
+    let my_cards: Vec<Card> = Card::cards(hand.iter()).copied().collect();
+    let mut out = vec![];
+    for (eff, suit_cards) in cards_by_suit(trump, &my_cards) {
+        // Only NON-trump suits, and only when we hold enough to throw more than a
+        // single unit's worth.
+        if eff == EffectiveSuit::Trump || suit_cards.len() < 2 {
+            continue;
+        }
+        let all_boss = suit_cards.iter().all(|c| is_boss_card(&ctx.k, trump, *c));
+        let all_opp_void = !opp_ids.is_empty()
+            && opp_ids.iter().all(|id| {
+                ctx.k
+                    .voids
+                    .get(id)
+                    .map(|v| v.contains(&eff))
+                    .unwrap_or(false)
+            });
+        if !(all_boss || all_opp_void) {
+            continue;
+        }
+        // The maximal throw: every card we hold in this suit, laid down at once.
+        if p.can_play_cards(me, &suit_cards).is_ok() {
+            out.push(suit_cards);
+        }
+    }
+    out
+}
+
 /// Rank the legal lead candidates with the Enoch full-game playbook ENABLED
 /// (`EvalCtx::build_enoch`). Identical machinery to [`ranked_leads`] but the
-/// shared [`score_lead`] adds the Enoch-specific bonuses. Used by the Enoch tier
-/// (directly and as the search prior / rollout policy).
+/// shared [`score_lead`] adds the Enoch-specific bonuses, and the candidate set is
+/// augmented with Enoch-only multi-unit throws. Used by the Enoch tier (directly
+/// and as the search prior / rollout policy).
 pub fn ranked_leads_enoch(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
     let ctx = EvalCtx::build_enoch(p, me);
-    let mut scored: Vec<ScoredPlay> = lead_candidates(p, me)
+    // Augment the shared single-unit candidates with full-suit throws (the shared
+    // generator never emits multi-unit leads), then de-duplicate.
+    let mut cand_sets = lead_candidates(p, me);
+    cand_sets.extend(enoch_throw_candidates(&ctx, p, me));
+    dedup_card_sets(&mut cand_sets);
+    let mut scored: Vec<ScoredPlay> = cand_sets
         .into_iter()
         .map(|cards| {
             let score = score_lead(&ctx, p, &cards);
@@ -1716,6 +1841,57 @@ pub fn bid_strength_enoch(hand: &[Card], candidate: Trump) -> f64 {
     score
 }
 
+/// Count the trump-suit PAIRS `hand` holds under `trump`, and whether it contains
+/// a trump-suit TRACTOR (two consecutive trump-suit ranks each held as a pair).
+/// Used by Enoch's declaring discipline to require genuine PAIR structure — not
+/// mere length — before it commits to a trump early in the deal. Honest (reads
+/// only `me`'s own hand). Mirrors the pair/tractor detection in
+/// [`bid_strength_enoch`].
+pub fn trump_pair_structure(hand: &[Card], trump: Trump) -> (usize, bool) {
+    let counts = Card::count(hand.iter().copied());
+    let mut pairs = 0usize;
+    for (&card, &ct) in &counts {
+        if trump.effective_suit(card) == EffectiveSuit::Trump {
+            pairs += ct / 2;
+        }
+    }
+    let mut tractor = false;
+    if let Trump::Standard { suit, number } = trump {
+        let ladder = [
+            Number::Two,
+            Number::Three,
+            Number::Four,
+            Number::Five,
+            Number::Six,
+            Number::Seven,
+            Number::Eight,
+            Number::Nine,
+            Number::Ten,
+            Number::Jack,
+            Number::Queen,
+            Number::King,
+            Number::Ace,
+        ];
+        let is_pair = |n: Number| -> bool {
+            if n == number {
+                return false; // trump-number twins are off-suit; handled as a pair above
+            }
+            counts
+                .get(&Card::Suited { number: n, suit })
+                .copied()
+                .unwrap_or(0)
+                >= 2
+        };
+        for w in ladder.windows(2) {
+            if is_pair(w[0]) && is_pair(w[1]) {
+                tractor = true;
+                break;
+            }
+        }
+    }
+    (pairs, tractor)
+}
+
 // ===========================================================================
 // Kitty burying (landlord exchange)
 // ===========================================================================
@@ -1895,10 +2071,23 @@ pub fn choose_kitty_enoch(hand: &[Card], trump: Trump, kitty_size: usize) -> Vec
     // whose cards get the entire-suit void bonus.
     let mut void_suits: std::collections::HashSet<EffectiveSuit> = std::collections::HashSet::new();
     let mut void_budget = kitty_size;
+    let mut void_points = 0usize;
     for (len, suit) in voidable {
-        if len <= void_budget {
+        // Voiding a suit may require burying its point cards (the sanctioned
+        // pair/point exception). Only commit to a void whose points fit the
+        // hand-strength point budget: a weak hand (budget 0) then never STARTS a
+        // void it could only finish by burying points, and a stronger hand commits
+        // to it fully. Combined with the pre-commit pass below, this removes the
+        // old silent failure where a void suit's point card was skipped by the
+        // point-budget cap and the suit was left half-buried.
+        let suit_points: usize = by_suit
+            .get(&suit)
+            .map(|cs| cs.iter().filter_map(|c| c.points()).sum())
+            .unwrap_or(0);
+        if len <= void_budget && void_points + suit_points <= point_budget {
             void_suits.insert(suit);
             void_budget -= len;
+            void_points += suit_points;
         }
     }
 
@@ -1993,9 +2182,32 @@ pub fn choose_kitty_enoch(hand: &[Card], trump: Trump, kitty_size: usize) -> Vec
     let mut taken = vec![false; scored.len()];
     let mut chosen: Vec<Card> = Vec::with_capacity(kitty_size);
     let mut points_buried = 0usize;
+    // PASS 0: pre-commit EVERY card of a sanctioned void suit. Completing an
+    // entire-suit void is the top kitty priority ("get rid of an ENTIRE suit
+    // first"), so it takes precedence over the point ceiling — and since void
+    // suits were chosen so their combined length fits the kitty AND their combined
+    // point value fits the budget, this overruns neither. This is what guarantees a
+    // sanctioned void actually completes instead of being silently half-buried.
     for (i, (_, card)) in scored.iter().enumerate() {
         if chosen.len() == kitty_size {
             break;
+        }
+        if void_suits.contains(&trump.effective_suit(*card)) {
+            if let Some(pt) = card.points() {
+                points_buried += pt;
+            }
+            taken[i] = true;
+            chosen.push(*card);
+        }
+    }
+    // PASS 1: fill the remaining slots by buriability, capping the buried POINT
+    // value at the budget (points needed to complete a void were taken in pass 0).
+    for (i, (_, card)) in scored.iter().enumerate() {
+        if chosen.len() == kitty_size {
+            break;
+        }
+        if taken[i] {
+            continue;
         }
         if let Some(pt) = card.points() {
             if points_buried + pt > point_budget {
@@ -2485,6 +2697,73 @@ mod tests {
         // Weak hand => no points buried.
         let pts: usize = buried.iter().filter_map(|c| c.points()).sum();
         assert_eq!(pts, 0, "weak hand buries no points; buried {:?}", buried);
+    }
+
+    /// Enoch kitty (Trip Holder), STRONG hand: a healthy point budget (2 jokers)
+    /// lets Enoch FULLY void a short point-free side suit (so it can ruff later)
+    /// AND sink real points up to its budget — and the void-completion pass never
+    /// leaves a sanctioned void half-finished. Exercises the void/point-budget
+    /// gating + pre-commit path.
+    #[test]
+    fn test_enoch_kitty_completes_void_and_buries_points_on_strong_hand() {
+        let trump = std_trump(Suit::Hearts);
+        let pool = vec![
+            Card::BigJoker,
+            Card::SmallJoker,                // two jokers -> a healthy point budget
+            card(Number::Ace, Suit::Spades), // ace (protected)
+            card(Number::King, Suit::Clubs), // 10-pt point in a LONG suit (buryable)
+            card(Number::Ten, Suit::Clubs),  // 10-pt point
+            card(Number::Three, Suit::Clubs),
+            card(Number::Four, Suit::Clubs),
+            card(Number::Seven, Suit::Diamonds), // SHORT point-free diamonds = void target
+            card(Number::Eight, Suit::Diamonds),
+        ];
+        let buried = choose_kitty_enoch(&pool, trump, 4);
+        assert_eq!(buried.len(), 4);
+        assert!(
+            !buried.iter().any(|c| is_trump(trump, *c)),
+            "never bury trump; buried {:?}",
+            buried
+        );
+        assert!(
+            !buried.iter().any(|c| matches!(
+                c,
+                Card::Suited {
+                    number: Number::Ace,
+                    ..
+                }
+            )),
+            "never bury an ace; buried {:?}",
+            buried
+        );
+        // The short, point-free diamonds suit is FULLY voided (both cards buried) —
+        // a sanctioned void completes rather than being half-buried.
+        let diamonds_buried = buried
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Card::Suited {
+                        suit: Suit::Diamonds,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            diamonds_buried, 2,
+            "strong hand should FULLY void the short diamonds suit; buried {:?}",
+            buried
+        );
+        // A strong hand sinks real points (within its budget) instead of stranding
+        // them in play.
+        let pts: usize = buried.iter().filter_map(|c| c.points()).sum();
+        assert!(
+            pts > 0 && pts <= 25,
+            "strong hand buries points within budget; buried {:?} ({} pts)",
+            buried,
+            pts
+        );
     }
 
     /// Enoch leads tractors first: a boss tractor lead should outscore the same
