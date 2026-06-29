@@ -63,22 +63,33 @@ FEATURE_DIM = 36
 def load_groups(path):
     """Load the CSV into per-decision groups.
 
-    Returns a list of (X, y) where X is [k, FEATURE_DIM] float32 and y is the
-    index of the teacher-chosen candidate within the group (exactly one label==1).
-    Groups without a positive label, or with <2 candidates, are dropped.
+    Returns a list of (X, y, value) where X is [k, FEATURE_DIM] float32, y is the
+    index of the teacher-chosen candidate within the group (exactly one label==1),
+    and value is the group's VALUE target (the normalized realized terminal margin,
+    constant across the group) or None when the CSV has no `value` column
+    (policy-only / legacy data). Groups without a positive label, or with <2
+    candidates, are dropped.
+
+    Accepts BOTH the policy-only layout (group + features + label) and the
+    value-augmented layout (… + value), so legacy CSVs still train the policy head.
     """
     by_group_feats = defaultdict(list)
     by_group_labels = defaultdict(list)
+    by_group_value = {}
     with open(path, newline="") as f:
         reader = csv.reader(f)
         header = next(reader)
-        # Sanity check the header width.
-        expected = 1 + FEATURE_DIM + 1
-        if len(header) != expected:
+        # Accept the policy-only width (…+label) or the value-augmented width
+        # (…+label+value); anything else means FEATURE_DIM drifted.
+        policy_only = 1 + FEATURE_DIM + 1
+        with_value = policy_only + 1
+        if len(header) not in (policy_only, with_value):
             raise SystemExit(
-                f"CSV header has {len(header)} cols, expected {expected} "
-                f"(group + {FEATURE_DIM} features + label). Did FEATURE_DIM change?"
+                f"CSV header has {len(header)} cols, expected {policy_only} "
+                f"(group + {FEATURE_DIM} features + label) or {with_value} "
+                f"(… + value). Did FEATURE_DIM change?"
             )
+        has_value = len(header) == with_value
         for parts in reader:
             if not parts:
                 continue
@@ -87,6 +98,9 @@ def load_groups(path):
             label = int(parts[1 + FEATURE_DIM])
             by_group_feats[g].append(feats)
             by_group_labels[g].append(label)
+            if has_value:
+                # The value is constant within a group; last writer wins (equal).
+                by_group_value[g] = float(parts[1 + FEATURE_DIM + 1])
 
     groups = []
     for g, feats in by_group_feats.items():
@@ -97,7 +111,8 @@ def load_groups(path):
             # Keep the data clean: exactly one teacher choice per decision.
             continue
         y = labels.index(1)
-        groups.append((np.asarray(feats, dtype=np.float32), y))
+        value = by_group_value.get(g) if has_value else None
+        groups.append((np.asarray(feats, dtype=np.float32), y, value))
     return groups
 
 
@@ -138,7 +153,7 @@ def analyze_aliasing(groups, granularities=(2, 1, 0)):
         buckets_pos = defaultdict(int)
         buckets_tot = defaultdict(int)
         collided = 0
-        for X, y in groups:
+        for X, y, _value in groups:
             keys = [tuple(np.round(X[i], dec).tolist()) for i in range(X.shape[0])]
             for i, k in enumerate(keys):
                 buckets_tot[k] += 1
@@ -166,18 +181,26 @@ def analyze_aliasing(groups, granularities=(2, 1, 0)):
 
 
 class CandidateScorer(_NN_MODULE):
-    """MLP scoring ONE candidate feature vector -> scalar logit.
+    """Multi-task MLP over ONE candidate feature vector: a POLICY logit (the
+    distillation prior) and a VALUE estimate (the search leaf evaluator).
 
-    A 3-hidden-layer net (`in -> hidden -> hidden -> hidden//2 -> 1`) with ReLU
-    activations and dropout for regularization. Still tiny by ML standards, so it
-    trains in seconds on MPS/CPU and runs per-candidate cheaply in tract at
-    serving time (a few matmuls). Dropout becomes identity in eval/export, so the
-    exported ONNX is just Gemm+ReLU — well within tract's supported op set.
+    A shared 3-hidden-layer trunk (`in -> hidden -> hidden -> hidden//2`) with ReLU
+    + dropout, then two linear heads off the same trunk representation:
+      * `policy_head`  -> scalar logit  (ranked across a decision's candidates);
+      * `value_head`   -> scalar, `tanh`-squashed to [-1, 1] (the normalized
+        realized terminal margin oriented for the acting team).
+    Still tiny — trains in seconds and runs cheaply in tract at serving time.
+    Dropout is identity in eval/export and `tanh` is a standard ONNX op, so the
+    exported graph stays within tract's supported op set.
+
+    `forward` returns `(policy [N,1], value [N,1])`. When trained on policy-only
+    data the value head is untrained, so `export_onnx(..., with_value=False)`
+    exports ONLY the policy output (the legacy single-output contract).
     """
 
     def __init__(self, in_dim=FEATURE_DIM, hidden=128, dropout=0.1):
         super().__init__()
-        self.net = nn.Sequential(
+        self.trunk = nn.Sequential(
             nn.Linear(in_dim, hidden),
             nn.ReLU(),
             nn.Dropout(dropout),
@@ -187,19 +210,43 @@ class CandidateScorer(_NN_MODULE):
             nn.Linear(hidden, hidden // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden // 2, 1),
         )
+        self.policy_head = nn.Linear(hidden // 2, 1)
+        self.value_head = nn.Linear(hidden // 2, 1)
 
     def forward(self, x):
-        # x: [N, in_dim] -> [N, 1]
-        return self.net(x)
+        # x: [N, in_dim] -> (policy [N, 1], value [N, 1])
+        z = self.trunk(x)
+        policy = self.policy_head(z)
+        value = torch.tanh(self.value_head(z))
+        return policy, value
+
+
+class PolicyOnly(_NN_MODULE):
+    """Thin wrapper exporting ONLY the policy output (the legacy single-output
+    `score` contract), used when training had no value targets so the value head
+    is untrained and must not be shipped."""
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x):
+        return self.model(x)[0]
+
+
+def _group_value(g):
+    """The group's value target as a float (0.0 when absent / policy-only)."""
+    v = g[2]
+    return 0.0 if v is None else float(v)
 
 
 def make_padded_batches(groups, batch_groups, device):
     """Yield padded batches of groups for listwise training.
 
-    Each batch is (feats [B, K, D], target [B], mask [B, K]) where K is the max
-    group size in the batch and mask marks the real (non-padding) candidates.
+    Each batch is (feats [B, K, D], target [B], mask [B, K], value [B]) where K is
+    the max group size in the batch, mask marks the real (non-padding) candidates,
+    and value is the group's (normalized) value target.
     """
     order = np.random.permutation(len(groups))
     for start in range(0, len(groups), batch_groups):
@@ -210,36 +257,48 @@ def make_padded_batches(groups, batch_groups, device):
         feats = np.zeros((b, k, FEATURE_DIM), dtype=np.float32)
         mask = np.zeros((b, k), dtype=np.float32)
         target = np.zeros((b,), dtype=np.int64)
-        for i, (X, y) in enumerate(batch):
+        value = np.zeros((b,), dtype=np.float32)
+        for i, (X, y, _v) in enumerate(batch):
             n = X.shape[0]
             feats[i, :n] = X
             mask[i, :n] = 1.0
             target[i] = y
+            value[i] = _group_value(batch[i])
         yield (
             torch.from_numpy(feats).to(device),
             torch.from_numpy(target).to(device),
             torch.from_numpy(mask).to(device),
+            torch.from_numpy(value).to(device),
         )
 
 
-def listwise_loss(model, feats, target, mask):
-    """Softmax cross-entropy over each group's candidates (the teacher's pick
-    should get the highest logit). Padding candidates are masked out with -inf so
-    they never carry probability."""
+def listwise_loss(model, feats, target, mask, value, value_weight):
+    """POLICY: softmax cross-entropy over each group's candidates (the teacher's
+    pick should get the highest logit); padding masked out with -inf. VALUE (when
+    `value_weight > 0`): masked MSE of each real candidate's `tanh` value against
+    the group's (broadcast) terminal-margin target. Total = CE + w * MSE."""
     b, k, d = feats.shape
-    logits = model(feats.reshape(b * k, d)).reshape(b, k)
+    policy, val = model(feats.reshape(b * k, d))
+    logits = policy.reshape(b, k)
     neg_inf = torch.finfo(logits.dtype).min
     logits = torch.where(mask > 0, logits, torch.full_like(logits, neg_inf))
     log_probs = torch.log_softmax(logits, dim=1)
     chosen = log_probs[torch.arange(b, device=logits.device), target]
-    return -chosen.mean()
+    ce = -chosen.mean()
+    if value_weight <= 0:
+        return ce
+    val = val.reshape(b, k)
+    vt = value.unsqueeze(1).expand(b, k)
+    sq = (val - vt) ** 2 * mask
+    mse = sq.sum() / mask.sum().clamp(min=1.0)
+    return ce + value_weight * mse
 
 
 def build_eval_tensors(groups, device):
     """Pre-pad all groups into a single (G, Kmax, D) tensor + (G, Kmax) mask +
-    (G,) targets so evaluation is one vectorized forward pass instead of G tiny
-    per-group passes (which sync the GPU G times and are pathologically slow on
-    MPS for large datasets). Returns None for an empty group list."""
+    (G,) targets + (G,) value targets so evaluation is one vectorized forward pass
+    instead of G tiny per-group passes (pathologically slow on MPS). Returns None
+    for an empty group list."""
     if not groups:
         return None
     kmax = max(g[0].shape[0] for g in groups)
@@ -247,42 +306,55 @@ def build_eval_tensors(groups, device):
     feats = np.zeros((g, kmax, FEATURE_DIM), dtype=np.float32)
     mask = np.zeros((g, kmax), dtype=np.float32)
     target = np.zeros((g,), dtype=np.int64)
-    for i, (X, y) in enumerate(groups):
+    value = np.zeros((g,), dtype=np.float32)
+    for i, grp in enumerate(groups):
+        X, y, _v = grp
         n = X.shape[0]
         feats[i, :n] = X
         mask[i, :n] = 1.0
         target[i] = y
+        value[i] = _group_value(grp)
     return (
         torch.from_numpy(feats).to(device),
         torch.from_numpy(mask).to(device),
         torch.from_numpy(target).to(device),
+        torch.from_numpy(value).to(device),
     )
 
 
 def evaluate(model, eval_tensors, device, chunk=4096):
-    """Top-1 accuracy: fraction of decisions where the model's argmax candidate
-    is the teacher's pick. This is the headline distillation metric. Vectorized
-    over the pre-padded eval tensors, processed in chunks to bound memory, with a
-    single host sync at the end."""
+    """Returns (top1, value_rmse). top1 = fraction of decisions whose argmax POLICY
+    candidate is the teacher's pick (the headline distillation metric). value_rmse =
+    RMSE of the per-candidate `tanh` value vs the group target over real candidates
+    (NaN if no value targets). Vectorized + chunked, single host sync at the end."""
     if eval_tensors is None:
-        return 0.0
-    feats, mask, target = eval_tensors
+        return 0.0, float("nan")
+    feats, mask, target, value = eval_tensors
     g, kmax, d = feats.shape
     model.eval()
     correct = 0
+    sq_sum = 0.0
+    cnt = 0.0
     neg_inf = torch.finfo(feats.dtype).min
     with torch.no_grad():
         for start in range(0, g, chunk):
             fb = feats[start : start + chunk]
             mb = mask[start : start + chunk]
             tb = target[start : start + chunk]
+            vb = value[start : start + chunk]
             b = fb.shape[0]
-            logits = model(fb.reshape(b * kmax, d)).reshape(b, kmax)
+            policy, val = model(fb.reshape(b * kmax, d))
+            logits = policy.reshape(b, kmax)
             logits = torch.where(mb > 0, logits, torch.full_like(logits, neg_inf))
             pred = torch.argmax(logits, dim=1)
             correct += int((pred == tb).sum().item())
+            val = val.reshape(b, kmax)
+            vt = vb.unsqueeze(1).expand(b, kmax)
+            sq_sum += float((((val - vt) ** 2) * mb).sum().item())
+            cnt += float(mb.sum().item())
     model.train()
-    return correct / max(1, g)
+    rmse = math.sqrt(sq_sum / cnt) if cnt > 0 else float("nan")
+    return correct / max(1, g), rmse
 
 
 def main():
@@ -308,6 +380,14 @@ def main():
     )
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--value-weight",
+        type=float,
+        default=1.0,
+        help="weight on the VALUE-head MSE loss (0 disables the value head; it is "
+        "auto-0 when the data has no `value` column). The exported model is "
+        "2-output (score, value) iff the value head was trained.",
+    )
     ap.add_argument(
         "--analyze",
         action="store_true",
@@ -349,10 +429,21 @@ def main():
     val_groups = [g for i, g in enumerate(groups) if i in val_idx]
 
     avg_cands = sum(g[0].shape[0] for g in groups) / len(groups)
+    # Train the value head iff the data carries value targets AND the weight > 0.
+    has_value = any(g[2] is not None for g in groups)
+    value_weight = args.value_weight if has_value else 0.0
     print(
         f"Loaded {len(groups)} decisions "
         f"({len(train_groups)} train / {len(val_groups)} val), "
         f"avg {avg_cands:.1f} candidates/decision."
+    )
+    print(
+        "Value head: "
+        + (
+            f"ON (weight {value_weight}) — exporting 2-output (score, value)."
+            if value_weight > 0
+            else "OFF (no `value` column or --value-weight 0) — exporting policy-only."
+        )
     )
     # A random baseline picks the right candidate ~1/avg_cands of the time.
     print(f"Random-guess top-1 baseline ≈ {1.0 / avg_cands:.1%}")
@@ -383,19 +474,20 @@ def main():
     for epoch in range(args.epochs):
         total = 0.0
         nb = 0
-        for feats, target, mask in make_padded_batches(
+        for feats, target, mask, value in make_padded_batches(
             train_groups, args.batch_groups, device
         ):
             opt.zero_grad()
-            loss = listwise_loss(model, feats, target, mask)
+            loss = listwise_loss(model, feats, target, mask, value, value_weight)
             loss.backward()
             opt.step()
             total += float(loss.item())
             nb += 1
         sched.step()
         # Evaluate every epoch so early stopping is responsive; printing is
-        # throttled to keep the log readable.
-        val_acc = evaluate(model, val_eval, device)
+        # throttled to keep the log readable. Early-stop on POLICY top-1 (the
+        # head used as the search prior).
+        val_acc, val_rmse = evaluate(model, val_eval, device)
         if val_acc > best_val + 1e-4:
             best_val = val_acc
             best_state = {
@@ -405,10 +497,11 @@ def main():
         else:
             epochs_since_improve += 1
         if epoch % 5 == 0 or epoch == args.epochs - 1:
-            tr_acc = evaluate(model, train_eval, device)
+            tr_acc, _ = evaluate(model, train_eval, device)
+            vrmse = f"  val value-RMSE {val_rmse:.3f}" if value_weight > 0 else ""
             print(
                 f"epoch {epoch:3d}  loss {total / max(1, nb):.4f}  "
-                f"train top-1 {tr_acc:.1%}  val top-1 {val_acc:.1%}  "
+                f"train top-1 {tr_acc:.1%}  val top-1 {val_acc:.1%}{vrmse}  "
                 f"(best {best_val:.1%}, lr {sched.get_last_lr()[0]:.2e})"
             )
         if epochs_since_improve >= args.patience:
@@ -422,38 +515,60 @@ def main():
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    final_val = evaluate(model, val_eval, device)
-    final_train = evaluate(model, train_eval, device)
-    print(f"Best val top-1 {final_val:.1%} (train {final_train:.1%}).")
+    final_val, final_val_rmse = evaluate(model, val_eval, device)
+    final_train, _ = evaluate(model, train_eval, device)
+    vmsg = f", val value-RMSE {final_val_rmse:.3f}" if value_weight > 0 else ""
+    print(f"Best val top-1 {final_val:.1%} (train {final_train:.1%}){vmsg}.")
 
-    # Export to ONNX (input [N, D] -> output [N, 1]) with a dynamic batch dim.
-    export_onnx(model.cpu(), args.out)
-    print(f"Exported ONNX model to {os.path.abspath(args.out)}")
+    # Export to ONNX with a dynamic batch dim. 2-output (score, value) iff the
+    # value head was trained; else policy-only (the legacy single-output contract).
+    export_onnx(model.cpu(), args.out, with_value=value_weight > 0)
+    print(
+        f"Exported {'2-output (score, value)' if value_weight > 0 else 'policy-only'} "
+        f"ONNX model to {os.path.abspath(args.out)}"
+    )
 
 
-def export_onnx(model, out_path):
-    """Export the scorer to ONNX (input `x:[N,D]` -> output `[N,1]` logits).
+def export_onnx(model, out_path, with_value=False):
+    """Export the scorer to ONNX with a dynamic batch dim (input `x:[N,D]`).
 
-    We force the legacy TorchScript-based exporter (`dynamo=False`). It produces a
-    minimal Gemm/Relu graph at opset 13 that the pure-Rust `tract-onnx` runtime
-    loads without needing the `onnxscript` package the new dynamo exporter pulls
-    in. Dropout layers are no-ops in eval mode, so they don't appear in the graph.
+    With `with_value`, exports BOTH outputs: `score [N,1]` (policy logits) and
+    `value [N,1]` (`tanh` terminal-margin estimate). Otherwise exports only
+    `score` (via the `PolicyOnly` wrapper) — the legacy single-output contract the
+    embedded model uses, so an untrained value head is never shipped.
+
+    We force the legacy TorchScript-based exporter (`dynamo=False`): a minimal
+    Gemm/Relu/Tanh graph at opset 13 that the pure-Rust `tract-onnx` runtime loads
+    without the `onnxscript` package the dynamo exporter pulls in. Dropout is a
+    no-op in eval mode, so it doesn't appear in the graph.
     """
     model.eval()
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     dummy = torch.zeros((1, FEATURE_DIM), dtype=torch.float32)
+    if with_value:
+        export_model = model
+        output_names = ["score", "value"]
+        dynamic_axes = {
+            "x": {0: "N"},
+            "score": {0: "N"},
+            "value": {0: "N"},
+        }
+    else:
+        export_model = PolicyOnly(model)
+        output_names = ["score"]
+        dynamic_axes = {"x": {0: "N"}, "score": {0: "N"}}
     export_kwargs = dict(
         input_names=["x"],
-        output_names=["score"],
-        dynamic_axes={"x": {0: "N"}, "score": {0: "N"}},
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
         opset_version=13,
     )
     try:
         # PyTorch >= 2.x: explicitly select the legacy exporter.
-        torch.onnx.export(model, dummy, out_path, dynamo=False, **export_kwargs)
+        torch.onnx.export(export_model, dummy, out_path, dynamo=False, **export_kwargs)
     except TypeError:
         # Older PyTorch without a `dynamo` kwarg: the legacy path is the default.
-        torch.onnx.export(model, dummy, out_path, **export_kwargs)
+        torch.onnx.export(export_model, dummy, out_path, **export_kwargs)
 
 
 if __name__ == "__main__":

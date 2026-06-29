@@ -72,8 +72,9 @@ fn main() {
         pairs * 2
     );
     let net = env::var("SHENGJI_EXPERT_MODEL_PATH").unwrap_or_else(|_| "<embedded>".to_string());
+    let value_w = env::var("SHENGJI_VALUE_WEIGHT").unwrap_or_else(|_| "0 (off)".to_string());
     println!(
-        "budget_ms: {}   expert net: {net}\n",
+        "budget_ms: {}   expert net: {net}   value-blend weight: {value_w}\n",
         env::var("SHENGJI_BOT_BUDGET_MS").unwrap_or_default()
     );
 

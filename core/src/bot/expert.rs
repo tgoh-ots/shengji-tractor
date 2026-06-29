@@ -65,6 +65,19 @@ use crate::game_state::play_phase::PlayPhase;
 /// heuristic.
 pub const FEATURE_DIM: usize = 36;
 
+/// Points-scale for the (optional) learned VALUE head's target. The value target
+/// is the realized terminal point-differential oriented for the acting seat's team
+/// (same sign convention as the search leaf evaluator's `realized` term), DIVIDED
+/// by this constant and clamped to `[-1, 1]` so it suits a `tanh` head. Inference
+/// scales the `tanh` output back to points by multiplying by `VALUE_NORM` before
+/// blending it into the leaf evaluator.
+///
+/// CONTRACT: this is the single source of truth for the scale, shared by the data
+/// exporter (`gen_training_data`) and the inference blend (`search::evaluate_position`).
+/// The Python trainer is scale-free — it regresses the already-normalized column —
+/// so changing this only requires regenerating data + retraining, no Python edit.
+pub const VALUE_NORM: f64 = 200.0;
+
 /// The embedded ONNX model (a small MLP scoring one candidate's features to a
 /// scalar logit). If training has not produced a model yet, this file may be a
 /// placeholder; [`model`] handles a missing/invalid model gracefully by
@@ -216,14 +229,52 @@ pub fn choose_play_expert(p: &PlayPhase, me: PlayerID) -> Option<Vec<Card>> {
 /// Run the model on a flat `[n * FEATURE_DIM]` buffer, returning `n` scalar
 /// logits, or `None` on any inference error (so the caller falls back).
 fn run_model(model: &Model, flat: &[f32], n: usize) -> Option<Vec<f32>> {
+    run_model_output(model, flat, n, 0)
+}
+
+/// Run the model on a flat `[n * FEATURE_DIM]` buffer and return output number
+/// `out_idx` flattened to `n` scalars, or `None` if the model has fewer than
+/// `out_idx + 1` outputs (e.g. a policy-only / legacy model has no value output)
+/// or on any inference error. Output 0 = policy logits (`score`); output 1 = the
+/// `tanh` value estimate (`value`), present only on a 2-output value-head model.
+fn run_model_output(model: &Model, flat: &[f32], n: usize, out_idx: usize) -> Option<Vec<f32>> {
     use tract_onnx::prelude::*;
 
     let input = tract_ndarray::Array2::from_shape_vec((n, FEATURE_DIM), flat.to_vec()).ok()?;
     let tensor: Tensor = input.into();
     let result = model.run(tvec!(tensor.into())).ok()?;
-    let view = result[0].to_array_view::<f32>().ok()?;
-    // The model outputs [N, 1]; flatten to N scores.
+    let out = result.get(out_idx)?;
+    let view = out.to_array_view::<f32>().ok()?;
+    // Each output is [N, 1]; flatten to N scalars.
     Some(view.iter().copied().collect())
+}
+
+/// Score an explicit set of candidates with the learned VALUE head, returning one
+/// `tanh` value per candidate in `[-1, 1]` (the normalized terminal-margin estimate
+/// oriented for `me`'s team), or `None` if the model is unavailable, failed to
+/// run, the input is empty, OR the model has NO value output (a policy-only /
+/// legacy model — so the search's value blend transparently stays disabled and it
+/// uses the static leaf eval). Multiply by [`VALUE_NORM`] to recover points.
+///
+/// `p` MUST be the redacted per-player view (the honesty invariant); the search
+/// calls this only on SAMPLED determinized worlds, never the real hidden hands.
+pub fn value_candidates_net(
+    p: &PlayPhase,
+    me: PlayerID,
+    candidates: &[Vec<Card>],
+) -> Option<Vec<f32>> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let model = model()?;
+    let n = candidates.len();
+    let mut flat: Vec<f32> = Vec::with_capacity(n * FEATURE_DIM);
+    for cand in candidates {
+        flat.extend_from_slice(&candidate_features(p, me, cand));
+    }
+    // Output index 1 is the value head; `None` here means a 1-output (policy-only)
+    // model, which correctly disables the value blend.
+    run_model_output(model, &flat, n, 1)
 }
 
 /// Normalize a raw card-strength rank into roughly `[0, 1]`.
@@ -621,5 +672,51 @@ mod model_path_tests {
             model_from_bytes(&[0u8; 16]).is_err(),
             "a <64-byte source is not a valid ONNX graph"
         );
+    }
+
+    /// Backward-compat (the load-bearing value-head safety property): the SHIPPED
+    /// embedded model is policy-only, so output index 1 (value) must be ABSENT.
+    /// `value_candidates_net` → `run_model_output(.., 1)` therefore returns `None`,
+    /// which transparently disables the value blend and keeps the static leaf eval.
+    #[test]
+    fn embedded_model_has_no_value_output() {
+        let model = model_from_bytes(MODEL_BYTES).expect("embedded model should load");
+        let n = 2;
+        let flat = vec![0.0f32; n * FEATURE_DIM];
+        assert!(
+            run_model_output(&model, &flat, n, 0).is_some(),
+            "embedded model must have a policy output (index 0)"
+        );
+        assert!(
+            run_model_output(&model, &flat, n, 1).is_none(),
+            "embedded (policy-only) model must have NO value output (index 1)"
+        );
+    }
+
+    /// Manual validation that a freshly-trained 2-output value model loads in tract
+    /// and exposes a readable `tanh` value output in [-1, 1]. `#[ignore]`d because
+    /// it needs an external model file; run after training one:
+    ///   SHENGJI_TEST_VALUE_MODEL=/path/to/value_model.onnx \
+    ///     cargo +1.92.0 test -p shengji-core --lib value_output_readable -- --ignored
+    #[test]
+    #[ignore]
+    fn value_output_readable_from_2output_model() {
+        let path = std::env::var("SHENGJI_TEST_VALUE_MODEL")
+            .expect("set SHENGJI_TEST_VALUE_MODEL to a 2-output ONNX");
+        let bytes = std::fs::read(&path).expect("read value model");
+        let model = model_from_bytes(&bytes).expect("2-output value model should load in tract");
+        let n = 3;
+        let flat = vec![0.0f32; n * FEATURE_DIM];
+        let policy = run_model_output(&model, &flat, n, 0).expect("policy output (index 0)");
+        let value = run_model_output(&model, &flat, n, 1).expect("value output (index 1)");
+        assert_eq!(policy.len(), n);
+        assert_eq!(value.len(), n);
+        for v in value {
+            assert!(
+                (-1.0..=1.0).contains(&v),
+                "tanh value must be in [-1,1], got {}",
+                v
+            );
+        }
     }
 }

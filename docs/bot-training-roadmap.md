@@ -18,7 +18,10 @@
 
 **Finding:** the benchmarks are **not byte-reproducible** run-to-run (Rust `HashMap` iteration order is per-process and leaks into tie-breaks), so the planned "byte-identical golden diff" verification was replaced with **distributional / CI** equivalence. A future reproducibility hardening (deterministic candidate ordering) is noted in `docs/bot-eval-baseline.md`.
 
-**Remaining:** the **1-month** plan below (learned value head, DAgger, PUCT, endgame solver, kitty distillation).
+**Started (1-month):** the **learned value head** PIPELINE is implemented & validated end-to-end, shipping
+default-OFF (`SHENGJI_VALUE_WEIGHT=0`) — what remains there is training a real value net on a large dataset and
+paired-measuring the blend weight. **Remaining:** the rest of the 1-month plan (DAgger, PUCT, endgame solver,
+kitty distillation).
 
 Toolchain note: build/test with `cargo +1.92.0 …` in this environment (deps need rustc ≥ 1.87; the default `stable` here is 1.80.1).
 
@@ -133,15 +136,23 @@ Assumes the 1-day work is done. **Sequence matters.**
 
 Assumes the substrate exists, so these are now measurable bets. Sequenced by dependency.
 
-- [ ] **Learned VALUE head → search leaf evaluator** (highest-ceiling change, ~7–14 days).
-  Add a second ONNX output (shared trunk + tanh value head in `train_expert.py`); have
-  `gen_training_data.rs` emit realized terminal point-differential per decision group (free — it already plays
-  hands to completion); read `output[1]` in `expert.rs` and blend into `evaluate_position` behind `NET_W_v<1`
-  with the static-eval fallback.
-  **Non-negotiable de-risks:** train value targets on **full playouts** (not bootstrapped off the crude leaf,
-  or it just relearns the heuristic); calibrate (predicted vs realized margin) on **Expert/Enoch-generated**
-  states, not the Easy split; call the value net at the rollout *terminal*, not per-ply, so it doesn't starve
-  the world budget. Realistic **+3–8pp** once paired-measured. **This is the change worth a month.**
+- [x] **Learned VALUE head → search leaf evaluator** — PIPELINE IMPLEMENTED & validated end-to-end (2026-06-29),
+  shipping **default-OFF** (see below). Concretely:
+  - `gen_training_data.rs` back-fills the realized terminal margin per decision (oriented for the acting team,
+    normalized by `expert::VALUE_NORM`) as a new `value` CSV column — a full-playout MC target, not bootstrapped.
+  - `train_expert.py` is now a multi-task net: shared trunk + a policy head (listwise CE) **and** a `tanh` value
+    head (MSE), exporting a **2-output ONNX** (`score`, `value`) when value targets are present (else policy-only,
+    back-compat). The trainer + `--analyze` accept both CSV layouts.
+  - `expert.rs::value_candidates_net` reads ONNX `output[1]`; `search.rs::evaluate_position` blends it
+    (`(1-w)·static + w·net_value`, oriented to my team, scaled by `VALUE_NORM`) behind `SHENGJI_VALUE_WEIGHT`
+    (default **0 = OFF** → production byte-unchanged). A policy-only / legacy model has no `output[1]` → blend
+    auto-disabled; verified by `embedded_model_has_no_value_output` (and a `tract` 2-output load test).
+  - **REMAINING (the actual payoff):** train a value head on a LARGE on-policy dataset and paired-measure the
+    weight (`SHENGJI_VALUE_WEIGHT` + `paired_eval ... search`). De-risks still to honor when measuring: calibrate
+    on **Expert/Enoch-generated** states (not the Easy split — the current data-gen `BEHAVIOUR` is Easy, so a
+    DAgger pass below should precede/accompany this), and consider shorter `rollout_tricks` once the value net
+    carries the leaf. The leaf net-call is at the rollout TERMINAL (once per candidate per world), not per-ply.
+    Realistic **+3–8pp** once measured. **This is the change worth a month.**
 - [ ] **DAgger loop** (~5–7 days, after the value head + gate). Parameterize the data-gen `BEHAVIOUR` to a mix
   including the Expert/Enoch search (down-budgeted; keep an Easy fraction for diversity), relabel with the
   teacher, retrain, iterate **1–2 rounds with a win-rate non-regression gate per round.** Attacks the Easy-only

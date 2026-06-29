@@ -112,7 +112,9 @@ stats). Add a new benchmark by configuring `Seat`s, NOT by re-copying the loop.
 Useful bot debug env vars: `SHENGJI_EXPERT_MODEL_PATH` (load a candidate ONNX at
 runtime — A/B a net with no rebuild), `SHENGJI_SEARCH_TRACE=1` (log per-decision
 worlds/budget/TIME-vs-WORLDS-bound from `search_play`), `SHENGJI_BOT_BUDGET_MS`
-(per-decision search budget).
+(per-decision search budget), `SHENGJI_VALUE_WEIGHT` (0..1, **default 0 = OFF**;
+blend the learned VALUE head into the search leaf evaluator — needs a 2-output
+value-head model, else it's a no-op; see the value-head note below).
 
 ### Code Quality
 ```bash
@@ -163,22 +165,34 @@ GEN_GAMES=5000 GEN_TEACHER_BUDGET_MS=400 \
 #     policy, invest in a value head / kitty). Runs with just numpy (no torch).
 python training/train_expert.py --data training/data.csv --analyze
 
-# 2. Train + export ONNX (MLP 36->128->128->64->1, listwise softmax CE, early
-#    stop on top-1 acc). Default --out is ../core/src/bot/expert_model.onnx.
+# 2. Train + export ONNX. Shared trunk 36->128->128->64, then a POLICY head
+#    (listwise softmax CE) and an OPTIONAL tanh VALUE head (MSE on the realized
+#    terminal margin). With value targets present (the `value` CSV column from
+#    step 1), it exports a 2-OUTPUT model (score, value); --value-weight 0 (or a
+#    legacy policy-only CSV) exports the policy-only 1-output model.
 cd training && pip install -r requirements.txt   # torch, onnx, numpy
 python train_expert.py --data data.csv --out ../core/src/bot/expert_model.onnx
 
 # 3. A/B the candidate net vs the embedded one WITHOUT rebuilding, via the runtime
 #    model-path override (expert.rs::MODEL_PATH_ENV). A bad/missing path falls back
-#    to the heuristic (it does NOT silently use the embedded net).
-SHENGJI_EXPERT_MODEL_PATH=$PWD/candidate.onnx \
+#    to the heuristic (it does NOT silently use the embedded net). For a value-head
+#    net, also set SHENGJI_VALUE_WEIGHT>0 to engage the leaf-eval blend.
+SHENGJI_EXPERT_MODEL_PATH=$PWD/candidate.onnx SHENGJI_VALUE_WEIGHT=0.5 \
   cargo run --release --example paired_eval -- 200 0x5EED search
 ```
 CONTRACT: `FEATURE_DIM` (currently 36) is defined in `core/src/bot/expert.rs`
-(`candidate_features`) AND hardcoded in `train_expert.py`; the CSV has
-`1 + FEATURE_DIM + 1` columns. The SAME `candidate_features` builds both the
-training rows and the inference vector, so the encoding can't drift — but if you
-change it, bump it in both places and retrain.
+(`candidate_features`) AND hardcoded in `train_expert.py`; the value-augmented CSV
+has `1 + FEATURE_DIM + 1 (label) + 1 (value)` columns (the trainer also accepts the
+legacy policy-only width). The SAME `candidate_features` builds both the training
+rows and the inference vector, so the encoding can't drift — but if you change it,
+bump it in both places and retrain. The VALUE head: `gen_training_data` emits the
+realized terminal margin (oriented per acting team), normalized by
+`expert::VALUE_NORM` (the single Rust-side scale, shared by data-gen + the
+`search::evaluate_position` blend; the Python trainer is scale-free); inference
+reads ONNX output[1] and blends it behind `SHENGJI_VALUE_WEIGHT` with a static-eval
+fallback (a policy-only model → no value output → blend auto-disabled). The
+embedded model is policy-only by default, so the value path ships INERT until you
+train + embed a value-head net. See `docs/bot-training-roadmap.md` (1-month plan).
 
 ## Architecture
 

@@ -144,6 +144,23 @@ fn search_trace_enabled() -> bool {
     })
 }
 
+/// The leaf-evaluator learned-VALUE blend weight (env `SHENGJI_VALUE_WEIGHT`,
+/// clamped to `[0, 1]`; default **0.0 = OFF**, so [`evaluate_position`] is exactly
+/// the static eval and production behavior is unchanged until a value-head model
+/// is trained and this knob is set). Read ONCE and cached. When `> 0` and a
+/// 2-output value model is loaded, the leaf eval becomes
+/// `(1-w)·static + w·net_value`. See `docs/bot-training-roadmap.md` (1-month plan).
+fn value_weight() -> f64 {
+    static W: OnceLock<f64> = OnceLock::new();
+    *W.get_or_init(|| {
+        std::env::var("SHENGJI_VALUE_WEIGHT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|w| w.clamp(0.0, 1.0))
+            .unwrap_or(0.0)
+    })
+}
+
 /// Run the determinized search and return the chosen cards, or `None` if no
 /// candidate could be produced (caller should fall back to the heuristic /
 /// dumb policy).
@@ -686,5 +703,59 @@ fn evaluate_position(sim: &PlayPhase, me: PlayerID) -> f64 {
         })
         .unwrap_or(0.0);
 
-    realized + control
+    let static_eval = realized + control;
+
+    // Optional learned-VALUE blend. Default OFF (`SHENGJI_VALUE_WEIGHT` unset → 0),
+    // so this is EXACTLY the static eval above and production behavior is
+    // byte-unchanged until a value-head model is trained AND the knob is set. When
+    // on (and a 2-output value model is loaded), blend the net's terminal-margin
+    // estimate — a far better leaf signal than the shallow-rollout static eval.
+    let w = value_weight();
+    if w <= 0.0 {
+        return static_eval;
+    }
+    match net_value_estimate(sim, me) {
+        Some(v) => (1.0 - w) * static_eval + w * v,
+        // Policy-only / legacy model, finished leaf, or no clean to-act seat:
+        // fall back to the static eval so the search never stalls or misbehaves.
+        None => static_eval,
+    }
+}
+
+/// The learned VALUE-head estimate of leaf position `sim`, oriented for `me`'s
+/// team and scaled back to POINTS (so it blends with the static eval's point
+/// units), or `None` when there is nothing meaningful to predict: the game is
+/// already finished (the static `realized` is then exact), there is no clean seat
+/// to act, the to-act seat has no legal candidates, or the loaded model has no
+/// value head (policy-only / legacy → the blend stays disabled).
+///
+/// The value head was trained as "normalized terminal margin oriented for the
+/// ACTING seat's team", so we score the to-act seat's candidates, take the best
+/// (the seat plays to maximize its OWN team), then orient to `me`'s team. Reads
+/// only `sim` (a sampled determinized world during search, exactly like the
+/// rollout policy), so it never touches the real hidden hands.
+fn net_value_estimate(sim: &PlayPhase, me: PlayerID) -> Option<f64> {
+    if sim.game_finished() {
+        return None;
+    }
+    let actor = sim.trick().next_player()?;
+    let leading = sim.trick().played_cards().is_empty();
+    let cands = if leading {
+        heuristics::lead_candidates(sim, actor)
+    } else {
+        heuristics::follow_candidates(sim, actor)
+    };
+    if cands.is_empty() {
+        return None;
+    }
+    let values = expert::value_candidates_net(sim, actor, &cands)?;
+    let best = values.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+    if !best.is_finite() {
+        return None;
+    }
+    // `best` is oriented for the acting seat's team; orient to `me`'s team.
+    let team = sim.landlords_team();
+    let actor_on_my_team = team.contains(&me) == team.contains(&actor);
+    let v_for_me = if actor_on_my_team { best } else { -best };
+    Some(v_for_me * expert::VALUE_NORM)
 }

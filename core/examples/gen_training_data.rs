@@ -39,7 +39,7 @@ use std::io::{BufWriter, Write};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use shengji_core::bot::expert::{candidate_features, FEATURE_DIM};
+use shengji_core::bot::expert::{candidate_features, FEATURE_DIM, VALUE_NORM};
 use shengji_core::bot::BotDifficulty;
 use shengji_core::bot::{heuristics, policy};
 use shengji_core::game_state::initialize_phase::InitializePhase;
@@ -61,6 +61,13 @@ struct Row {
     group: u64,
     features: [f32; FEATURE_DIM],
     label: u8,
+    /// The acting seat for this decision. Transient: used only to ORIENT the
+    /// terminal value target at game end; NOT written to the CSV.
+    actor: PlayerID,
+    /// The VALUE target: the realized terminal point-differential oriented for
+    /// `actor`'s team, normalized by `VALUE_NORM` and clamped to [-1, 1]. Filled
+    /// in at game completion (back-filled), since the outcome is only known then.
+    value: f32,
 }
 
 /// Counts of decisions that were SKIPPED (no row emitted) and why. A quick
@@ -133,18 +140,20 @@ fn main() {
     }
     let file = File::create(&out_path).expect("create output CSV");
     let mut w = BufWriter::new(file);
-    // Header: group, f0..f{D-1}, label.
+    // Header: group, f0..f{D-1}, label, value. The trailing `value` column is the
+    // (normalized, oriented) realized terminal margin for the learned VALUE head;
+    // the trainer treats it as optional (back-compat with policy-only CSVs).
     write!(w, "group").unwrap();
     for i in 0..FEATURE_DIM {
         write!(w, ",f{i}").unwrap();
     }
-    writeln!(w, ",label").unwrap();
+    writeln!(w, ",label,value").unwrap();
     for r in &rows {
         write!(w, "{}", r.group).unwrap();
         for x in &r.features {
             write!(w, ",{x:.6}").unwrap();
         }
-        writeln!(w, ",{}", r.label).unwrap();
+        writeln!(w, ",{},{:.6}", r.label, r.value).unwrap();
     }
     w.flush().unwrap();
 
@@ -180,6 +189,13 @@ fn play_one_hand_collecting(
         seats.push(init.add_player(format!("seat{i}")).unwrap().0);
     }
     init.set_num_decks(Some(n / 2)).ok();
+
+    // Buffer THIS game's rows so the value target (the realized terminal margin,
+    // known only at game end) can be back-filled before flushing to the global
+    // `rows`. A game that errors out before completion contributes NOTHING (its
+    // buffered rows are dropped), so every emitted value target is a real outcome.
+    let mut game_rows: Vec<Row> = Vec::new();
+    let mut game_decisions = 0usize;
 
     let mut state = GameState::Initialize(init);
     let mut iters = 0usize;
@@ -277,6 +293,22 @@ fn play_one_hand_collecting(
             }
             GameState::Play(s) => {
                 if s.game_finished() {
+                    // Back-fill the value target from the realized terminal margin
+                    // (oriented per decision's acting team) and flush this game's
+                    // rows to the global buffer.
+                    let (non_landlord_points, _) = s.calculate_points();
+                    let landlords_team: Vec<PlayerID> = s.landlords_team().to_vec();
+                    for mut r in game_rows.drain(..) {
+                        let actor_is_defender = landlords_team.contains(&r.actor);
+                        let oriented = if actor_is_defender {
+                            -(non_landlord_points as f64)
+                        } else {
+                            non_landlord_points as f64
+                        };
+                        r.value = (oriented / VALUE_NORM).clamp(-1.0, 1.0) as f32;
+                        rows.push(r);
+                    }
+                    *decisions += game_decisions;
                     return;
                 }
                 match s.trick().next_player() {
@@ -287,8 +319,15 @@ fn play_one_hand_collecting(
                     }
                     Some(actor) => {
                         // Record the decision (per-candidate rows) BEFORE applying
-                        // a move to advance the game.
-                        record_decision(s, actor, group_counter, rows, decisions, drops);
+                        // a move to advance the game (into the per-game buffer).
+                        record_decision(
+                            s,
+                            actor,
+                            group_counter,
+                            &mut game_rows,
+                            &mut game_decisions,
+                            drops,
+                        );
 
                         // Advance with the (noisy) behaviour policy from the
                         // honest redacted view.
@@ -310,9 +349,11 @@ fn play_one_hand_collecting(
     }
 }
 
-/// Emit one row per legal candidate for `actor`'s current play decision. The
-/// FEATURES come from the redacted view; the LABEL comes from the Omniscient
-/// teacher's perfect-information choice on the SAME position.
+/// Emit one row per legal candidate for `actor`'s current play decision into the
+/// PER-GAME buffer `rows`. The FEATURES come from the redacted view; the LABEL
+/// comes from the Omniscient teacher's perfect-information choice on the SAME
+/// position; the VALUE target is left as a placeholder (`0.0`) and back-filled
+/// from the realized terminal margin when the game finishes.
 fn record_decision(
     full: &PlayPhase,
     actor: PlayerID,
@@ -377,6 +418,8 @@ fn record_decision(
             group,
             features: candidate_features(view, actor, cand),
             label: if i == teacher_idx { 1 } else { 0 },
+            actor,
+            value: 0.0, // back-filled at game end from the realized terminal margin
         });
     }
 }
