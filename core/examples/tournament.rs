@@ -271,6 +271,10 @@ fn main() {
         .get(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0x70_75_72);
+    // Optional 3rd arg: run ONLY a single pairing by its index (0..6) instead of
+    // all six. Lets each pairing run in its own (time-capped) process; the
+    // `PAIR_RESULT` line printed per pairing is then aggregated externally.
+    let only_pair: Option<usize> = args.get(3).and_then(|s| s.parse().ok());
 
     // Default the search budget to 100ms for speed if the caller didn't set it.
     if env::var("SHENGJI_BOT_BUDGET_MS").is_err() {
@@ -305,8 +309,18 @@ fn main() {
 
     let overall_start = Instant::now();
 
-    for i in 0..n {
-        for j in (i + 1)..n {
+    // Enumerate the unordered pairings (i<j) so each gets a stable index 0..6.
+    let pairings: Vec<(usize, usize)> = (0..n)
+        .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
+        .collect();
+
+    for (pidx, &(i, j)) in pairings.iter().enumerate() {
+        if let Some(want) = only_pair {
+            if pidx != want {
+                continue;
+            }
+        }
+        {
             let a = TIERS[i];
             let b = TIERS[j];
             let start = Instant::now();
@@ -351,8 +365,20 @@ fn main() {
                 b_wins,
                 b_marg
             );
-            println!("  Elapsed: {:.1}s\n", start.elapsed().as_secs_f64());
+            println!("  Elapsed: {:.1}s", start.elapsed().as_secs_f64());
+            // Machine-readable line for external aggregation across processes:
+            // PAIR_RESULT pidx i j completed a_wins a_total_margin
+            println!(
+                "PAIR_RESULT {pidx} {i} {j} {} {} {}\n",
+                r.completed, r.a_wins, r.a_total_margin
+            );
         }
+    }
+
+    // When running a single pairing, stop here — the matrix is aggregated outside.
+    if only_pair.is_some() {
+        println!("(single-pairing mode: matrix printed only in full run)");
+        return;
     }
 
     // ---- WIN-RATE MATRIX ----

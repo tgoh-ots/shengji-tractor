@@ -50,7 +50,25 @@ pub struct Knowledge {
 
 impl Knowledge {
     /// Derive knowledge from a redacted [`PlayPhase`] view for player `me`.
+    ///
+    /// This is the DEFAULT (limited-memory) seeding used by Easy / Expert /
+    /// Omniscient: `seen` covers the own hand + the current trick + ONLY the last
+    /// completed trick (the engine's `last_trick`). Earlier tricks are forgotten.
     pub fn from_play_view(p: &PlayPhase, me: PlayerID) -> Self {
+        Self::from_play_view_impl(p, me, false)
+    }
+
+    /// Derive knowledge with PERFECT MEMORY of every card played so far this hand
+    /// (own hand + current trick + the FULL public play history). Used ONLY by the
+    /// Enoch tier so its boss-card / guaranteed-winner detection is EXACT.
+    ///
+    /// HONEST: the full history ([`PlayPhase::played_this_hand`]) is the public
+    /// record of cards every seat watched hit the table — never a hidden hand.
+    pub fn from_play_view_full_memory(p: &PlayPhase, me: PlayerID) -> Self {
+        Self::from_play_view_impl(p, me, true)
+    }
+
+    fn from_play_view_impl(p: &PlayPhase, me: PlayerID, full_memory: bool) -> Self {
         let trump = p.trick().trump();
         let num_decks = p.num_decks();
         let hands = p.hands();
@@ -88,9 +106,19 @@ impl Knowledge {
                 }
             }
         }
-        // ... as are the cards in the most recently completed trick (the engine
-        // keeps the last trick around).
-        if let Some(last) = p.last_trick() {
+
+        if full_memory {
+            // Enoch: seed from the FULL public play history of completed tricks —
+            // every card every seat watched go down this hand, not just the last
+            // trick. Honest (these cards are public) and EXACT.
+            for (card, ct) in p.played_this_hand() {
+                if *card != Card::Unknown {
+                    *seen.entry(*card).or_insert(0) += *ct;
+                }
+            }
+        } else if let Some(last) = p.last_trick() {
+            // Default (limited memory): only the most recently completed trick
+            // (the engine keeps the last trick around).
             for pc in last.played_cards() {
                 for card in &pc.cards {
                     if *card != Card::Unknown {

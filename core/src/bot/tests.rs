@@ -3426,3 +3426,258 @@ fn legacy_hard_difficulty_deserializes_as_expert() {
         assert_eq!(serde_json::from_str::<BotDifficulty>(&s).unwrap(), v);
     }
 }
+
+// ===========================================================================
+// Enoch PERFECT MEMORY: full-hand card recall for exact boss-card detection.
+//
+// Enoch's `Knowledge` is seeded from the FULL public play history
+// (`PlayPhase::played_this_hand`), not just the last completed trick. These
+// tests assert (1) that the full-memory `seen` set includes a card from a trick
+// EARLIER than the last completed one, and (2) that `is_guaranteed_top` becomes
+// true exactly when all higher same-suit cards have been seen across multiple
+// tricks. Everything used here is public (cards every seat watched played), so
+// no honesty boundary is crossed.
+// ===========================================================================
+#[test]
+fn test_enoch_full_memory_recalls_earlier_tricks_and_exact_boss() {
+    use crate::bot::determinize::Knowledge;
+    use crate::bot::heuristics::{is_guaranteed_top, stronger_cards_in_suit};
+    use crate::game_state::play_phase::PlayPhase;
+
+    let logger = null_logger();
+    let (mut game, bot_ids) = setup_all_bot_game(&logger);
+    let me = bot_ids[0];
+
+    // Drive the all-bot game one action at a time, snapshotting the FULL
+    // (unredacted) play state after every step. We record the set of cards
+    // present in `played_this_hand` after each completed trick, in order, so we
+    // can distinguish cards from EARLIER tricks vs the LAST completed trick.
+    //
+    // We collect snapshots of `(played_this_hand, last_trick_cards)` at the
+    // moment `played_this_hand` grows (i.e. a trick just completed).
+    let mut completed_trick_cards: Vec<Vec<Card>> = Vec::new();
+    let mut prev_history_len: usize = 0;
+
+    let snapshot_play = |game: &InteractiveGame| -> Option<PlayPhase> {
+        match game.dump_state().unwrap() {
+            GameState::Play(p) => Some(p),
+            _ => None,
+        }
+    };
+
+    let mut steps = 0;
+    loop {
+        // Record any newly-completed trick(s).
+        if let Some(p) = snapshot_play(&game) {
+            let history_total: usize = p.played_this_hand().values().sum();
+            if history_total > prev_history_len {
+                // A trick just got folded into the history; capture the last
+                // trick's actual cards (the freshly-completed one).
+                if let Some(last) = p.last_trick() {
+                    let cards: Vec<Card> = last
+                        .played_cards()
+                        .iter()
+                        .flat_map(|pc| pc.cards.iter().copied())
+                        .filter(|c| *c != Card::Unknown)
+                        .collect();
+                    completed_trick_cards.push(cards);
+                }
+                prev_history_len = history_total;
+            }
+            // Stop once we have enough completed tricks to have an "earlier" one,
+            // and we are still mid-play (hands not empty) so a live Knowledge is
+            // meaningful.
+            if completed_trick_cards.len() >= 3 && !p.game_finished() && !p.hands().is_empty() {
+                break;
+            }
+            if p.game_finished() {
+                break;
+            }
+        }
+
+        match next_bot_action(&mut game, false).unwrap() {
+            Some((id, action)) => {
+                game.interact(action, id, &logger).unwrap();
+            }
+            None => break,
+        }
+        steps += 1;
+        assert!(
+            steps < 5000,
+            "could not accumulate several completed tricks"
+        );
+    }
+
+    assert!(
+        completed_trick_cards.len() >= 3,
+        "test needs at least 3 completed tricks; got {}",
+        completed_trick_cards.len()
+    );
+
+    // Build Enoch's full-memory Knowledge from the redacted view for `me`.
+    let view = game.dump_state_for_player(me).unwrap();
+    let view_play = match view {
+        GameState::Play(p) => p,
+        other => panic!("expected redacted Play view, got {:?}", other),
+    };
+    let k_full = Knowledge::from_play_view_full_memory(&view_play, me);
+    let k_last = Knowledge::from_play_view(&view_play, me);
+    let trump = view_play.trick().trump();
+
+    // (1) The full-memory `seen` must include a card from an EARLIER trick (NOT
+    //     the last completed one). Take a card that appears in the FIRST
+    //     completed trick but is not in the LAST completed trick, and confirm
+    //     full memory accounts for it while the last-trick-only memory may not.
+    let last_idx = completed_trick_cards.len() - 1;
+    let last_trick_cards = &completed_trick_cards[last_idx];
+    let mut earlier_card: Option<Card> = None;
+    'outer: for trick in &completed_trick_cards[..last_idx] {
+        for &c in trick {
+            // Pick a card that does NOT also appear in the last trick, so its
+            // presence in `seen` is unambiguously due to full memory.
+            if !last_trick_cards.contains(&c) {
+                earlier_card = Some(c);
+                break 'outer;
+            }
+        }
+    }
+    let earlier_card =
+        earlier_card.expect("expected a card from an earlier trick absent from the last trick");
+
+    assert!(
+        k_full.seen.get(&earlier_card).copied().unwrap_or(0) >= 1,
+        "Enoch full memory must recall earlier-trick card {:?} in `seen`",
+        earlier_card
+    );
+    // And the limited last-trick memory genuinely forgot it (proving the two
+    // constructors differ and that full memory is strictly more informed). This
+    // can only be relied upon if `me` does not hold the card and it is not on the
+    // current table; guard against those cases so the assertion is meaningful.
+    let on_table_now: usize = view_play
+        .trick()
+        .played_cards()
+        .iter()
+        .flat_map(|pc| pc.cards.iter())
+        .filter(|c| **c == earlier_card)
+        .count();
+    let in_my_hand = view_play
+        .hands()
+        .get(me)
+        .ok()
+        .and_then(|h| h.get(&earlier_card).copied())
+        .unwrap_or(0);
+    let in_last_trick = last_trick_cards
+        .iter()
+        .filter(|c| **c == earlier_card)
+        .count();
+    if on_table_now == 0 && in_my_hand == 0 && in_last_trick == 0 {
+        assert!(
+            k_last.seen.get(&earlier_card).copied().unwrap_or(0)
+                < k_full.seen.get(&earlier_card).copied().unwrap_or(0),
+            "limited memory should know strictly fewer copies of {:?} than full memory",
+            earlier_card
+        );
+    }
+
+    // (2) `is_guaranteed_top` is EXACT under full memory: a card is the boss of
+    //     its effective suit iff every stronger same-suit card has been seen.
+    //     Verify the invariant directly against the full-memory `seen` for a
+    //     range of representative cards. (`is_guaranteed_top` is the predicate the
+    //     Enoch boss logic relies on; here we cross-check it against the raw
+    //     `seen` multiset that full memory produced.)
+    let decks = k_full.num_decks.max(1);
+    let sample = [
+        Card::Suited {
+            number: shengji_mechanics::types::Number::Ace,
+            suit: shengji_mechanics::types::Suit::Spades,
+        },
+        Card::Suited {
+            number: shengji_mechanics::types::Number::King,
+            suit: shengji_mechanics::types::Suit::Hearts,
+        },
+        Card::Suited {
+            number: shengji_mechanics::types::Number::Ten,
+            suit: shengji_mechanics::types::Suit::Clubs,
+        },
+        Card::Suited {
+            number: shengji_mechanics::types::Number::Queen,
+            suit: shengji_mechanics::types::Suit::Diamonds,
+        },
+    ];
+    for card in sample {
+        let eff = trump.effective_suit(card);
+        let s = crate::bot::heuristics::card_strength(trump, card);
+        // Manual ground-truth: are all stronger same-suit copies accounted for?
+        let all_higher_seen = stronger_cards_in_suit(trump, eff, s)
+            .iter()
+            .all(|higher| k_full.seen.get(higher).copied().unwrap_or(0) >= decks);
+        assert_eq!(
+            is_guaranteed_top(&k_full, trump, card),
+            all_higher_seen || s >= 1000,
+            "is_guaranteed_top({:?}) must match the full-memory seen set exactly",
+            card
+        );
+    }
+}
+
+// A purely synthetic, deterministic check that full memory makes
+// `is_guaranteed_top` flip true once the higher cards have been seen ACROSS
+// SEPARATE tricks (not just the last). Builds a `Knowledge` by hand to avoid
+// gameplay nondeterminism, exercising the exact boss invariant.
+#[test]
+fn test_full_memory_guaranteed_top_after_higher_cards_played_across_tricks() {
+    use crate::bot::determinize::Knowledge;
+    use crate::bot::heuristics::{is_guaranteed_top, stronger_cards_in_suit};
+    use shengji_mechanics::types::{EffectiveSuit, Number, Suit, Trump};
+
+    let trump = Trump::NoTrump {
+        number: Some(Number::Two),
+    };
+    let decks = 1usize;
+
+    // Target: Queen of Hearts. Under the `card_strength` ordering that
+    // `is_guaranteed_top` uses (side-suit Ace is LOW), the only stronger same-suit
+    // (Hearts, non-trump) cards are the King and the Ace... but the Ace ranks LOW
+    // (1), so the single stronger card is the King of Hearts. (Two is the trump
+    // number, so it is Trump, not Hearts.)
+    let queen_h = Card::Suited {
+        number: Number::Queen,
+        suit: Suit::Hearts,
+    };
+    let king_h = Card::Suited {
+        number: Number::King,
+        suit: Suit::Hearts,
+    };
+
+    let eff = trump.effective_suit(queen_h);
+    assert_eq!(eff, EffectiveSuit::Hearts);
+    let s = crate::bot::heuristics::card_strength(trump, queen_h);
+    let higher = stronger_cards_in_suit(trump, eff, s);
+    assert_eq!(
+        higher,
+        vec![king_h],
+        "the King of Hearts must be the only Hearts card stronger than the Queen"
+    );
+
+    // Before the King is seen, the Queen is NOT guaranteed top.
+    let mut seen: std::collections::HashMap<Card, usize> = std::collections::HashMap::new();
+    let mk = |seen: std::collections::HashMap<Card, usize>| Knowledge {
+        seen,
+        voids: std::collections::HashMap::new(),
+        hidden_counts: std::collections::HashMap::new(),
+        trump,
+        num_decks: decks,
+    };
+    assert!(
+        !is_guaranteed_top(&mk(seen.clone()), trump, queen_h),
+        "Queen of Hearts must not be boss while the King is unseen"
+    );
+
+    // Simulate the King having been played in an EARLIER trick (full memory keeps
+    // it). Now the Queen is the uncatchable top of Hearts.
+    seen.insert(king_h, 1);
+    assert!(
+        is_guaranteed_top(&mk(seen), trump, queen_h),
+        "Queen of Hearts must be boss once the King has been seen"
+    );
+}

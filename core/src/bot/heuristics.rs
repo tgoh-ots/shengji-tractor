@@ -310,7 +310,14 @@ impl EvalCtx {
 
     fn build_inner(p: &PlayPhase, me: PlayerID, enoch: bool) -> Self {
         let trump = p.trick().trump();
-        let k = Knowledge::from_play_view(p, me);
+        // Enoch gets PERFECT MEMORY of every card played this hand (exact
+        // boss-card detection); Expert/Omniscient keep the limited last-trick
+        // memory. Both seed only from honest, public information.
+        let k = if enoch {
+            Knowledge::from_play_view_full_memory(p, me)
+        } else {
+            Knowledge::from_play_view(p, me)
+        };
         let num_decks = k.num_decks.max(1);
         let me_is_attacker = !p.landlords_team().contains(&me);
         let (non_landlord_points, _) = p.calculate_points();

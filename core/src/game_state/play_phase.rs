@@ -55,6 +55,14 @@ pub struct PlayPhase {
     trump: Trump,
     trick: Trick,
     last_trick: Option<Trick>,
+    /// Every card that has been played in a COMPLETED trick this hand, as a
+    /// multiset (card -> count). This is HONEST/public: every seat watched these
+    /// cards hit the table. Used by the Enoch bot's full-memory boss-card
+    /// detection so it never "forgets" cards from tricks earlier than the last.
+    /// `#[serde(default)]` so older serialized states (which lack this field)
+    /// still deserialize without breaking wasm state-sync.
+    #[serde(default)]
+    played_this_hand: HashMap<Card, usize>,
     game_ended_early: bool,
     #[serde(default)]
     removed_cards: Vec<Card>,
@@ -107,6 +115,7 @@ impl PlayPhase {
             decks,
             game_ended_early: false,
             last_trick: None,
+            played_this_hand: HashMap::new(),
             player_requested_reset: None,
         })
     }
@@ -144,6 +153,16 @@ impl PlayPhase {
     /// from the redacted view.
     pub fn last_trick(&self) -> Option<&Trick> {
         self.last_trick.as_ref()
+    }
+
+    /// The full public history of cards played in COMPLETED tricks this hand, as
+    /// a multiset (card -> count). HONEST: every seat saw these cards played, so
+    /// this leaks nothing and is included unchanged in the redacted per-player
+    /// view. Cards still on the table in the *current* trick are NOT here yet
+    /// (read [`PlayPhase::trick`] for those). Used by the Enoch bot for exact
+    /// boss-card / guaranteed-winner detection across the whole hand.
+    pub fn played_this_hand(&self) -> &HashMap<Card, usize> {
+        &self.played_this_hand
     }
 
     /// The number of decks in play.
@@ -427,7 +446,17 @@ impl PlayPhase {
             }),
             self.propagated.bomb_policy,
         );
-        self.last_trick = Some(std::mem::replace(&mut self.trick, new_trick));
+        let completed = std::mem::replace(&mut self.trick, new_trick);
+        // Accumulate every card from the just-completed trick into the honest,
+        // public full-hand play history. Tally even `Card::Unknown` plays (when
+        // `hide_played_cards` is on) consistently; the Enoch full-memory
+        // Knowledge ignores `Card::Unknown` entries, so this never leaks.
+        for pc in completed.played_cards() {
+            for card in &pc.cards {
+                *self.played_this_hand.entry(*card).or_insert(0) += 1;
+            }
+        }
+        self.last_trick = Some(completed);
 
         Ok(msgs)
     }
