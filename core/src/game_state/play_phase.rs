@@ -13,6 +13,7 @@ use shengji_mechanics::trick::{
 };
 use shengji_mechanics::types::{Card, PlayerID, Rank, Trump};
 
+use crate::bot::BotDifficulty;
 use crate::message::MessageVariant;
 use crate::settings::{
     AdvancementPolicy, BackToTwoSetting, GameMode, KittyPenalty, MultipleJoinPolicy,
@@ -713,6 +714,14 @@ impl PlayPhase {
             self.propagated.jack_variation,
         ));
 
+        // Flavor: every Enoch bot on the LOSING side of the just-finished hand
+        // posts its catchphrase in chat.
+        msgs.extend(Self::enoch_loser_chat(
+            &propagated,
+            &self.landlords_team[..],
+            landlord_won,
+        ));
+
         let mut idx = (landlord_idx + 1) % propagated.players.len();
         let (next_landlord, next_landlord_idx) = loop {
             if landlord_won == self.landlords_team.contains(&propagated.players[idx].id) {
@@ -733,6 +742,34 @@ impl PlayPhase {
             landlord_won,
             msgs,
         ))
+    }
+
+    /// Flavor catchphrase: for each Enoch bot on the LOSING side of a finished
+    /// hand, emit a `BotChat` line attributed to that bot.
+    ///
+    /// "Losing" mirrors [`PlayerGameFinishedResult::won_game`] (which is set to
+    /// `landlord_won == is_defending`): a player lost iff
+    /// `landlord_won != is_defending`, i.e. they are on the team that did NOT
+    /// win / level up. Only Enoch bots speak; humans and
+    /// Easy/Expert/Omniscient bots stay silent. Each losing Enoch bot says it
+    /// exactly once.
+    fn enoch_loser_chat(
+        propagated: &PropagatedState,
+        landlords_team: &[PlayerID],
+        landlord_won: bool,
+    ) -> Vec<MessageVariant> {
+        let mut msgs = vec![];
+        for player in &propagated.players {
+            let is_defending = landlords_team.contains(&player.id);
+            let lost_hand = landlord_won != is_defending;
+            if lost_hand && matches!(propagated.is_bot(player.id), Some(BotDifficulty::Enoch)) {
+                msgs.push(MessageVariant::BotChat {
+                    from: player.name.clone(),
+                    text: "fah i need a shot".to_string(),
+                });
+            }
+        }
+        msgs
     }
 
     pub fn request_reset(
@@ -798,5 +835,107 @@ impl PlayPhase {
                 *card = Card::Unknown;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod enoch_chat_tests {
+    use shengji_mechanics::types::PlayerID;
+
+    use crate::bot::BotDifficulty;
+    use crate::message::MessageVariant;
+    use crate::settings::PropagatedState;
+
+    use super::PlayPhase;
+
+    /// Builds a propagated state with one player per `(name, bot)` entry, where
+    /// `bot` is the optional difficulty to register that seat as. Returns the
+    /// state plus the assigned `PlayerID`s in order.
+    fn make_state(seats: &[(&str, Option<BotDifficulty>)]) -> (PropagatedState, Vec<PlayerID>) {
+        let mut propagated = PropagatedState::default();
+        let mut ids = vec![];
+        for (name, bot) in seats {
+            let (id, _) = propagated.add_player((*name).to_string()).unwrap();
+            if let Some(difficulty) = bot {
+                propagated.register_bot(id, *difficulty);
+            }
+            ids.push(id);
+        }
+        (propagated, ids)
+    }
+
+    fn bot_chat_lines(msgs: &[MessageVariant]) -> Vec<(String, String)> {
+        msgs.iter()
+            .filter_map(|m| match m {
+                MessageVariant::BotChat { from, text } => Some((from.clone(), text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn losing_enoch_bot_says_catchphrase() {
+        // Seats: 0 = landlord (human, defending), 1 = Enoch bot (attacking).
+        let (propagated, ids) =
+            make_state(&[("landlord", None), ("enoch", Some(BotDifficulty::Enoch))]);
+        let landlords_team = vec![ids[0]];
+
+        // Landlord (defending) won -> the attacking Enoch bot lost the hand.
+        let msgs = PlayPhase::enoch_loser_chat(&propagated, &landlords_team, true);
+
+        assert_eq!(
+            bot_chat_lines(&msgs),
+            vec![("enoch".to_string(), "fah i need a shot".to_string())],
+        );
+    }
+
+    #[test]
+    fn winning_enoch_bot_stays_silent() {
+        // Seats: 0 = Enoch landlord (defending), 1 = human (attacking).
+        let (propagated, ids) =
+            make_state(&[("enoch", Some(BotDifficulty::Enoch)), ("human", None)]);
+        let landlords_team = vec![ids[0]];
+
+        // Defending team won -> the Enoch bot is on the WINNING side, so silent.
+        let msgs = PlayPhase::enoch_loser_chat(&propagated, &landlords_team, true);
+
+        assert!(bot_chat_lines(&msgs).is_empty());
+    }
+
+    #[test]
+    fn losing_non_enoch_bot_stays_silent() {
+        // A LOSING Easy/Expert/Omniscient bot (and a losing human) must NOT speak.
+        let (propagated, ids) = make_state(&[
+            ("landlord", None),
+            ("easy", Some(BotDifficulty::Easy)),
+            ("expert", Some(BotDifficulty::Expert)),
+            ("omni", Some(BotDifficulty::Omniscient)),
+        ]);
+        let landlords_team = vec![ids[0]];
+
+        // Defending team won -> seats 1..=3 (all non-Enoch) lost, but none speak.
+        let msgs = PlayPhase::enoch_loser_chat(&propagated, &landlords_team, true);
+
+        assert!(bot_chat_lines(&msgs).is_empty());
+    }
+
+    #[test]
+    fn multiple_losing_enoch_bots_each_say_it_once() {
+        let (propagated, ids) = make_state(&[
+            ("landlord", None),
+            ("enoch_a", Some(BotDifficulty::Enoch)),
+            ("enoch_b", Some(BotDifficulty::Enoch)),
+        ]);
+        let landlords_team = vec![ids[0]];
+
+        let msgs = PlayPhase::enoch_loser_chat(&propagated, &landlords_team, true);
+
+        assert_eq!(
+            bot_chat_lines(&msgs),
+            vec![
+                ("enoch_a".to_string(), "fah i need a shot".to_string()),
+                ("enoch_b".to_string(), "fah i need a shot".to_string()),
+            ],
+        );
     }
 }

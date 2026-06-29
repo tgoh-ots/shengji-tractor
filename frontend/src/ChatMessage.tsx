@@ -45,6 +45,13 @@ const renderMessage = (message: Message): JSX.Element => {
       );
     case "GameScoringParametersChanged":
       return renderScoringMessage(message);
+    case "BotChat":
+      // Render as if the bot typed it: "<bot name>: <text>".
+      return (
+        <span>
+          {variant.from}: {variant.text}
+        </span>
+      );
     default:
       return <span>{message.message}</span>;
   }
@@ -148,7 +155,11 @@ const ChatMessage = (props: IProps): JSX.Element => {
       <p
         className={classNames("message", { "game-message": message.from_game })}
       >
-        {"from" in message && <span>{message.from}: </span>}
+        {/* BotChat already renders "<bot name>: <text>" itself, so don't
+            prepend the broadcast "GAME: " prefix in that case. */}
+        {"from" in message && message.data?.variant.type !== "BotChat" && (
+          <span>{message.from}: </span>
+        )}
         {renderMessage(message)}
       </p>
     </>

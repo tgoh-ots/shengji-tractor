@@ -198,6 +198,13 @@ pub enum MessageVariant {
     GameFinished {
         result: HashMap<String, PlayerGameFinishedResult>,
     },
+    /// A flavor chat line spoken by a bot (e.g. an Enoch bot's catchphrase when
+    /// it loses a hand). Renders in chat as `<from>: <text>`, as if the bot
+    /// typed it.
+    BotChat {
+        from: String,
+        text: String,
+    },
     BonusLevelEarned,
     EndOfGameSummary {
         landlord_won: bool,
@@ -405,6 +412,7 @@ impl MessageVariant {
             PickedUpCards => format!("{} picked up the bottom cards", n?),
             PutDownCards => format!("{} put down the bottom cards", n?),
             GameFinished { result: _ } => "The game has finished".to_string(),
+            BotChat { ref from, ref text } => format!("{from}: {text}"),
             GameEndedEarly => format!("{} ended the game early", n?),
             BonusLevelEarned => "Landlord team earned a bonus level for defending with a smaller team".to_string(),
             EndOfGameSummary { landlord_won : true, non_landlords_points } =>

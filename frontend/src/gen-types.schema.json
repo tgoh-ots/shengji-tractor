@@ -824,7 +824,7 @@
           "enum": ["Easy"]
         },
         {
-          "description": "Learned-net tier: a small MLP distilled from the Omniscient teacher, scoring legal candidates from HONEST features only, used as the prior of a time-boxed determinized search. Falls back to the shared hand-written heuristic prior if the model can't run. See [`crate::bot::expert`].",
+          "description": "Learned-net tier: a small MLP distilled from the Omniscient teacher, scoring legal candidates from HONEST features only, used as the prior of a time-boxed determinized search. Falls back to the shared hand-written heuristic prior if the model can't run. See [`crate::bot::expert`].\n\n`serde(alias = \"Hard\")`: the former `Hard` tier was removed; any persisted state, saved setting, or in-flight client message that still names \"Hard\" (e.g. a room created before the tier was dropped) deserializes as `Expert` (its closest surviving equivalent — search over the heuristic) instead of failing with \"unknown variant `Hard`\".",
           "type": "string",
           "enum": ["Expert"]
         },
@@ -2756,6 +2756,23 @@
           }
         },
         {
+          "description": "A flavor chat line spoken by a bot (e.g. an Enoch bot's catchphrase when it loses a hand). Renders in chat as `<from>: <text>`, as if the bot typed it.",
+          "type": "object",
+          "required": ["from", "text", "type"],
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": ["BotChat"]
+            }
+          }
+        },
+        {
           "type": "object",
           "required": ["type"],
           "properties": {
@@ -2966,6 +2983,16 @@
           "minimum": 0.0
         },
         "penalties": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          }
+        },
+        "played_this_hand": {
+          "description": "Every card that has been played in a COMPLETED trick this hand, as a multiset (card -> count). This is HONEST/public: every seat watched these cards hit the table. Used by the Enoch bot's full-memory boss-card detection so it never \"forgets\" cards from tricks earlier than the last. `#[serde(default)]` so older serialized states (which lack this field) still deserialize without breaking wasm state-sync.",
+          "default": {},
           "type": "object",
           "additionalProperties": {
             "type": "integer",
