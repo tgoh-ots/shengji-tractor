@@ -1,99 +1,214 @@
 # Shengji Online — Project Progress & Recovery Log
 
 > Durable status doc so work can resume after a crashed/restarted session.
-> **Last updated: 2026-06-24.** Update this at every milestone boundary.
+> **Last updated: 2026-06-28.** Update this at every milestone boundary.
 >
-> **Latest — PROJECT COMPLETE & LIVE** at https://shengji-tractor.fly.dev. All milestones done.
-> - **AI tiers = Easy / Hard / Expert / Omniscient** (Medium removed). **Expert** is now a **net-guided determinized search** (AlphaZero-lite): the distilled net (PyTorch→ONNX via `tract`, 36 honest features only; **teacher = our own Omniscient**'s choices) is used as the ROOT POLICY PRIOR (`0.6·net + 0.4·heuristic` candidate pruning) on top of Hard's search, with fast heuristic rollouts + the static leaf value. (Net-guided *rollouts* measured to HURT — a net call per ply starves the time-boxed search — so the net is the prior only; wired via a `Policy` enum on `SearchConfig`.) Strength: **Expert > Hard** by a small, consistent margin (56% over a 120-game run; the earlier ≈-Hard "wobble" was small-sample/debug noise), and clearly beats Easy (68–81%) + degenerates (86–92%). Ladder **fully monotonic: `Easy < Hard < Expert < Omniscient`**.
-> - **M6 verified IN PRODUCTION:** no hidden-card leakage even with Expert+Omniscient seated; CSP/HSTS/X-Frame + WS Origin-guard (403 bad / 101 native) confirmed live.
-> - **Two UX rounds shipped:** game-settings redesign, footer/changelog removed, dark-only, decluttered toolbar (About+Language only), plain Omniscient label, readable rules page, fixed hand-gap + points-bar, mobile brand fix.
-> - **ShengJi+ benchmark:** head-to-head vs the trained RL net is **permanently infeasible — its weights are gone** (jiaruishan.com NXDOMAIN, no Wayback, never committed). Compared instead vs their reproducible rule-based `StrategicAgent`: variant is a strong match; **our bots are in the same league as their strategic baseline** (Expert ~85% vs degenerate ≈ their strategic ~80% vs random); honest prior = we're behind their unrunnable best DMC net (97.7% lvl-rate). Scratch-only (`/tmp`), repo untouched.
-> - CI green; dependabot merged; de-branded (engine attribution kept in LICENSE/NOTICE/README/About).
+> **Status: LIVE & actively iterated** at https://shengji-tractor.fly.dev.
+> The original milestones (M0–M6) are all done; work since then has been a
+> **bot-ladder overhaul** and a round of **UI/game-flow polish** (both shipped).
+
+## Current state (2026-06-28)
+
+### Bot ladder overhaul (latest major work — shipped)
+The bot tiers were redesigned from `Easy/Hard/Expert/Omniscient` into a cleaner
+**four-tier ladder `Easy < Expert <= Enoch < Omniscient`**. (See `CLAUDE.md` →
+"Bot Architecture" for the full description; this is the status summary.)
+- **`Hard` was REMOVED.** A `#[serde(alias = "Hard")]` on `Expert` keeps old
+  persisted/in-flight state deserializing (as Expert) so live rooms created
+  before the change don't break — guarded by the
+  `legacy_hard_difficulty_deserializes_as_expert` regression test (do not delete).
+- **Deeper search**: Expert/Enoch now run a time-boxed determinized (ISMCTS)
+  search with **144 worlds / 12 rollout-tricks** and a **~2200ms** budget ceiling
+  (`SHENGJI_BOT_BUDGET_MS` override); most decisions finish in tens of ms.
+- **Re-distilled Expert net**: a small MLP (`core/src/bot/expert_model.onnx`,
+  36→128→128→64→1) distilled from the Omniscient teacher via
+  `core/examples/gen_training_data.rs` + `training/train_expert.py`, used as the
+  ROOT POLICY PRIOR of the search (heuristic rollouts, static leaf value —
+  AlphaZero-lite). Falls back to the hand-written heuristic prior if the net
+  can't run. (`expert_model_old.onnx` is the previous net, kept for A/B.)
+- **Enoch — new strongest HONEST tier**: the same search over the
+  boss-/partner-aware heuristic PLUS a full-game **playbook** transcribed from a
+  strong player (`docs/strategy/double-holder.txt`, `trip-holder.txt`):
+  pair-prioritized trump declaring, point-scaled kitty discipline, **no
+  high-trump opens**, tractor-first / long-suit leading, partner point-dumping, a
+  defender low-trump hand-off, endgame kitty protection, and perfect play-memory.
+- **Harder Easy**: still the weakest/beatable tier, but its blunder rate and
+  softmax temperature were nudged down (ε 0.28→0.06, temp 3.5→1.1) so it follows
+  the heuristic's top suggestions more often — without ever gaining search.
+- **Stronger shared evaluation**: `heuristics.rs` `score_lead`/`score_follow` +
+  `EvalCtx` gained boss-card detection (from public play history), point/partner/
+  trump awareness. Used by all real tiers; the legacy scorer is kept for A/B.
+- **HONESTY INVARIANT preserved**: only `Omniscient` sees hidden hands; the cheat
+  is the single `sees_perfect_information()`-gated `observed_state()` branch.
+  Enforced by `backend/tests/e2e_game.rs::e2e_game_no_hidden_card_leakage`.
+- **Non-blocking bot driver**: the (expensive) search runs OFF the game lock via
+  a plan/apply split (`bot/mod.rs` `classify_next_bot_work` /
+  `plan_next_bot_action` / `apply_planned_bot_action`) driven by
+  `shengji_handler.rs::drive_bots_non_blocking` (snapshot → `spawn_blocking`
+  compute → brief apply-under-lock), so chat/UI don't lag while bots think.
+- **Benchmark harnesses** in `core/examples/`: `tournament`, `expert_ab`,
+  `enoch_benchmark`, `easy_ab_benchmark`, `heuristic_benchmark`, `eval`,
+  `budget_benchmark` (run `--release`; budget via `SHENGJI_BOT_BUDGET_MS`).
+
+### UI / game-flow polish (shipped)
+- **Compass (N/S/E/W) trick layout** (`frontend/src/Table.tsx` / `Trick.tsx` /
+  `style.css`): rotates the local player to the south seat; each player's played
+  cards render at their own compass point reaching toward an empty center hub.
+- **"Done bidding" flow** (`draw_phase.rs` / `bot/mod.rs`): after a bot bids, the
+  landlord is finalized only once ALL HUMANS confirm done; the standing winner is
+  treated as implicitly done so a human winner isn't frozen. Replaced the timed
+  counter-bid grace.
+- **Team colors** in-game and in the lobby (declarer/teammate/opponent/unknown);
+  the "unknown" role only appears in Finding Friends until revealed.
+- **Kitty-points game-log line** (`message.rs` `KittyScored`): logs the kitty's
+  value × multiplier and which team won/kept it.
+- **Bilingual, English-only-clean**: single en/zh toggle; English mode renders no
+  Chinese anywhere (incl. game-mode names).
+- **Rules page** (`frontend/static/rules.html` + `rules.js`): CSP-safe standalone
+  page, language-aware (no Chinese in English mode), a "Finding Friends only"
+  callout, centered real-SVG card examples, colored jokers.
+- Plus: client auto-reconnect (silent re-join on dropped WebSocket), bot pacing
+  pauses so humans can follow, never-empty played-cards broadcast, decluttered
+  in-game team labels, lobby bot renaming, off-lock bot compute so chat doesn't
+  lag, suppressed benign action-ordering toasts.
 
 ## What we're building
-A web app to play Shengji (升级 / Tractor) with friends and/or AI bots (Easy/Medium/Hard,
-plus a future **Expert** tier). Bots only ever see public info (no cheating). Modern redesigned
-UI. Free hosting. Basic security hardening. No secrets in the repo.
-
-Forked from **rbtying/shengji** (MIT). Repo: `/Users/tgoh/playground/shengji`.
+A web app to play Shengji (升级 / Tractor / Finding Friends) with friends and/or
+AI bots. The honest bots only ever see public info (their own redacted view);
+only the opt-in `Omniscient` cheater sees hidden hands. Modern redesigned
+responsive bilingual UI. Cheap always-on hosting. Basic security hardening. No
+secrets in the repo. Forked from **rbtying/shengji** (MIT). Repo:
+`/Users/tgoh/playground/shengji`.
 
 ## Locked decisions
-- **Architecture:** FORK the Rust backend (battle-tested rules engine) — do NOT rewrite the rules.
-- **AI:** in-process Rust bot, cheat-proof (reads only the per-player redacted view). Easy/Med/Hard
-  = one engine with knobs; **Expert** = a learned net later.
-- **Frontend:** restyle the existing React 19 app in place (Tailwind v4 + shadcn-style), add
-  mobile + bilingual 中文/English. PRESERVE the WS protocol + WASM pipeline.
-- **Hosting:** backend → **Fly.io** (~$2/mo always-on shared-cpu-1x/256MB, or `auto_stop`/pay-per-use; user opted into a small paid host since Koyeb's free tier was discontinued Feb 2026 after the Mistral acquisition). Frontend → Vercel. Render (free, cold-starts) and Oracle Cloud Always Free (free, always-on, VM setup) documented as alternatives in DEPLOY.md. Deploy uses a self-contained `Dockerfile.deploy` (host-agnostic).
-- **Scope:** standard 4-player fixed-partnership Tractor (engine supports more; UI scoped to 4p).
-- **Rules:** repo defaults, exposed as per-room settings.
-- **AI data/strength:** NO public human Shengji corpus exists. Use **self-play** for strength, and
-  **ShengJi+** (`github.com/themoon2000/shengji_plus`, Berkeley EECS-2023-127; weights checkpoint
-  `1180000.zip`) as an offline **benchmark** and **teacher**. ShengJi+ has no license → use as
-  teacher/benchmark and ship our OWN net (clean + free-host-friendly). Personal/non-commercial use.
+- **Architecture:** FORK the Rust rules engine (`mechanics/`) — do NOT rewrite the
+  rules. Bots live in `core/src/bot/`.
+- **AI:** in-process Rust bots, cheat-proof by construction (the honest tiers read
+  only the per-player redacted view; the cheat is centralized in one gated
+  branch). Tiers: `Easy / Expert / Enoch / Omniscient`. Expert's net is OUR OWN
+  (distilled from our Omniscient teacher) and ships embedded as ONNX, run in pure
+  Rust via `tract-onnx` (no C/onnxruntime dependency → builds in the musl deploy
+  image).
+- **Frontend:** restyle the React 19 app in place (Tailwind-based dark UI), mobile
+  + bilingual 中文/English. PRESERVE the WS protocol + WASM pipeline.
+- **Hosting:** backend → **Fly.io** single service (serves embedded frontend + WS;
+  ~$2/mo, cheaper with auto-stop). Frontend on Vercel is OPTIONAL. Render / Oracle
+  Cloud documented as alternatives in `DEPLOY.md`. Deploy uses a self-contained
+  `Dockerfile.deploy`.
+- **Scope:** standard 4-player fixed-partnership Tractor + Finding Friends.
+- **AI data/strength:** NO public human Shengji corpus exists. Use **self-play**
+  for strength and **ShengJi+** as an offline benchmark/teacher prior. We ship our
+  own clean net.
 
 ## Architecture map
-- `mechanics/` — pure stateless rules engine (bidding, tricks, tractors, scoring). DON'T change rules.
-- `core/` — stateful engine: `game_state/{initialize,draw,exchange,play}_phase.rs`, `interactive.rs`
-  (the `Action` enum + `InteractiveGame::interact`), `settings.rs` (`PropagatedState`).
-  - `core/src/bot/` — **NEW (M1):** `BotDifficulty`, bot registry, `policy.rs` (move selection from
-    the redacted view), `advance_bots` driver. **M2 expands this** (heuristics, determinizer,
-    ISMCTS, self-play eval harness).
-  - **Cheat boundary:** `GameState::for_player(id)` redacts other hands; bots get only this view.
-- `backend/` — Axum WS server (`GET /api`), `shengji_handler.rs` (per-connection loop; calls
-  `advance_bots` after each human action), `main.rs` (routing, CORS, static serving via
-  `include_dir` of `frontend/dist`), binds `0.0.0.0:3030`.
-- `frontend/` — React 19 + TS + Webpack 5 + `shengji-wasm` (WASM). `gen-types.d.ts` is auto-generated
-  from the Rust types via `yarn types`.
+- `mechanics/` — pure stateless rules engine (bidding, tricks, tractors, scoring).
+- `core/` — stateful engine: `game_state/{initialize,draw,exchange,play}_phase.rs`,
+  `interactive.rs` (`Action` enum + `InteractiveGame::interact`), `message.rs`
+  (broadcast / game-log), `settings.rs` (`PropagatedState`).
+  - `core/src/bot/` — the AI: `mod.rs` (`BotDifficulty`, registry, `advance_bots`,
+    the plan/apply non-blocking split, the single `observed_state` honesty gate),
+    `policy.rs` (per-tier knobs + dispatch, search budget), `heuristics.rs` (the
+    shared `score_lead`/`score_follow`/`EvalCtx` + the `*_enoch` playbook),
+    `search.rs` (determinized search + `Policy` enum), `expert.rs` (ONNX net +
+    feature encoding), `determinize.rs` (world sampling), `tests.rs`.
+  - **Cheat boundary:** `GameState::for_player(id)` redacts other hands; honest
+    bots get only this view via `observed_state`.
+- `backend/` — Axum WS server (`GET /api`); `shengji_handler.rs` (per-connection
+  loop + `drive_bots_non_blocking`); `lib.rs` (`build_app` for tests);
+  `main.rs` (routing, CORS, static serving via `include_dir` of `frontend/dist`);
+  binds `0.0.0.0:3030`.
+- `frontend/` — React 19 + TS + Webpack 5 + `shengji-wasm`. `gen-types.d.ts` is
+  auto-generated from the Rust types via `yarn types`. See `CLAUDE.md` →
+  "Frontend Structure" for the per-file map (compass table, team colors, i18n,
+  rules page, etc.).
+- `training/` — the Python distillation pipeline (`train_expert.py`,
+  `requirements.txt`, `README.md`); `data.csv` is the generated training set
+  (gitignored / large).
+- `docs/strategy/` — the transcribed human playbooks driving Enoch
+  (`double-holder.txt`, `trip-holder.txt`, + the source `.docx`).
 
 ## Toolchain / build (macOS)
-- Source Rust each shell: `. "$HOME/.cargo/env"` (rustc 1.96, wasm-pack 0.13, wasm32 target present).
-- yarn via corepack (1.22).
-- **Build frontend BEFORE backend** (backend embeds `frontend/dist` via `include_dir`):
-  `cd frontend && yarn build` (webpack + WASM), then `cargo build --bin shengji`.
-- Dev serve-from-disk: `cargo run --features dynamic` (serves `../frontend/dist` at runtime).
-- Run: `./target/debug/shengji` (binds :3030). Env: `CORS_ALLOWED_ORIGINS`, `WEBSOCKET_HOST`,
-  `VERSION`, `DUMP_PATH`, `MESSAGE_PATH` (see `.env.example`).
-- Tests: `cargo test --all` — green EXCEPT the 3 `storage/tests/redis_storage_tests` (need a live
-  Redis; **expected to fail** with "Connection refused"). Game-logic + bot tests must pass.
-- CONSTRAINT: backend has `#![deny(warnings)]` — all code must be warning-clean.
+- Source Rust each shell: `. "$HOME/.cargo/env"`. yarn via corepack.
+- **Build frontend BEFORE backend** (backend embeds `frontend/dist`):
+  `cd frontend && yarn build`, then `cargo build --bin shengji`.
+- Dev serve-from-disk: `cargo run --features dynamic` (serves `../frontend/dist`
+  at runtime).
+- Run: `./target/debug/shengji` (binds :3030). Env: `CORS_ALLOWED_ORIGINS`,
+  `WEBSOCKET_HOST`, `VERSION`, `DUMP_PATH`, `MESSAGE_PATH` (see `.env.example`).
+- Tests: `cargo test --all` — green EXCEPT the Redis storage tests (need a live
+  Redis; **expected to fail**). Game-logic + bot tests must pass, incl.
+  `e2e_game_no_hidden_card_leakage` and `legacy_hard_difficulty_deserializes_as_expert`.
+- **The gate that matters: `cargo build --bin shengji`** — backend has
+  `#![deny(warnings)]`, so the binary must build warning-clean. `cargo clippy`
+  currently surfaces some pre-existing lints in `expert.rs`/`mechanics` from a
+  newer toolchain — those are not the deny-warnings gate.
 - Regenerate TS types after changing Rust types: `cd frontend && yarn types`.
 
-## Milestone status
+## Milestone status (history — all DONE)
 | # | Milestone | Status |
 |---|---|---|
-| M0 | Foundation: toolchains, baseline build, server boots+serves, hygiene (.gitignore/.env.example) | ✅ DONE |
-| M1 | Bot-seat plumbing: AddAIPlayer/RemoveAIPlayer actions, BotDifficulty+registry, advance_bots driver, dumb-but-legal policy, self-play + cheat-boundary tests, regen types | ✅ DONE & verified |
-| M4 | Security hardening (Origin allowlist, msg-size cap, rate limit, room/player caps, sanitization, CSP/HSTS headers; move-validation tests; SECURITY_NOTES.md) | ✅ DONE & verified (all tests green except redis; warning-clean) |
-| M3 | Frontend redesign — lobby + in-game table (4-seat, StatusRail), responsive/mobile, card animations, ~70 i18n keys (中文/EN), Add-AI flow verified, four-color + a11y. Screenshots in frontend/.design-screens/. | ✅ DONE |
-| M2 | AI brain: determinizer + heuristics + time-boxed ISMCTS; Easy/Med/Hard; self-play eval ladder (Hard>Med>Easy, monotonic). Files: core/src/bot/{determinize,heuristics,search,policy}.rs, core/examples/eval.rs. SHENGJI_BOT_BUDGET_MS env overrides search budget (default 1000ms). | ✅ DONE & verified (25 core tests; warning-clean) |
-| M2.5 | ShengJi+ offline benchmark | ✅ DONE — head-to-head with the trained RL net INFEASIBLE (weights permanently gone: jiaruishan.com NXDOMAIN, no Wayback, never committed). Compared vs ShengJi+'s reproducible rule-based StrategicAgent: variant strong-match; our bots in the SAME LEAGUE as their strategic baseline (Expert ~85% vs degenerate ≈ their strategic ~80% vs random); honest prior we're behind their unrunnable best DMC net (97.7% lvl). Scratch-only, repo untouched. |
-| Expert | Expert tier: **net-guided determinized search** (AlphaZero-lite) — distilled net (teacher = our Omniscient) as the root policy prior on Hard's search; ONNX → Rust via `tract`. Expert ≈ Hard (competitive), beats Easy 81%. | ✅ DONE & verified |
-| Omniscient | Opt-in PERFECT-INFORMATION cheater tier (perfect-info search; honesty-bypass centralized in `observed_state`, gated to Omniscient only; honest tiers stay honest). UI Add-AI label. backend/tests/e2e_game.rs (WS no-leak e2e). | ✅ DONE & verified (27 core tests incl honesty-inversion; Omniscient beats Hard 62%; WS e2e no-leak passes; FE builds) |
-| M5 | Deploy — backend **LIVE on Fly.io** (app `shengji-tractor`, single machine, auto-stop pay-per-use) at **https://shengji-tractor.fly.dev** (serves frontend + WS; CSP/HSTS/headers verified live). Code pushed to public GitHub **tgoh-ots/shengji-tractor**. Vercel declined (single Fly URL). | ✅ DONE |
-| M6 | End-to-end verification — VERIFIED LIVE IN PRODUCTION: WS game (observer + all 4 tiers) with zero hidden-card leakage; security headers + WS Origin guard + HTTPS confirmed live; mobile render checked + fixed. backend/tests/e2e_game.rs (WS no-leak) green. | ✅ DONE & verified |
+| M0 | Foundation: toolchains, baseline build, server boots+serves, hygiene | ✅ DONE |
+| M1 | Bot-seat plumbing: AddAIPlayer/RemoveAIPlayer, BotDifficulty+registry, advance_bots driver, cheat-boundary tests | ✅ DONE |
+| M2 | AI brain: determinizer + heuristics + time-boxed ISMCTS; self-play eval ladder | ✅ DONE |
+| M2.5 | ShengJi+ offline benchmark (RL net weights permanently gone; compared vs their rule-based StrategicAgent — same league) | ✅ DONE |
+| M3 | Frontend redesign — lobby + in-game table, responsive/mobile, i18n (中文/EN), Add-AI flow, four-color + a11y | ✅ DONE |
+| M4 | Security hardening (Origin allowlist, msg-size cap, rate limit, room/player caps, sanitization, CSP/HSTS headers) | ✅ DONE |
+| Expert | Expert tier: net-guided determinized search (distilled net = root prior) | ✅ DONE (since re-distilled — see "Current state") |
+| Omniscient | Opt-in PERFECT-INFORMATION cheater tier; honesty bypass centralized + gated; WS no-leak e2e | ✅ DONE |
+| M5 | Deploy — backend LIVE on Fly.io; code on public GitHub | ✅ DONE |
+| M6 | End-to-end verification — verified live in production (no leakage, security headers/WS Origin guard, mobile) | ✅ DONE |
+| Ladder overhaul | Drop Hard → 4 tiers, deeper search, re-distilled Expert, harder Easy, Enoch + playbook + perfect memory, stronger shared heuristic, non-blocking driver | ✅ DONE & shipped |
+| UI/flow polish | Compass trick layout, Done-bidding flow, team colors, kitty-points log, English-only clean, rules page redo, auto-reconnect, bot pacing | ✅ DONE & shipped |
 
 ## Live deployment
-- **GitHub repo:** https://github.com/tgoh-ots/shengji-tractor (public). `origin` = HTTPS as `tgoh-ots` (the machine's SSH key maps to a different account, `tGoh98`, so push over HTTPS); `upstream` = rbtying/shengji. Pushing workflow files needs the gh token's `workflow` scope (already granted).
-- **Backend: LIVE on Fly.io** — app `shengji-tractor`, URL **https://shengji-tractor.fly.dev** (single service: serves embedded frontend + `/api` WebSocket). Verified live: `/`=200, `/stats`=200 (sha=fly), security headers (CSP/HSTS/X-Frame/nosniff) present, `/api`=400 (WS route up). **Single machine — DO NOT scale >1** (rooms are in-memory). `auto_stop` + `min_machines_running=0` (pay-per-use, ~1-2s wake; reconnect-by-name covers mid-game wakes).
-- Redeploy: `export PATH=/opt/homebrew/bin:$PATH; fly deploy --ha=false` (builds `Dockerfile.deploy` on Fly's remote builder). Logs: `fly logs -a shengji-tractor`. Status: `fly status -a shengji-tractor`. Config: `fly.toml`.
-- Prod env: `CORS_ALLOWED_ORIGINS=https://shengji-tractor.fly.dev` (also add the Vercel origin if the frontend is split out), `VERSION=fly`.
-- **Frontend on Vercel: OPTIONAL** (faster loads) — `vercel` deploy with build env `WEBSOCKET_HOST=wss://shengji-tractor.fly.dev/api`, then add the Vercel origin to Fly's `CORS_ALLOWED_ORIGINS`. The single Fly service already serves the frontend, so this is a nicety.
+- **GitHub repo:** https://github.com/tgoh-ots/shengji-tractor (public).
+- **Backend: LIVE on Fly.io** — app `shengji-tractor`, URL
+  **https://shengji-tractor.fly.dev** (single service: serves embedded frontend +
+  `/api` WebSocket). **Single machine — DO NOT scale >1** (rooms are in-memory).
+  `fly.toml` uses `auto_stop_machines = "suspend"` so the machine's RAM (and the
+  in-memory rooms) survive idle→wake; reconnect-by-name covers mid-game wakes. A
+  full redeploy (new image) still resets all rooms.
+- **Redeploy — deploy from a CLEAN worktree at a specific SHA** so concurrent
+  uncommitted work isn't shipped:
+  ```bash
+  git worktree add --detach /tmp/sj-deploy <sha>
+  cd /tmp/sj-deploy
+  export PATH=/opt/homebrew/bin:$PATH
+  fly deploy --ha=false        # builds Dockerfile.deploy on Fly's remote builder
+  cd -
+  git worktree remove /tmp/sj-deploy --force
+  ```
+  Logs: `fly logs -a shengji-tractor`. Status: `fly status -a shengji-tractor`.
+  Config: `fly.toml`. Full runbook: `DEPLOY.md`.
+- Prod env: `CORS_ALLOWED_ORIGINS=https://shengji-tractor.fly.dev`, `VERSION=fly`.
+- **Frontend on Vercel: OPTIONAL** (faster first paint) — the single Fly service
+  already serves the frontend.
 
 ## How to resume after a crash
-1. Read this file; run `TaskList` for current task states.
-2. Confirm build state: `. "$HOME/.cargo/env"; cargo test -p shengji-core` (should be green incl
-   `bot::tests::*`) and `cd frontend && yarn build`.
-3. Check `git status` / `git diff` for uncommitted work (we do NOT commit unless the user asks).
-4. Background agents do not survive a session crash — re-check M3 (frontend) / M4 (security)
-   completion by inspecting `frontend/` and `backend/` diffs; re-launch the incomplete ones.
-5. Continue from the first PENDING milestone in the table above.
+1. Read this file; check `git status` / `git log --oneline -20` for the latest
+   committed work and any uncommitted changes (we do NOT commit unless asked).
+2. Confirm build state:
+   `. "$HOME/.cargo/env"; cargo test -p shengji-core` (bot tests green) and
+   `cd frontend && yarn build`. Confirm `cargo build --bin shengji` is
+   warning-clean. Run `e2e_game_no_hidden_card_leakage`.
+3. The project is feature-complete and live; ongoing work is iterative
+   (bot strength + UI polish). Pick up from the user's current request.
 
 ## Notes
 - Do NOT commit to git unless the user asks.
-- No secrets in the repo; `.env` is gitignored; the AI is local (no external API key to leak).
+- No secrets in the repo; `.env` is gitignored; the AI is local (no external API
+  key to leak).
+- Validate strength changes with the `core/examples/` benchmarks, not just unit
+  tests; validate behavior changes with unit + e2e tests.
 
 ## Known follow-ups / caveats
-- `core/examples/eval.rs` ladder is noisy at low budget in DEBUG (24-hand samples); Hard>Medium can invert at 30ms debug. Production uses 1000ms release; the strict `test_difficulty_ladder_monotonic` is `#[ignore]`d and verified in release — re-confirm in release during M5/CI.
-- `test_difficulty_ladder_mixed_tier_self_play_quick` is SLOW in debug (~60s; full `cargo test --all` ~26min). For CI, gate the heavy self-play behind release or `--ignored`.
-- E2E tests rely on the in-test `tokio::time::timeout`/deadline, NOT shell `timeout` (absent on macOS).
-- backend now exposes `backend/src/lib.rs` (`build_app`) so integration tests can construct the app; `main.rs` builds on it.
+- `cargo clippy` has pre-existing lints in `expert.rs`/`mechanics` from a newer
+  toolchain — the real gate is `cargo build --bin shengji` under
+  `#![deny(warnings)]`.
+- Heavy self-play eval tests are slow in debug; run benchmarks in `--release`.
+- Redis storage tests fail without a local Redis (expected).
+- E2E tests rely on in-test `tokio::time::timeout`, not shell `timeout` (absent
+  on macOS).
+- `training/data.csv` is large and gitignored; regenerate with
+  `gen_training_data` before retraining (see `CLAUDE.md` → "Retrain the Expert
+  net").
