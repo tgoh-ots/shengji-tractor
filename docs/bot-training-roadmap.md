@@ -18,10 +18,18 @@
 
 **Finding:** the benchmarks are **not byte-reproducible** run-to-run (Rust `HashMap` iteration order is per-process and leaks into tie-breaks), so the planned "byte-identical golden diff" verification was replaced with **distributional / CI** equivalence. A future reproducibility hardening (deterministic candidate ordering) is noted in `docs/bot-eval-baseline.md`.
 
-**Started (1-month):** the **learned value head** PIPELINE is implemented & validated end-to-end, shipping
-default-OFF (`SHENGJI_VALUE_WEIGHT=0`) — what remains there is training a real value net on a large dataset and
-paired-measuring the blend weight. **Remaining:** the rest of the 1-month plan (DAgger, PUCT, endgame solver,
-kitty distillation).
+**1-month progress (2026-06-29):** most of the plan's *mechanisms* are now implemented & validated, shipping
+default-OFF where they touch production:
+- **Value head** — full pipeline (data targets → multi-task 2-output ONNX → gated leaf blend); default-OFF.
+- **DAgger** — `GEN_BEHAVIOUR` mix knob (record the search distribution, sharpen value targets).
+- **Kitty Phase-1 audit** — done; verdict: a learned kitty model is NOT justified vs the default heuristic.
+- **PUCT/ISMCTS** — gated `puct_search`, default-OFF; progressive widening still TODO.
+- **Endgame solver** — assessed & DEFERRED (needs a complete legal-move enumerator first; see below).
+
+**What remains (needs the user's compute or human design):** (1) actually TRAIN a value net on a large
+`GEN_BEHAVIOUR=mix` dataset and **paired-measure** the blend weight + PUCT — this is the real strength payoff
+and the only way to confirm the +3–8pp; (2) the endgame solver's prerequisite legal-move enumerator; (3)
+progressive widening for PUCT. The committed code is the falsifiable substrate; the measurement runs prove it.
 
 Toolchain note: build/test with `cargo +1.92.0 …` in this environment (deps need rustc ≥ 1.87; the default `stable` here is 1.80.1).
 
@@ -170,11 +178,18 @@ Assumes the substrate exists, so these are now measurable bets. Sequenced by dep
   the flat path's paired-world variance reduction), and **progressive widening** (searching beyond the top-K —
   the part that catches rank-7+ plays) is still TODO. A/B it via `paired_eval … search` once the value head is
   trained.
-- [ ] **Exact alpha-beta endgame solver** (~6–8 days, optional). Replaces noisy rollouts in the last ≤~6
-  tricks with exact tail evaluation; biggest clean win is making **Omniscient near-optimal** (raises the
-  honest-vs-cheater ceiling *and* de-noises endgame teacher labels). Needs a conservative card-count threshold
-  + node cap or Tractor's tractor/pair/throw branching blows the budget; **re-verify the honesty invariant** —
-  it touches the perfect-info path.
+- [!] **Exact alpha-beta endgame solver** — ASSESSED 2026-06-29, **DEFERRED (needs human design, not safe to
+  autonomously ship).** Blocker: a correct minimax needs a COMPLETE legal-move enumerator, but the only
+  generators available (`heuristics::lead_candidates`/`follow_candidates`) emit a HEURISTIC SUBSET — leads are
+  enumerated one unit at a time and **cannot even represent multi-unit throws**. A minimax over that subset is
+  systematically biased, so it would make the Omniscient teacher *worse*/mislabeled (negative value even gated
+  default-OFF). Doing it right means first building + validating a complete legal-move enumerator in
+  `mechanics` (the inverse of `can_play_cards`, incl. throws/tractors) — a multi-day, correctness-critical task
+  that warrants human design + review. The tractable-but-tiny version (brute-force only when ≤2–3 cards/hand
+  remain) is low-value (the heuristic is already near-optimal there). Recommend: defer until someone builds the
+  enumerator; the value head + DAgger are the higher-leverage teacher/leaf improvements anyway.
+  (Original intent: replace noisy rollouts in the last ≤~6 tricks with exact tail evaluation to make Omniscient
+  near-optimal — de-noising endgame teacher labels — but see the blocker above.)
 - [x] **Kitty (扣底) Phase-1 audit — DONE (2026-06-29); finding: deprioritize a kitty model.** The new
   `core/examples/kitty_audit.rs` forces candidate burials (default `choose_kitty` / `choose_kitty_enoch` /
   naive min-points) on the SAME deal and plays each out with a fixed greedy policy, isolating the burial. Result
