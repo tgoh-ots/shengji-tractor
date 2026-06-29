@@ -162,10 +162,14 @@ Assumes the substrate exists, so these are now measurable bets. Sequenced by dep
   generate(`GEN_BEHAVIOUR=mix`) → train → paired-gate → repeat **1–2 rounds**, NOT open-ended. ⚠️ The labeler is
   still the unidentifiable cheater, so DAgger moves *where on the ceiling* you sit, not the ceiling; and
   search-driven generation is hours, not minutes (the search behaviour shares the teacher's budget).
-- [ ] **PUCT/ISMCTS + progressive widening** (~6–9 days) — **only after the value head.** Flat averaging gives
-  every truncated candidate equal world budget and never searches rank-7+. PUCT concentrates the 144 worlds on
-  the contested candidates and uncaps width — but with the crude leaf it mostly reshuffles bad estimates, and
-  it sacrifices the current paired-world variance reduction. Pays off *after* a real leaf exists.
+- [~] **PUCT/ISMCTS** — implemented (2026-06-29), gated **default-OFF** (`SHENGJI_SEARCH_PUCT=1`). `search.rs`
+  now has a `puct_search` allocating simulations by `Q̂ + C·P·√ΣN/(1+Nᵢ)` (min-max-normalized Q, uniform prior
+  over the policy-pruned top-K, recommend most-visited) — verified to concentrate visits on the contested
+  candidates (e.g. `[1,1,5,7,11,1]`). The flat path is byte-unchanged when off. **Remaining:** it pays off
+  *after* a real value leaf exists (with the crude static leaf it mostly reshuffles bad estimates and gives up
+  the flat path's paired-world variance reduction), and **progressive widening** (searching beyond the top-K —
+  the part that catches rank-7+ plays) is still TODO. A/B it via `paired_eval … search` once the value head is
+  trained.
 - [ ] **Exact alpha-beta endgame solver** (~6–8 days, optional). Replaces noisy rollouts in the last ≤~6
   tricks with exact tail evaluation; biggest clean win is making **Omniscient near-optimal** (raises the
   honest-vs-cheater ceiling *and* de-noises endgame teacher labels). Needs a conservative card-count threshold

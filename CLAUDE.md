@@ -119,7 +119,10 @@ runtime — A/B a net with no rebuild), `SHENGJI_SEARCH_TRACE=1` (log per-decisi
 worlds/budget/TIME-vs-WORLDS-bound from `search_play`), `SHENGJI_BOT_BUDGET_MS`
 (per-decision search budget), `SHENGJI_VALUE_WEIGHT` (0..1, **default 0 = OFF**;
 blend the learned VALUE head into the search leaf evaluator — needs a 2-output
-value-head model, else it's a no-op; see the value-head note below).
+value-head model, else it's a no-op; see the value-head note below),
+`SHENGJI_SEARCH_PUCT=1` (**default OFF**; allocate the determinized search's
+simulations by PUCT/UCB — concentrate the budget on the contested candidates —
+instead of flat per-world averaging; A/B it via `paired_eval … search`).
 
 ### Code Quality
 ```bash

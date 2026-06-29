@@ -161,6 +161,18 @@ fn value_weight() -> f64 {
     })
 }
 
+/// Whether the determinized search uses PUCT/UCB simulation allocation instead of
+/// flat per-world averaging (env `SHENGJI_SEARCH_PUCT`, non-empty & != "0"; default
+/// OFF). Read ONCE and cached, so the flat path pays nothing when it's off.
+fn puct_enabled() -> bool {
+    static E: OnceLock<bool> = OnceLock::new();
+    *E.get_or_init(|| {
+        std::env::var("SHENGJI_SEARCH_PUCT")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
 /// Run the determinized search and return the chosen cards, or `None` if no
 /// candidate could be produced (caller should fall back to the heuristic /
 /// dumb policy).
@@ -179,6 +191,16 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, config: SearchConfig) -> Option<
     }
 
     let mut rng = StdRng::seed_from_u64(config.seed);
+
+    // PUCT mode (opt-in via SHENGJI_SEARCH_PUCT): allocate simulations to the
+    // candidates by a PUCT/UCB rule — concentrating the budget on the 1–3
+    // CONTESTED candidates — instead of the flat "every candidate, every world"
+    // averaging below. Default OFF, so the entire flat path that follows is
+    // byte-unchanged in production. See `docs/bot-training-roadmap.md` (pays off
+    // most once the leaf is a learned value net, not the crude static eval).
+    if puct_enabled() {
+        return puct_search(p, me, &candidates, &config, &mut rng);
+    }
 
     let mut totals = vec![0.0f64; candidates.len()];
     let mut counts = vec![0u32; candidates.len()];
@@ -303,6 +325,123 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, config: SearchConfig) -> Option<
     };
 
     Some(candidates[best_idx].cards.clone())
+}
+
+/// PUCT/UCB simulation allocation over the (already policy-pruned) candidate set,
+/// as an opt-in alternative to [`search_play`]'s flat per-world averaging.
+///
+/// Each simulation ("pull") selects the candidate maximizing
+/// `Q̂(i) + C·P(i)·√ΣN / (1 + N_i)`, samples a FRESH determinized world, rolls the
+/// candidate out, and updates that candidate's value/visit counts — concentrating
+/// the budget on the 1–3 contested candidates instead of spreading it evenly. `Q̂`
+/// is the per-candidate mean leaf value MIN-MAX normalized to `[0,1]` so the
+/// exploration term is on a comparable, scale-free footing; `P` is uniform over
+/// the top-K (the policy already pruned to the top-K, so within them we let UCB
+/// allocate). The recommended move is the MOST-VISITED candidate (the robust
+/// AlphaZero choice), tie-broken by mean value then heuristic order.
+///
+/// Trade-off (see the roadmap): this samples a fresh world per pull, giving up the
+/// flat path's paired-world variance reduction in exchange for selective depth —
+/// a win mainly once the leaf evaluator is a real value net rather than the crude
+/// static eval. Progressive widening (searching beyond the top-K) is a future
+/// extension; this version keeps the same candidate set as the flat path so an
+/// A/B isolates the allocation change.
+fn puct_search(
+    p: &PlayPhase,
+    me: PlayerID,
+    candidates: &[ScoredPlay],
+    config: &SearchConfig,
+    rng: &mut StdRng,
+) -> Option<Vec<Card>> {
+    const C_PUCT: f64 = 1.5;
+    let n = candidates.len();
+    let full_memory = config.policy == Policy::EnochHeuristic;
+    let prior = 1.0 / n as f64; // uniform over the already-pruned top-K
+    let mut q_sum = vec![0.0f64; n];
+    let mut counts = vec![0u32; n];
+
+    // Match the flat path's rollout budget: it does `max_worlds` worlds × `n`
+    // candidate rollouts; here each pull is one rollout, so allow `max_worlds·n`.
+    let pulls = config.max_worlds.saturating_mul(n).max(1);
+    let start = Instant::now();
+    for _ in 0..pulls {
+        if start.elapsed() >= config.time_budget {
+            break;
+        }
+        // Min-max normalize the current per-candidate mean values to [0,1] so the
+        // exploitation term is comparable to the (scale-free) exploration term.
+        let means: Vec<f64> = (0..n)
+            .map(|i| {
+                if counts[i] > 0 {
+                    q_sum[i] / counts[i] as f64
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let lo = means.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = means.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let span = (hi - lo).max(1e-9);
+        let total: u32 = counts.iter().sum();
+        let sqrt_total = (total as f64).sqrt();
+
+        let mut best_i = 0;
+        let mut best_u = f64::NEG_INFINITY;
+        for i in 0..n {
+            let q_norm = (means[i] - lo) / span;
+            let u = q_norm + C_PUCT * prior * sqrt_total / (1.0 + counts[i] as f64);
+            if u > best_u {
+                best_u = u;
+                best_i = i;
+            }
+        }
+
+        let world = match sample_hidden_hands(p, me, full_memory, rng) {
+            Some(w) => w,
+            None => continue,
+        };
+        if let Some(v) = evaluate_candidate(
+            &world.play,
+            me,
+            &candidates[best_i].cards,
+            config.rollout_tricks,
+            config.rollout_policy,
+            rng,
+        ) {
+            q_sum[best_i] += v;
+            counts[best_i] += 1;
+        }
+    }
+
+    if search_trace_enabled() {
+        eprintln!(
+            "[search/puct] seat={} cands={} pulls={:?} visits={:?} elapsed={:.1}ms",
+            me.0,
+            n,
+            counts.iter().sum::<u32>(),
+            counts,
+            start.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    // Recommend the MOST-VISITED candidate (AlphaZero's robust choice); tie-break
+    // by higher mean value, then earlier (higher heuristic) index. A candidate
+    // never sampled (no world satisfied it) keeps -inf mean so it loses ties.
+    let mut best_i = 0;
+    let mut best_key = (0u32, f64::NEG_INFINITY);
+    for i in 0..n {
+        let mean = if counts[i] > 0 {
+            q_sum[i] / counts[i] as f64
+        } else {
+            f64::NEG_INFINITY
+        };
+        let key = (counts[i], mean);
+        if key.0 > best_key.0 || (key.0 == best_key.0 && key.1 > best_key.1) {
+            best_key = key;
+            best_i = i;
+        }
+    }
+    Some(candidates[best_i].cards.clone())
 }
 
 /// Run a PERFECT-INFORMATION search and return the chosen cards, or `None` if no
