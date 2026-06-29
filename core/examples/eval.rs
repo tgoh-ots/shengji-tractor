@@ -2,12 +2,12 @@
 //!
 //! Runs many all-bot games with assorted per-seat difficulties and prints a
 //! win-rate table demonstrating the strength ladder
-//! Easy < Hard <= Expert < Omniscient, plus exploitability probes against a
+//! Easy < Expert <= Enoch < Omniscient, plus exploitability probes against a
 //! couple of degenerate opponents.
 //!
 //! Run with:
 //!     cargo run --release --example eval
-//!     SHENGJI_BOT_BUDGET_MS=30 cargo run --example eval   # faster Hard search
+//!     SHENGJI_BOT_BUDGET_MS=30 cargo run --example eval   # faster search
 //!
 //! # Honesty
 //!
@@ -46,7 +46,6 @@ impl Brain {
     fn label(self) -> &'static str {
         match self {
             Brain::Tier(BotDifficulty::Easy) => "Easy",
-            Brain::Tier(BotDifficulty::Hard) => "Hard",
             Brain::Tier(BotDifficulty::Expert) => "Expert",
             Brain::Tier(BotDifficulty::Enoch) => "Enoch",
             Brain::Tier(BotDifficulty::Omniscient) => "Omniscient",
@@ -159,7 +158,7 @@ fn play_one_hand(brains: &[Brain]) -> Option<HandOutcome> {
                 let view = GameState::Exchange(s.clone()).for_player(landlord);
                 let difficulty = match brain_of[&landlord] {
                     Brain::Tier(d) => d,
-                    _ => BotDifficulty::Hard,
+                    _ => BotDifficulty::Expert,
                 };
                 match policy::select_action(&view, landlord, difficulty).ok()? {
                     Some(Action::MoveCardToKitty(c)) => {
@@ -223,7 +222,7 @@ fn play_one_hand(brains: &[Brain]) -> Option<HandOutcome> {
 }
 
 /// Mirror production's centralized honesty bypass (`bot::observed_state`) for the
-/// eval harness's play phase: honest tiers (`Easy`/`Hard`/`Expert`) get the
+/// eval harness's play phase: honest tiers (`Easy`/`Expert`/`Enoch`) get the
 /// redacted per-player view; the `Omniscient` CHEATER tier gets the TRUE full
 /// state (every seat's real cards) so its perfect-information search can read
 /// them. This is the only place the harness ever hands a bot the unredacted
@@ -373,8 +372,9 @@ fn print_matchup_result(a: Brain, b: Brain, aw: usize, bw: usize) {
 
 fn main() {
     let start = Instant::now();
-    // The Hard tier (heuristic + determinized search) needs enough simulations
-    // per decision to demonstrate its edge over Easy (the noisy heuristic). A
+    // The search tiers (heuristic / net / playbook + determinized search) need
+    // enough simulations per decision to demonstrate their edge over Easy (the
+    // noisy heuristic). A
     // debug build runs ~5x slower, so it gets ~5x fewer sims for the same
     // wall-clock budget; we therefore default to a larger budget in debug to
     // keep the ladder monotonic, and a smaller one in release where sims are
@@ -396,49 +396,38 @@ fn main() {
 
     println!("Difficulty ladder (head-to-head win rates):");
     // Perfect-information ceiling: the Omniscient CHEATER tier should be at least
-    // as strong as Hard (it shares Hard's search machinery but reads the REAL
-    // hands instead of sampling them). Beneath it the honest ladder is
-    // Easy < Hard <= Expert (Expert is the learned net distilled from
-    // Omniscient; if its model is a placeholder it falls back to Hard and ties
-    // Hard). Each pairing is run ONCE and reused for both the printed line and
-    // the ordering summary below.
-    let (omni_h, hard_o) = head_to_head(
+    // as strong as Expert (it shares the determinized-search machinery but reads
+    // the REAL hands instead of sampling them). Beneath it the honest ladder is
+    // Easy < Expert <= Enoch (Expert is the learned net distilled from
+    // Omniscient; Enoch reuses the same search but layers on the full-game
+    // playbook). Each pairing is run ONCE and reused for both the printed line
+    // and the ordering summary below.
+    let (omni_x, exp_o) = head_to_head(
         Brain::Tier(BotDifficulty::Omniscient),
-        Brain::Tier(BotDifficulty::Hard),
+        Brain::Tier(BotDifficulty::Expert),
         games,
     );
     print_matchup_result(
         Brain::Tier(BotDifficulty::Omniscient),
-        Brain::Tier(BotDifficulty::Hard),
-        omni_h,
-        hard_o,
+        Brain::Tier(BotDifficulty::Expert),
+        omni_x,
+        exp_o,
     );
     print_matchup(
         Brain::Tier(BotDifficulty::Omniscient),
-        Brain::Tier(BotDifficulty::Expert),
+        Brain::Tier(BotDifficulty::Enoch),
         games,
     );
-    let (exp_h, hard_x) = head_to_head(
+    let (enoch_x, exp_n) = head_to_head(
+        Brain::Tier(BotDifficulty::Enoch),
         Brain::Tier(BotDifficulty::Expert),
-        Brain::Tier(BotDifficulty::Hard),
         games,
     );
     print_matchup_result(
+        Brain::Tier(BotDifficulty::Enoch),
         Brain::Tier(BotDifficulty::Expert),
-        Brain::Tier(BotDifficulty::Hard),
-        exp_h,
-        hard_x,
-    );
-    let (hard_e, easy_h) = head_to_head(
-        Brain::Tier(BotDifficulty::Hard),
-        Brain::Tier(BotDifficulty::Easy),
-        games,
-    );
-    print_matchup_result(
-        Brain::Tier(BotDifficulty::Hard),
-        Brain::Tier(BotDifficulty::Easy),
-        hard_e,
-        easy_h,
+        enoch_x,
+        exp_n,
     );
     let (exp_e, easy_x) = head_to_head(
         Brain::Tier(BotDifficulty::Expert),
@@ -451,36 +440,51 @@ fn main() {
         exp_e,
         easy_x,
     );
-
-    // Summarize the ordering we expect: Omniscient >= Hard, Expert >= Hard
-    // (Expert ties Hard when its model is a placeholder), and both Hard and
-    // Expert beat Easy.
-    println!(
-        "\nLadder check  (expect Omniscient>=Hard, Expert>=Hard, Hard>Easy, Expert>Easy):\n  \
-         Omniscient {} - {} Hard  |  Expert {} - {} Hard  |  Hard {} - {} Easy  |  Expert {} - {} Easy",
-        omni_h, hard_o, exp_h, hard_x, hard_e, easy_h, exp_e, easy_x
+    let (enoch_e, easy_n) = head_to_head(
+        Brain::Tier(BotDifficulty::Enoch),
+        Brain::Tier(BotDifficulty::Easy),
+        games,
     );
-    let omni_ge_hard = omni_h >= hard_o;
-    let exp_ge_hard = exp_h >= hard_x;
-    let hard_gt_easy = hard_e > easy_h;
-    let exp_gt_easy = exp_e > easy_x;
+    print_matchup_result(
+        Brain::Tier(BotDifficulty::Enoch),
+        Brain::Tier(BotDifficulty::Easy),
+        enoch_e,
+        easy_n,
+    );
+
+    // Summarize the ordering we expect: Omniscient >= Expert, Enoch >= Expert
+    // (Enoch reuses the search and adds the playbook), and both Expert and Enoch
+    // beat Easy.
     println!(
-        "  => Omniscient>=Hard: {}  Expert>=Hard: {}  Hard>Easy: {}  Expert>Easy: {}",
-        if omni_ge_hard { "yes" } else { "NO" },
-        if exp_ge_hard { "yes" } else { "NO" },
-        if hard_gt_easy { "yes" } else { "NO" },
+        "\nLadder check  (expect Omniscient>=Expert, Enoch>=Expert, Expert>Easy, Enoch>Easy):\n  \
+         Omniscient {} - {} Expert  |  Enoch {} - {} Expert  |  Expert {} - {} Easy  |  Enoch {} - {} Easy",
+        omni_x, exp_o, enoch_x, exp_n, exp_e, easy_x, enoch_e, easy_n
+    );
+    let omni_ge_exp = omni_x >= exp_o;
+    let enoch_ge_exp = enoch_x >= exp_n;
+    let exp_gt_easy = exp_e > easy_x;
+    let enoch_gt_easy = enoch_e > easy_n;
+    println!(
+        "  => Omniscient>=Expert: {}  Enoch>=Expert: {}  Expert>Easy: {}  Enoch>Easy: {}",
+        if omni_ge_exp { "yes" } else { "NO" },
+        if enoch_ge_exp { "yes" } else { "NO" },
         if exp_gt_easy { "yes" } else { "NO" },
+        if enoch_gt_easy { "yes" } else { "NO" },
     );
 
     println!("\nExploitability probes (our bots vs degenerate opponents):");
     print_matchup(
-        Brain::Tier(BotDifficulty::Hard),
+        Brain::Tier(BotDifficulty::Expert),
         Brain::AlwaysDumpPoints,
         games,
     );
-    print_matchup(Brain::Tier(BotDifficulty::Hard), Brain::AlwaysTrump, games);
     print_matchup(
         Brain::Tier(BotDifficulty::Expert),
+        Brain::AlwaysTrump,
+        games,
+    );
+    print_matchup(
+        Brain::Tier(BotDifficulty::Enoch),
         Brain::AlwaysDumpPoints,
         games,
     );
@@ -489,17 +493,17 @@ fn main() {
     println!("\nMixed table (all four tiers/probes at once), per-seat win rates:");
     let mut tally = Tally::default();
     let table = [
+        Brain::Tier(BotDifficulty::Enoch),
         Brain::Tier(BotDifficulty::Expert),
-        Brain::Tier(BotDifficulty::Hard),
         Brain::Tier(BotDifficulty::Easy),
-        Brain::Tier(BotDifficulty::Hard),
+        Brain::Tier(BotDifficulty::Expert),
     ];
     for _ in 0..games {
         if let Some(outcome) = play_one_hand(&table) {
             tally.record(&table, &outcome);
         }
     }
-    for label in ["Expert", "Hard", "Easy"] {
+    for label in ["Enoch", "Expert", "Easy"] {
         if tally.appearances.contains_key(label) {
             println!("  {:>8}: {:.0}% ", label, 100.0 * tally.win_rate(label));
         }

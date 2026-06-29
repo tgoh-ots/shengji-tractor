@@ -43,8 +43,8 @@
 //! [`choose_play_expert`] generates the legal candidates (lead or follow) with
 //! the same generators the heuristic uses, scores each with the embedded model,
 //! and returns the argmax. If the model fails to load, fails to run, or no
-//! candidates exist, it returns `None` and the policy falls back to the `Hard`
-//! determinized search (which itself falls back to the heuristic), so Expert is
+//! candidates exist, it returns `None` and the policy falls back to the
+//! hand-written heuristic prior inside the determinized search, so Expert is
 //! never illegal/None.
 
 use std::sync::OnceLock;
@@ -61,13 +61,14 @@ use crate::game_state::play_phase::PlayPhase;
 /// Indices 0..=27 are the original compact encoding; 28..=35 are the richer
 /// honest "card-memory" features derived from [`Knowledge::from_play_view`]
 /// (remaining unseen trumps / points, per-seat voids of the seats still to act,
-/// seat position). Adding these raised the distillation ceiling above Hard.
+/// seat position). Adding these raised the distillation ceiling above the bare
+/// heuristic.
 pub const FEATURE_DIM: usize = 36;
 
 /// The embedded ONNX model (a small MLP scoring one candidate's features to a
 /// scalar logit). If training has not produced a model yet, this file may be a
 /// placeholder; [`model`] handles a missing/invalid model gracefully by
-/// returning `None`, which makes the Expert tier fall back to `Hard`.
+/// returning `None`, which makes the Expert tier fall back to the heuristic.
 ///
 /// The asset lives under `core/src/bot/` so it travels with the crate (and the
 /// pure-Rust `tract-onnx` runtime builds in the musl Docker image — no
@@ -78,7 +79,7 @@ type Model = tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedM
 
 /// Lazily-parsed model, shared across all Expert decisions. `None` means the
 /// model could not be loaded (e.g. the embedded bytes are a placeholder), in
-/// which case the caller falls back to the Hard heuristic.
+/// which case the caller falls back to the hand-written heuristic.
 fn model() -> Option<&'static Model> {
     static MODEL: OnceLock<Option<Model>> = OnceLock::new();
     MODEL
@@ -96,7 +97,7 @@ fn load_model() -> tract_onnx::prelude::TractResult<Model> {
     use tract_onnx::prelude::*;
 
     // A near-empty / placeholder file can't be a valid ONNX graph; bail early so
-    // we fall back to Hard rather than erroring deeper in the parser.
+    // we fall back to the heuristic rather than erroring deeper in the parser.
     if MODEL_BYTES.len() < 64 {
         anyhow::bail!("expert model is a placeholder (too small to be ONNX)");
     }
@@ -146,7 +147,7 @@ pub fn score_candidates_net(
 }
 
 /// Choose the best legal play for `me` using the learned Expert net, or `None`
-/// if the model is unavailable / produced nothing (caller falls back to Hard).
+/// if the model is unavailable / produced nothing (caller falls back to the heuristic).
 ///
 /// `p` MUST be the redacted per-player view (the honesty invariant): every
 /// feature is computed from observable information only.

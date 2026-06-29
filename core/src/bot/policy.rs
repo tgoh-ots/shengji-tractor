@@ -9,16 +9,17 @@
 //!
 //! | tier      | card memory | blunder ε | softmax temp | determinized search    |
 //! |-----------|-------------|-----------|--------------|------------------------|
-//! | Easy      | none        | ~28%      | high (hot)   | no                     |
-//! | Hard      | yes (voids) | ~0%       | ~greedy      | yes (time-boxed)       |
-//! | Expert    | yes (voids) | ~0%       | greedy       | learned net (honest)   |
+//! | Easy      | none        | ~6%       | warm         | no                     |
+//! | Expert    | yes (voids) | ~0%       | greedy       | learned-net prior      |
+//! | Enoch     | yes (voids) | ~0%       | greedy       | playbook heuristic     |
 //! | Omniscient| (cheats)    | 0%        | greedy       | perfect-info search    |
 //!
 //! `Expert` scores each legal candidate with a small MLP distilled from the
 //! `Omniscient` teacher's choices (see [`crate::bot::expert`]); it consumes only
-//! HONEST per-candidate features, so it approximates perfect-info play from the
-//! redacted view. When the model can't load/run, Expert falls back to the `Hard`
-//! determinized search, which itself falls back to the heuristic.
+//! HONEST per-candidate features and serves as the PRIOR of a time-boxed
+//! determinized search, so it approximates perfect-info play from the redacted
+//! view. When the model can't load/run, the search prior transparently falls
+//! back to the shared hand-written heuristic.
 //!
 //! Whenever any tier's logic fails to produce a move, we fall back to the
 //! original always-legal "dumb" policy so a bot never makes an illegal/None
@@ -50,8 +51,8 @@ struct Knobs {
     /// among the good moves). 0 means pick the top move deterministically.
     temperature: f64,
     /// How many determinized worlds to sample in search. 0 disables search and
-    /// the tier plays directly from the heuristic backbone (Easy). Hard does a
-    /// deeper, time-boxed search.
+    /// the tier plays directly from the heuristic backbone (Easy). Expert/Enoch
+    /// do a deeper, time-boxed search.
     search_worlds: usize,
     /// Maximum candidate moves the search evaluates.
     search_candidates: usize,
@@ -63,39 +64,46 @@ struct Knobs {
 impl Knobs {
     fn for_difficulty(d: BotDifficulty) -> Self {
         match d {
-            // Beginner: frequent blunders, hot softmax over the top moves, and
-            // NO card memory / search. Feels like a casual human.
+            // Beginner: occasional blunders, a warm (but no longer scalding)
+            // softmax over the top moves, and NO card memory / search. Still
+            // clearly the weakest, beatable tier — it just makes fewer obvious
+            // blunders than before. The blunder rate and softmax temperature are
+            // the two knobs that gate its strength; both were nudged DOWN
+            // (ε 0.28→0.06, temp 3.5→1.1) so it sticks to the heuristic's top
+            // suggestions more often without ever gaining real look-ahead. The
+            // `easy_ab_benchmark` example measures Easy@new vs Easy@old at these
+            // values (a modest ~56% bump — noticeable but not a blowout).
             BotDifficulty::Easy => Knobs {
-                epsilon: 0.28,
-                temperature: 3.5,
+                epsilon: 0.06,
+                temperature: 1.1,
                 search_worlds: 0,
                 search_candidates: 0,
                 rollout_tricks: 0,
             },
-            // Hard: the heuristic PLUS a time-boxed determinized search that
-            // looks ahead over sampled worlds, essentially no blunders, greedy on
-            // the search value. Strictly stronger than the bare heuristic when
-            // the budget allows any simulations at all.
-            BotDifficulty::Hard => Knobs {
-                epsilon: 0.0,
-                temperature: 0.0,
-                search_worlds: 48,
-                search_candidates: 6,
-                rollout_tricks: 8,
-            },
             // Expert: a learned net scores each legal candidate from HONEST
-            // features (see `choose_play` / `crate::bot::expert`). These knobs
-            // only matter for the fallback path when the model can't run — in
-            // that case Expert behaves like Hard (determinized search). ε = 0 and
-            // temperature = 0 so the net's argmax is taken greedily.
+            // features and serves as the PRIOR of a time-boxed determinized
+            // search (see `choose_play` / `crate::bot::expert`). The search knobs
+            // below drive that search; if the net can't run, the search prior
+            // transparently falls back to the shared hand-written heuristic, so
+            // Expert is never illegal/None. ε = 0 and temperature = 0 so the
+            // search value is taken greedily.
+            //
+            // Deepened search: the move is computed off the game lock and masked
+            // by the ~1200ms visible pacing (see `search_budget_ms`), so a bigger
+            // budget buys strength without lagging chat/UI. More determinized
+            // worlds cut the per-decision value variance and a deeper rollout
+            // sharpens the leaf estimate. In practice these positions finish well
+            // under the 2.2s cap (avg ~tens of ms), so the worlds/rollout-depth
+            // bumps — not the wall-clock budget — are what deepen the search; the
+            // budget is the safety ceiling.
             BotDifficulty::Expert => Knobs {
                 epsilon: 0.0,
                 temperature: 0.0,
-                search_worlds: 48,
+                search_worlds: 144,
                 search_candidates: 6,
-                rollout_tricks: 8,
+                rollout_tricks: 12,
             },
-            // Enoch: the SAME time-boxed determinized search as Hard, but driven
+            // Enoch: the SAME time-boxed determinized search as Expert, but driven
             // by the Enoch-playbook heuristic (`Policy::EnochHeuristic`) at both
             // the root prior and the rollout plies, so the full-game strategy
             // shapes the search rather than only a one-shot greedy pick. No
@@ -103,9 +111,11 @@ impl Knobs {
             BotDifficulty::Enoch => Knobs {
                 epsilon: 0.0,
                 temperature: 0.0,
-                search_worlds: 48,
+                // Same deepened determinized search as Expert, driven by the
+                // Enoch-playbook heuristic at both the prior and the rollout plies.
+                search_worlds: 144,
                 search_candidates: 6,
-                rollout_tricks: 8,
+                rollout_tricks: 12,
             },
             // CHEATER (perfect information): plays a perfect-information search
             // over the SINGLE true world (no determinization, no sampling — it
@@ -117,7 +127,12 @@ impl Knobs {
             BotDifficulty::Omniscient => Knobs {
                 epsilon: 0.0,
                 temperature: 0.0,
-                search_worlds: 8,
+                // `search_worlds` here is reused as "rollouts per candidate" by
+                // `search_play_perfect_info`. With the larger off-lock budget we
+                // can average more full-hand rollouts per candidate, lowering the
+                // variance on the greedy pick. Each rollout is a full playout, so
+                // the budget still caps the work; this only raises the ceiling.
+                search_worlds: 12,
                 search_candidates: usize::MAX,
                 rollout_tricks: usize::MAX,
             },
@@ -170,15 +185,28 @@ pub fn select_action(
     }
 }
 
-/// The Hard-tier search wall-clock budget in milliseconds. Defaults to 1000ms;
+/// The search-tier wall-clock budget in milliseconds. Defaults to 2200ms;
 /// overridable via the `SHENGJI_BOT_BUDGET_MS` environment variable so the
-/// self-play eval harness can trade strength for speed in bulk runs.
+/// self-play eval harness (and the test suite) can trade strength for speed in
+/// bulk runs.
+///
+/// # Why 2200ms is safe in production
+///
+/// The backend computes the bot's move on a `spawn_blocking` worker that holds
+/// NEITHER the game lock NOR an async runtime thread (see
+/// `drive_bots_non_blocking` in `backend/src/shengji_handler.rs`), so the search
+/// runs entirely concurrently with chat / other players' actions. The bot's
+/// VISIBLE move is then paced by `DEFAULT_BOT_ACTION_PAUSE_MS` (~1200ms), which
+/// overlaps the search rather than adding to it. A ~2.2s search therefore masks
+/// under the pacing and keeps the total bot turn comfortably under ~3s while
+/// giving the determinized search markedly more worlds/depth than the old 1000ms.
+/// Tests override this to a few ms, so the suite stays fast.
 fn search_budget_ms() -> u64 {
     std::env::var("SHENGJI_BOT_BUDGET_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(1000)
+        .unwrap_or(2200)
 }
 
 /// Seed an RNG deterministically from the (redacted) play state so that, given
@@ -216,8 +244,9 @@ fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Ca
     // (`PlayPhase`) it was handed already contains the REAL hands for every seat,
     // because the driver obtained it through the centralized honesty bypass
     // (`crate::bot::observed_state`, the sole intentional perfect-information
-    // path). So instead of sampling hidden hands like Hard, we search the single
-    // true world directly with full rollouts — see `search_play_perfect_info`.
+    // path). So instead of sampling hidden hands like the honest search tiers, we
+    // search the single true world directly with full rollouts — see
+    // `search_play_perfect_info`.
     if matches!(difficulty, BotDifficulty::Omniscient) {
         let config = SearchConfig {
             time_budget: Duration::from_millis(search_budget_ms()),
@@ -233,13 +262,11 @@ fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Ca
         }
     }
 
-    // Hard / Expert: time-boxed determinized search over sampled worlds. Both
+    // Expert / Enoch: time-boxed determinized search over sampled worlds. Both
     // tiers share the SAME search machinery (determinizer + world sampling +
     // rollouts + the static leaf evaluator); the ONLY difference is the POLICY
-    // that supplies the candidate prior (root pruning):
+    // that supplies the candidate prior (root pruning) and shapes the rollouts:
     //
-    //   * Hard   → `Policy::Heuristic` prior + heuristic rollouts (the classic
-    //              hand-written backbone search).
     //   * Expert → `Policy::Net` PRIOR (the distilled learned net ranks/prunes the
     //              root candidates) + heuristic rollouts. The net is a far better
     //              *root prior* than it is a cheap deep-rollout policy, so we use
@@ -247,15 +274,22 @@ fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Ca
     //              keep the fast heuristic for the many rollout plies. This is
     //              AlphaZero-lite: search + a learned policy prior, static leaf
     //              value unchanged. If the net can't run, the prior transparently
-    //              falls back to the heuristic, so Expert is never illegal/None.
+    //              falls back to the hand-written heuristic, so Expert is never
+    //              illegal/None.
+    //   * Enoch  → `Policy::EnochHeuristic` prior + Enoch-playbook rollouts (the
+    //              full-game competitive playbook shapes both plies).
     //
-    // The wall-clock budget defaults to 1000ms but can be lowered via
-    // `SHENGJI_BOT_BUDGET_MS` (used by the self-play eval harness to keep large
-    // runs fast). The cap guarantees a slow CPU degrades to fewer simulations
-    // rather than hanging. Both honest tiers read ONLY the redacted view `p`.
+    // The wall-clock budget defaults to 2200ms but can be lowered via
+    // `SHENGJI_BOT_BUDGET_MS` (used by the self-play eval harness and the test
+    // suite to keep large runs fast). The search runs OFF the game lock and is
+    // masked by the bot's ~1200ms visible pacing, so the larger budget buys
+    // strength without lagging chat/UI. The cap still guarantees a slow CPU
+    // degrades to fewer simulations rather than hanging. Both honest tiers read
+    // ONLY the redacted view `p`.
     if knobs.search_worlds > 0 {
         // Enoch shapes BOTH the prior AND the rollout plies with its full-game
-        // playbook; Expert uses the learned-net prior; Hard the bare heuristic.
+        // playbook; Expert uses the learned-net prior (which itself falls back to
+        // the bare hand-written heuristic if the net can't run).
         let enoch = matches!(difficulty, BotDifficulty::Enoch);
         let prior = if matches!(difficulty, BotDifficulty::Expert) {
             Policy::Net

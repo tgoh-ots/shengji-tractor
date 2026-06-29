@@ -17,20 +17,21 @@ pub mod search;
 #[cfg(test)]
 mod tests;
 
-/// The difficulty of a bot player. The five tiers form a strength ladder
-/// `Easy < Hard <= Expert <= Enoch < Omniscient`:
+/// The difficulty of a bot player. The four user-selectable tiers form a
+/// strength ladder `Easy < Expert <= Enoch < Omniscient`:
 ///
-/// * `Easy` — the bare heuristic backbone played noisily (frequent blunders, hot
-///   softmax, no card memory or search). Feels like a casual human.
-/// * `Hard` — the same heuristic PLUS a time-boxed determinized (ISMCTS-style)
-///   search over sampled worlds. Honest.
+/// * `Easy` — the bare heuristic backbone played noisily (occasional blunders,
+///   warm softmax, no card memory or search). Feels like a casual human; clearly
+///   beatable.
 /// * `Expert` — a learned neural net (a small MLP trained by behavioral cloning /
 ///   distillation of the Omniscient teacher's choices) scores each legal
-///   candidate from HONEST features only. It approximates perfect-info play from
-///   the honest observation. If the model fails to load/run it falls back to the
-///   `Hard` heuristic, so Expert is never illegal/None. Honest.
-/// * `Enoch` — the strongest HONEST tier. It REUSES the `Hard` determinized
-///   search over the improved boss-/partner-aware heuristic and LAYERS ON a full
+///   candidate from HONEST features only, used as the PRIOR of a time-boxed
+///   determinized (ISMCTS-style) search over sampled worlds. It approximates
+///   perfect-info play from the honest observation. If the model fails to
+///   load/run the search prior transparently falls back to the shared
+///   hand-written heuristic, so Expert is never illegal/None. Honest.
+/// * `Enoch` — the strongest HONEST tier. It REUSES the same determinized search
+///   over the improved boss-/partner-aware heuristic and LAYERS ON a full
 ///   competitive playbook (transcribed from a Shengji enthusiast — see
 ///   `docs/strategy/double-holder.txt`) that the other tiers don't model:
 ///   pair-prioritized trump declaration, disciplined point-scaled kitty burial,
@@ -43,19 +44,19 @@ mod tests;
 ///   must be chosen explicitly in the lobby and is surfaced with a cheater badge
 ///   in the UI.
 ///
-/// The four honest tiers (`Easy`/`Hard`/`Expert`/`Enoch`) never receive anything
-/// but their own redacted, per-player view — see [`observed_state`], which is the
+/// The three honest tiers (`Easy`/`Expert`/`Enoch`) never receive anything but
+/// their own redacted, per-player view — see [`observed_state`], which is the
 /// single, centralized place where the perfect-information bypass is gated.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub enum BotDifficulty {
     Easy,
-    #[default]
-    Hard,
     /// Learned-net tier: a small MLP distilled from the Omniscient teacher,
-    /// scoring legal candidates from HONEST features only. Falls back to the
-    /// `Hard` heuristic if the model can't run. See [`crate::bot::expert`].
+    /// scoring legal candidates from HONEST features only, used as the prior of a
+    /// time-boxed determinized search. Falls back to the shared hand-written
+    /// heuristic prior if the model can't run. See [`crate::bot::expert`].
+    #[default]
     Expert,
-    /// Strongest HONEST tier: the `Hard` determinized search over the improved
+    /// Strongest HONEST tier: the same determinized search over the improved
     /// heuristic, plus an "enoch mode" full-game playbook (pair-aware declaring,
     /// scaled kitty burial, tractor-first / long-suit leading, defender low-trump
     /// hand-off, endgame kitty protection). Honest — own redacted view only. See
@@ -71,7 +72,6 @@ impl BotDifficulty {
     pub fn as_str(self) -> &'static str {
         match self {
             BotDifficulty::Easy => "Easy",
-            BotDifficulty::Hard => "Hard",
             BotDifficulty::Expert => "Expert",
             BotDifficulty::Enoch => "Enoch",
             BotDifficulty::Omniscient => "Omniscient",
@@ -164,7 +164,7 @@ impl AdvanceResult {
 /// A single planned bot step, produced by [`plan_next_bot_action`] from a
 /// (cheap-to-clone) snapshot of the game WITHOUT mutating it. This is the
 /// off-lock half of the non-blocking bot driver: the (potentially expensive)
-/// move selection — the determinized search for a Hard/Expert play — is done
+/// move selection — the determinized search for an Expert/Enoch play — is done
 /// here, off the game lock and off the async worker, so the lock is only briefly
 /// re-acquired to APPLY the precomputed `action` (see
 /// [`apply_planned_bot_action`]).
@@ -352,7 +352,7 @@ impl BotResponsibility {
 }
 
 /// Plan the next bot step from a read-only snapshot, performing the (possibly
-/// expensive) move selection — the determinized search for a Hard/Expert play —
+/// expensive) move selection — the determinized search for an Expert/Enoch play —
 /// WITHOUT holding any lock and WITHOUT mutating the game. This is the off-thread
 /// half of the non-blocking bot driver: callers run it on a cloned snapshot via
 /// `tokio::task::spawn_blocking`, then briefly re-acquire the game lock to apply
@@ -590,7 +590,7 @@ fn is_paceable_bot_action(action: &Action) -> bool {
 ///
 /// The honesty invariant is preserved by computing each HONEST bot's move from
 /// the per-player redacted view via [`observed_state`]: the policy never sees the
-/// unredacted game state, so an Easy/Hard/Expert bot cannot observe information a
+/// unredacted game state, so an Easy/Expert/Enoch bot cannot observe information a
 /// human in its seat couldn't. The ONLY exception is the explicitly opt-in
 /// `Omniscient` CHEATER tier, for which [`observed_state`] (the single,
 /// centralized perfect-information bypass) returns the true full state.
@@ -986,7 +986,7 @@ fn next_bot_action(
 /// unredacted game state instead of its own redacted, per-player view. The
 /// decision is gated entirely on [`BotDifficulty::sees_perfect_information`]:
 ///
-/// * For the HONEST tiers (`Easy`/`Hard`/`Expert`) we return
+/// * For the HONEST tiers (`Easy`/`Expert`/`Enoch`) we return
 ///   [`InteractiveGame::dump_state_for_player`], i.e. `GameState::for_player`,
 ///   in which every OTHER seat's cards are [`Card::Unknown`](shengji_mechanics::types::Card::Unknown)
 ///   and the kitty is hidden. These tiers therefore structurally cannot read
@@ -1014,7 +1014,7 @@ fn observed_state(
         // bypass; honest tiers never take this branch.
         game.dump_state()
     } else {
-        // HONEST (Easy/Hard/Expert): the redacted per-player view; opponents'
+        // HONEST (Easy/Expert/Enoch): the redacted per-player view; opponents'
         // cards are Card::Unknown and the kitty is hidden.
         game.dump_state_for_player(player)
     }

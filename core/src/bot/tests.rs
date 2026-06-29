@@ -351,7 +351,7 @@ fn play_hand_with_difficulties(difficulties: [BotDifficulty; 4]) -> Option<HandR
                     Some(actor) => {
                         // Mirror production's centralized honesty bypass
                         // (`bot::observed_state`): the honest tiers
-                        // (Easy/Hard/Expert) see only their own redacted
+                        // (Easy/Expert/Enoch) see only their own redacted
                         // per-player view, while the Omniscient CHEATER tier is
                         // handed the TRUE full state so its perfect-information
                         // search reads the real hands. Feeding Omniscient a
@@ -417,9 +417,9 @@ fn head_to_head(a: BotDifficulty, b: BotDifficulty, games: usize) -> (usize, usi
 ///
 /// We deliberately do NOT assert a win-rate / strength ordering here. At a tiny
 /// per-decision budget in a debug build the determinized search is starved
-/// (Hard ≈ the bare heuristic), so a small batch can lose to Easy purely by
-/// sampling noise — that made the old `hard_wins * 2 >= easy_wins` guard flaky.
-/// Strength ordering (Easy < Hard < Expert < Omniscient) is a statistical
+/// (Expert ≈ the bare heuristic), so a small batch can lose to Easy purely by
+/// sampling noise — that made the old strength guard flaky.
+/// Strength ordering (Easy < Expert <= Enoch < Omniscient) is a statistical
 /// property covered by the release-oriented, `#[ignore]`d
 /// `test_difficulty_ladder_monotonic` and printed by the `eval` example harness.
 #[test]
@@ -432,16 +432,15 @@ fn test_difficulty_ladder_mixed_tier_self_play_quick() {
     // Drive a couple of mixed-tier all-bot hands across every tier pairing and
     // assert each one runs to completion and attributes a winner. A small game
     // count per pairing keeps this well under ~30s even though several pairings
-    // run the (search-heavy) Hard / Expert / Omniscient tiers.
+    // run the (search-heavy) Expert / Enoch / Omniscient tiers.
     let pairings = [
-        (BotDifficulty::Omniscient, BotDifficulty::Hard),
+        (BotDifficulty::Omniscient, BotDifficulty::Expert),
         (BotDifficulty::Omniscient, BotDifficulty::Easy),
-        (BotDifficulty::Hard, BotDifficulty::Expert),
-        (BotDifficulty::Hard, BotDifficulty::Easy),
+        (BotDifficulty::Expert, BotDifficulty::Enoch),
         (BotDifficulty::Expert, BotDifficulty::Easy),
         // Enoch (the strongest HONEST tier) must run to completion against the
         // other tiers too, and self-play cleanly.
-        (BotDifficulty::Enoch, BotDifficulty::Hard),
+        (BotDifficulty::Enoch, BotDifficulty::Expert),
         (BotDifficulty::Enoch, BotDifficulty::Easy),
         (BotDifficulty::Enoch, BotDifficulty::Enoch),
         (BotDifficulty::Omniscient, BotDifficulty::Enoch),
@@ -460,16 +459,16 @@ fn test_difficulty_ladder_mixed_tier_self_play_quick() {
 }
 
 /// Heavier ladder assertion: the full strength ordering
-/// `Easy < Hard < Expert < Omniscient` by a stable margin. Ignored by default so
-/// normal CI stays fast; run with
+/// `Easy < Expert <= Enoch < Omniscient` by a stable margin. Ignored by default
+/// so normal CI stays fast; run with
 /// `cargo test -p shengji-core --release -- --ignored` (release strongly
 /// recommended: a debug build gets far fewer simulations per search budget, so
 /// the search tiers need more wall-clock to demonstrate their edge). The budget
 /// is set generously so the ordering holds even in a debug build.
 ///
-/// Expert is the net-guided determinized search (same machinery as Hard, but the
-/// learned net supplies the candidate prior + rollout policy), so it should now
-/// strictly BEAT Hard, not merely tie it.
+/// Expert is the net-guided determinized search; Enoch reuses the same search
+/// machinery but layers on the full-game competitive playbook, so Enoch should
+/// be at least as strong as Expert and both should strictly beat Easy.
 #[test]
 #[ignore]
 fn test_difficulty_ladder_monotonic() {
@@ -477,26 +476,26 @@ fn test_difficulty_ladder_monotonic() {
     let games = 60;
 
     // Perfect-information ceiling: Omniscient (cheating, full search over the
-    // true world) is at least as strong as Hard (same search, sampled worlds).
-    let (oh_o, oh_h) = head_to_head(BotDifficulty::Omniscient, BotDifficulty::Hard, games);
-    let (he_h, he_e) = head_to_head(BotDifficulty::Hard, BotDifficulty::Easy, games);
+    // true world) is at least as strong as Expert (same search, sampled worlds).
+    let (oh_o, oh_x) = head_to_head(BotDifficulty::Omniscient, BotDifficulty::Expert, games);
     let (xe_x, xe_e) = head_to_head(BotDifficulty::Expert, BotDifficulty::Easy, games);
-    // Net-guided Expert search should beat the hand-heuristic Hard search.
-    let (xh_x, xh_h) = head_to_head(BotDifficulty::Expert, BotDifficulty::Hard, games);
+    let (ne_n, ne_e) = head_to_head(BotDifficulty::Enoch, BotDifficulty::Easy, games);
+    // Enoch (playbook-driven search) should be at least as strong as Expert.
+    let (nx_n, nx_x) = head_to_head(BotDifficulty::Enoch, BotDifficulty::Expert, games);
 
     assert!(
-        oh_o >= oh_h,
-        "Omniscient ({}) should be at least as strong as Hard ({})",
+        oh_o >= oh_x,
+        "Omniscient ({}) should be at least as strong as Expert ({})",
         oh_o,
-        oh_h
+        oh_x
     );
-    assert!(he_h > he_e, "Hard ({}) should beat Easy ({})", he_h, he_e);
     assert!(xe_x > xe_e, "Expert ({}) should beat Easy ({})", xe_x, xe_e);
+    assert!(ne_n > ne_e, "Enoch ({}) should beat Easy ({})", ne_n, ne_e);
     assert!(
-        xh_x > xh_h,
-        "Expert ({}) should beat Hard ({}) (net-guided search > heuristic search)",
-        xh_x,
-        xh_h
+        nx_n >= nx_x,
+        "Enoch ({}) should be at least as strong as Expert ({}) (playbook-driven search)",
+        nx_n,
+        nx_x
     );
 }
 
@@ -642,7 +641,6 @@ fn test_observed_state_reveals_real_cards_only_for_omniscient() {
     // (2) Honest tiers: every other seat's cards must be Card::Unknown (redacted).
     for difficulty in [
         BotDifficulty::Easy,
-        BotDifficulty::Hard,
         BotDifficulty::Expert,
         BotDifficulty::Enoch,
     ] {
@@ -872,16 +870,16 @@ fn test_reset_with_bots_returns_to_lobby() {
 /// The same reset must terminate quickly even at a heavier (search-backed) tier,
 /// proving `advance_bots` never spins when a reset is pending.
 #[test]
-fn test_reset_with_bots_terminates_for_hard_tier() {
+fn test_reset_with_bots_terminates_for_search_tier() {
     std::env::set_var("SHENGJI_BOT_BUDGET_MS", "5");
     let logger = null_logger();
-    let (mut game, host, _all_ids) = human_plus_bots_in_play(&logger, BotDifficulty::Hard);
+    let (mut game, host, _all_ids) = human_plus_bots_in_play(&logger, BotDifficulty::Expert);
 
     apply_human_action(&mut game, Action::ResetGame, host, &logger);
 
     assert!(
         matches!(game.dump_state().unwrap(), GameState::Initialize(_)),
-        "reset with Hard bots must return to the lobby and not hang"
+        "reset with search-backed bots must return to the lobby and not hang"
     );
 }
 
@@ -2508,7 +2506,7 @@ fn test_human_not_robbed_of_bid_by_fallback() {
         // And no bot is *strategically* willing to bid such a weak hand.
         for &bot in &bot_ids {
             assert!(
-                policy::choose_bid(p, bot, BotDifficulty::Hard).is_none(),
+                policy::choose_bid(p, bot, BotDifficulty::Expert).is_none(),
                 "bot {:?} should NOT want a strategic bid on this weak hand",
                 bot
             );
@@ -2662,7 +2660,7 @@ fn test_human_not_robbed_of_counter_bid_by_strategic_bot_bid() {
         assert!(p.done_drawing(), "deck should be drained");
         assert!(!p.bid_decided(), "no bid should be decided yet");
         assert!(
-            policy::choose_bid(p, bidding_bot, BotDifficulty::Hard).is_some(),
+            policy::choose_bid(p, bidding_bot, BotDifficulty::Expert).is_some(),
             "the bot must strategically WANT to bid this strong spade hand"
         );
     } else {

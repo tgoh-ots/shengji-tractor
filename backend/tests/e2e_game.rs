@@ -231,13 +231,13 @@ async fn e2e_game_no_hidden_card_leakage() {
     // fill the 4-seat table.
     for difficulty in [
         BotDifficulty::Omniscient,
-        BotDifficulty::Hard,
+        BotDifficulty::Expert,
         BotDifficulty::Easy,
     ] {
         send_action(&mut socket, &Action::AddAIPlayer { difficulty }).await;
     }
 
-    // Keep the per-decision search budget tiny so the Omniscient/Hard bots play
+    // Keep the per-decision search budget tiny so the Omniscient/Expert bots play
     // fast and the test stays well within its time bound. (The server reads this
     // env var per decision.)
     std::env::set_var("SHENGJI_BOT_BUDGET_MS", "10");
@@ -300,7 +300,7 @@ async fn e2e_game_no_hidden_card_leakage() {
         }
 
         // Determine if it is our turn, and if so submit a legal move. We use the
-        // HONEST policy (Hard) on our OWN redacted view: it only returns an
+        // HONEST policy (Easy) on our OWN redacted view: it only returns an
         // action when `next_player == me`, and the action is guaranteed legal.
         let me = match game
             .propagated()
@@ -432,7 +432,7 @@ fn next_action_for(view: &GameState, me: PlayerID) -> Option<Action> {
 /// Concurrency regression test: chat must stay responsive while a bot is mid
 /// "thinking" (running its determinized search).
 ///
-/// We seat the human plus three `Hard` bots (which run the time-boxed search) and
+/// We seat the human plus three `Expert` bots (which run the time-boxed search) and
 /// give the search a LARGE per-move budget. We drive into the Play phase, then —
 /// at a moment when it is a BOT's turn (so a bot is computing its move off the
 /// game lock) — send a chat message and assert the server echoes it back PROMPTLY,
@@ -443,7 +443,7 @@ fn next_action_for(view: &GameState, me: PlayerID) -> Option<Action> {
 /// blocking worker without the lock, so the echo returns quickly.
 #[tokio::test]
 async fn e2e_chat_responsive_while_bot_thinks() {
-    // Give the Hard-bot search a big budget so a bot's "thinking" window is wide
+    // Give the Expert-bot search a big budget so a bot's "thinking" window is wide
     // and unmistakable; and stretch the per-action pause so bots act slowly,
     // widening the window in which it is a bot's turn. (Set before the server
     // starts handling actions; the server reads these per decision.)
@@ -486,12 +486,12 @@ async fn e2e_chat_responsive_while_bot_thinks() {
     }
     assert!(saw_initial_state, "never received an initial lobby State");
 
-    // Seat three Hard bots (they run the determinized search) and start.
+    // Seat three Expert bots (they run the determinized search) and start.
     for _ in 0..3 {
         send_action(
             &mut socket,
             &Action::AddAIPlayer {
-                difficulty: BotDifficulty::Hard,
+                difficulty: BotDifficulty::Expert,
             },
         )
         .await;
@@ -541,7 +541,7 @@ async fn e2e_chat_responsive_while_bot_thinks() {
             continue;
         }
 
-        // It is NOT our turn. Once we are in the Play phase, a Hard bot is now
+        // It is NOT our turn. Once we are in the Play phase, an Expert bot is now
         // computing its move (off the lock). Send a chat message and measure how
         // fast the server echoes it back. A responsive (non-blocking) server
         // returns it well within the 3s search budget; a lock-blocked one would
@@ -575,7 +575,7 @@ async fn e2e_chat_responsive_while_bot_thinks() {
     );
     let latency = chat_latency.expect("never received the chat echo back from the server");
 
-    // The Hard search budget is 3000ms. If the server held the game lock across the
+    // The Expert search budget is 3000ms. If the server held the game lock across the
     // bot computation (the old behavior), the chat echo would be delayed by ~the
     // full search. A non-blocking server echoes it back essentially immediately; we
     // assert comfortably under the budget to prove the lock is NOT held across the

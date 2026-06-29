@@ -1,6 +1,6 @@
 //! Heuristic Shengji policy: the backbone used directly by Easy and as
-//! the rollout / leaf policy inside Hard's determinized search (and the
-//! Expert tier's fallback).
+//! the rollout / leaf policy inside the Expert/Enoch determinized search (and
+//! the Expert tier's net-load fallback prior).
 //!
 //! Everything here is computed from the redacted per-player view only.
 //!
@@ -257,7 +257,7 @@ fn unseen_dominators(k: &Knowledge, trump: Trump, card: Card) -> usize {
 ///
 /// Everything here is HONEST — it derives only from the redacted per-player view
 /// (own hand + table + last trick), so the honesty invariant is preserved across
-/// Easy, Hard rollouts, and the heuristic backbone. Inside a determinized
+/// Easy, the determinized-search rollouts, and the heuristic backbone. Inside a determinized
 /// rollout the sampled world is a real `PlayPhase`, so boss reads stay correct
 /// ply-by-ply.
 pub struct EvalCtx {
@@ -295,7 +295,7 @@ pub struct EvalCtx {
 
 impl EvalCtx {
     /// Build the context once for the acting player `me` from the redacted view
-    /// (no Enoch playbook — used by Easy/Hard/Expert/Omniscient).
+    /// (no Enoch playbook — used by Easy/Expert/Omniscient).
     pub fn build(p: &PlayPhase, me: PlayerID) -> Self {
         Self::build_inner(p, me, false)
     }

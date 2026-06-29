@@ -12,12 +12,12 @@
 //!   * NewDefault — the new default boss-/partner-aware heuristic, GREEDY (no
 //!     search). This is the play scorer every honest tier shares; beating it shows
 //!     the Enoch playbook adds value on top of the improved heuristic.
-//!   * Hard       — the heuristic PLUS the time-boxed determinized search.
+//!   * Expert     — the learned-net prior PLUS the time-boxed determinized search.
 //!   * Omniscient — the perfect-information CHEATER (an upper bound; Enoch is
 //!     honest, so it is expected to LOSE to Omniscient — we report how close).
 //!
 //! For speed the Enoch / NewDefault play is GREEDY (`choose_play_direct*`, no
-//! search); Hard / Omniscient run their real (search-based) policy with a small
+//! search); Expert / Omniscient run their real (search-based) policy with a small
 //! per-decision budget. The declare / kitty / endgame RULES apply deterministically
 //! regardless. Set `SHENGJI_BOT_BUDGET_MS` to trade strength for speed in the
 //! search tiers.
@@ -71,7 +71,7 @@ impl Brain {
     fn declare_difficulty(self) -> BotDifficulty {
         match self {
             Brain::EnochGreedy => BotDifficulty::Enoch,
-            Brain::NewDefault => BotDifficulty::Hard,
+            Brain::NewDefault => BotDifficulty::Expert,
             Brain::Tier(d) => d,
         }
     }
@@ -372,10 +372,10 @@ fn main() {
     // 1) Enoch-greedy vs the new-default greedy heuristic (the shared play scorer)
     //    — isolates the value of the Enoch playbook on top of the heuristic.
     run_match(Brain::EnochGreedy, Brain::NewDefault, num_games, base_seed);
-    // 2) The REAL Enoch tier (search) vs Hard (search) — search-vs-search.
+    // 2) The REAL Enoch tier (search) vs Expert (search) — search-vs-search.
     run_match(
         Brain::Tier(BotDifficulty::Enoch),
-        Brain::Tier(BotDifficulty::Hard),
+        Brain::Tier(BotDifficulty::Expert),
         num_games,
         base_seed,
     );

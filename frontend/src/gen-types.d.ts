@@ -190,17 +190,13 @@ export type Action =
       PlayCardsWithHint: [Card[], TrickUnit[]];
     };
 /**
- * The difficulty of a bot player. The five tiers form a strength ladder `Easy < Hard <= Expert <= Enoch < Omniscient`:
+ * The difficulty of a bot player. The four user-selectable tiers form a strength ladder `Easy < Expert <= Enoch < Omniscient`:
  *
- * * `Easy` — the bare heuristic backbone played noisily (frequent blunders, hot softmax, no card memory or search). Feels like a casual human. * `Hard` — the same heuristic PLUS a time-boxed determinized (ISMCTS-style) search over sampled worlds. Honest. * `Expert` — a learned neural net (a small MLP trained by behavioral cloning / distillation of the Omniscient teacher's choices) scores each legal candidate from HONEST features only. It approximates perfect-info play from the honest observation. If the model fails to load/run it falls back to the `Hard` heuristic, so Expert is never illegal/None. Honest. * `Enoch` — the strongest HONEST tier. It REUSES the `Hard` determinized search over the improved boss-/partner-aware heuristic and LAYERS ON a full competitive playbook (transcribed from a Shengji enthusiast — see `docs/strategy/double-holder.txt`) that the other tiers don't model: pair-prioritized trump declaration, disciplined point-scaled kitty burial, tractor-first leading, long-suit running, a defender low-trump hand-off, and endgame kitty protection. Like the other honest tiers it consults ONLY its own redacted, per-player view — it never sees a hidden hand. * `Omniscient` — a DELIBERATE, clearly-labeled, opt-in CHEATING tier that plays with PERFECT INFORMATION (it is allowed to see every opponent's hand). It exists for testing and for an "impossible" practice opponent; it must be chosen explicitly in the lobby and is surfaced with a cheater badge in the UI.
+ * * `Easy` — the bare heuristic backbone played noisily (occasional blunders, warm softmax, no card memory or search). Feels like a casual human; clearly beatable. * `Expert` — a learned neural net (a small MLP trained by behavioral cloning / distillation of the Omniscient teacher's choices) scores each legal candidate from HONEST features only, used as the PRIOR of a time-boxed determinized (ISMCTS-style) search over sampled worlds. It approximates perfect-info play from the honest observation. If the model fails to load/run the search prior transparently falls back to the shared hand-written heuristic, so Expert is never illegal/None. Honest. * `Enoch` — the strongest HONEST tier. It REUSES the same determinized search over the improved boss-/partner-aware heuristic and LAYERS ON a full competitive playbook (transcribed from a Shengji enthusiast — see `docs/strategy/double-holder.txt`) that the other tiers don't model: pair-prioritized trump declaration, disciplined point-scaled kitty burial, tractor-first leading, long-suit running, a defender low-trump hand-off, and endgame kitty protection. Like the other honest tiers it consults ONLY its own redacted, per-player view — it never sees a hidden hand. * `Omniscient` — a DELIBERATE, clearly-labeled, opt-in CHEATING tier that plays with PERFECT INFORMATION (it is allowed to see every opponent's hand). It exists for testing and for an "impossible" practice opponent; it must be chosen explicitly in the lobby and is surfaced with a cheater badge in the UI.
  *
- * The four honest tiers (`Easy`/`Hard`/`Expert`/`Enoch`) never receive anything but their own redacted, per-player view — see [`observed_state`], which is the single, centralized place where the perfect-information bypass is gated.
+ * The three honest tiers (`Easy`/`Expert`/`Enoch`) never receive anything but their own redacted, per-player view — see [`observed_state`], which is the single, centralized place where the perfect-information bypass is gated.
  */
-export type BotDifficulty =
-  | ("Easy" | "Hard")
-  | "Expert"
-  | "Enoch"
-  | "Omniscient";
+export type BotDifficulty = "Easy" | "Expert" | "Enoch" | "Omniscient";
 export type Number = string;
 export type FriendSelectionPolicy =
   | "Unrestricted"

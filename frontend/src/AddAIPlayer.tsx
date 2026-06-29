@@ -14,18 +14,12 @@ import type { JSX } from "react";
  *   - Remove: { Action: { RemoveAIPlayer: playerId } }
  */
 
-const DIFFICULTIES: BotDifficulty[] = [
-  "Easy",
-  "Hard",
-  "Expert",
-  "Enoch",
-  "Omniscient",
-];
+const DIFFICULTIES: BotDifficulty[] = ["Easy", "Expert", "Enoch", "Omniscient"];
 
 const AddAIPlayer = (): JSX.Element => {
   const { send } = React.useContext(WebsocketContext);
   const { t } = useTranslation();
-  const [difficulty, setDifficulty] = React.useState<BotDifficulty>("Hard");
+  const [difficulty, setDifficulty] = React.useState<BotDifficulty>("Expert");
 
   const addBot = (): void => {
     send({ Action: { AddAIPlayer: { difficulty } } });
