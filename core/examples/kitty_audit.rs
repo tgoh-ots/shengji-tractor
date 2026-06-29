@@ -14,6 +14,7 @@
 //!   * default — `choose_kitty` (the shared heuristic every non-Enoch tier uses);
 //!   * enoch   — `choose_kitty_enoch` (the point-budgeted playbook discipline);
 //!   * min-pts — a naive "bury the fewest points, then lowest cards" baseline.
+//!
 //! We report, per strategy, the avg landlord-team margin and avg points buried,
 //! plus how often `default` is the BEST candidate and the avg margin it concedes
 //! to the best ("regret"). A large regret ⇒ the kitty heuristic is leaking and a
@@ -84,11 +85,7 @@ fn force_burial(ex: &mut ExchangePhase, landlord: PlayerID, target: &[Card]) -> 
             continue;
         }
         // 2) Bury a still-missing target card that we hold in hand.
-        let hand_counts = ex
-            .hands()
-            .get(landlord)
-            .map(|h| h.clone())
-            .unwrap_or_default();
+        let hand_counts = ex.hands().get(landlord).cloned().unwrap_or_default();
         let missing = target_counts.iter().find(|(c, &want)| {
             kitty_counts.get(c).copied().unwrap_or(0) < want
                 && hand_counts.get(c).copied().unwrap_or(0) > 0

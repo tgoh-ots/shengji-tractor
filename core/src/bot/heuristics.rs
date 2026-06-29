@@ -1756,15 +1756,6 @@ pub fn bid_strength(hand: &[Card], candidate: Trump) -> f64 {
     score
 }
 
-/// Whether the hand is strong enough to justify making the given bid (rather
-/// than passing / letting someone else take it). Threshold tuned so we don't
-/// overbid a weak hand.
-pub fn should_bid(hand: &[Card], candidate: Trump, current_best: f64) -> bool {
-    let strength = bid_strength(hand, candidate);
-    // Only bid if our hand is meaningfully strong in this trump.
-    strength >= 10.0 && strength > current_best + 1.0
-}
-
 /// Enoch's trump-declaration evaluation. Same backbone as [`bid_strength`] but it
 /// PRIORITIZES PAIRS in the candidate trump suit per the enthusiast's playbook:
 /// "a pair of trump cards is worth like three or four non-pair trump cards." We

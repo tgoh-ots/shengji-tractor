@@ -4045,14 +4045,15 @@ mod tests {
             "4 twos + 4 threes must be legal when hand has them"
         );
 
-        // Invalid play: 8 mixed-rank cards (no rank has count ≥ 4).
+        // Re-ordered but still 4 twos + 4 threes, so this is a VALID play: any
+        // assignment that satisfies both units must be accepted.
         assert!(
-            !tf.is_legal_play(
+            tf.is_legal_play(
                 &hand_can,
-                &[C_2, D_2, H_2, S_3, C_3, D_3, H_3, S_2], // still 4 twos + 4 threes
+                &[C_2, D_2, H_2, S_3, C_3, D_3, H_3, S_2],
                 TrickDrawPolicy::NoProtections,
                 BombPolicy::NoBombs,
-            ) || true, // this is still satisfiable — just verify it doesn't panic
+            ),
             "any valid assignment must be accepted"
         );
 

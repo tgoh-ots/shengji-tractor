@@ -761,15 +761,6 @@ impl<'d> Deserialize<'d> for Suit {
 }
 
 impl Suit {
-    pub fn unicode_offset(self) -> char {
-        match self {
-            Suit::Spades => '\u{1f0a0}',
-            Suit::Hearts => '\u{1f0b0}',
-            Suit::Diamonds => '\u{1f0c0}',
-            Suit::Clubs => '\u{1f0d0}',
-        }
-    }
-
     pub fn as_char(self) -> char {
         match self {
             Suit::Hearts => '♡',

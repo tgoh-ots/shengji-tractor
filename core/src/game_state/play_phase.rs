@@ -350,7 +350,7 @@ impl PlayPhase {
             failed_throw_size,
         } = self.trick.complete()?;
 
-        let kitty_multipler = match self.propagated.kitty_penalty {
+        let kitty_multiplier = match self.propagated.kitty_penalty {
             KittyPenalty::Times => 2 * largest_trick_unit_size,
             KittyPenalty::Power => 2usize.pow(largest_trick_unit_size as u32),
         };
@@ -424,14 +424,14 @@ impl PlayPhase {
                     cards: self.kitty.clone(),
                 });
             }
-            for _ in 0..kitty_multipler {
+            for _ in 0..kitty_multiplier {
                 new_points.extend(kitty_points.iter().copied());
             }
             let raw_kitty_points = kitty_points.iter().flat_map(|c| c.points()).sum::<usize>();
-            if !kitty_points.is_empty() && kitty_multipler > 0 {
+            if !kitty_points.is_empty() && kitty_multiplier > 0 {
                 msgs.push(MessageVariant::PointsInKitty {
                     points: raw_kitty_points,
-                    multiplier: kitty_multipler,
+                    multiplier: kitty_multiplier,
                 });
             }
             // The kitty bonus is attached to the winner of the last trick, but
@@ -439,7 +439,7 @@ impl PlayPhase {
             // (non-landlord) team wins it. Report who the kitty went to.
             msgs.push(MessageVariant::KittyScored {
                 kitty_points: raw_kitty_points,
-                multiplier: kitty_multipler,
+                multiplier: kitty_multiplier,
                 awarded_to_landlord_team: self.landlords_team.contains(&winner),
                 winner,
             });

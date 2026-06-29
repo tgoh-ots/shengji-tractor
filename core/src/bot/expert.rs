@@ -107,12 +107,7 @@ type Model = tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedM
 /// which case the caller falls back to the hand-written heuristic.
 fn model() -> Option<&'static Model> {
     static MODEL: OnceLock<Option<Model>> = OnceLock::new();
-    MODEL
-        .get_or_init(|| match load_model() {
-            Ok(m) => Some(m),
-            Err(_) => None,
-        })
-        .as_ref()
+    MODEL.get_or_init(|| load_model().ok()).as_ref()
 }
 
 /// Parse and optimize the ONNX model into a runnable plan, choosing the byte
@@ -340,19 +335,19 @@ fn norm_strength(s: i32) -> f32 {
 /// Honest card-memory features (from [`Knowledge::from_play_view`], all derived
 /// from the redacted view + public play history — never hidden hands):
 /// * 28 — fraction of all trumps still UNSEEN by me (in opponents' hidden hands
-///         or the kitty) / total trumps; high ⇒ over-trumping is a real risk
+///   or the kitty) / total trumps; high ⇒ over-trumping is a real risk
 /// * 29 — my trumps as a share of all still-live (unseen + mine) trumps; high ⇒
-///         I dominate the trump suit and my trumps/leads are safer
+///   I dominate the trump suit and my trumps/leads are safer
 /// * 30 — fraction of the next-to-act opponents that are KNOWN void in the led
-///         suit (0 if leading / nobody known void); informs whether a side-suit
-///         winner is safe or will be trumped
+///   suit (0 if leading / nobody known void); informs whether a side-suit
+///   winner is safe or will be trumped
 /// * 31 — at least one opponent yet to act is known void in the led suit (0/1)
 /// * 32 — points still unseen (in hidden hands + kitty) / 100; how much is left
-///         to fight over in the rest of the hand
+///   to fight over in the rest of the hand
 /// * 33 — my seat position in the trick: seats that have already acted / 3
-///         (0 = I lead, ~1 = I act last); pairs with f12 (am-I-last)
+///   (0 = I lead, ~1 = I act last); pairs with f12 (am-I-last)
 /// * 34 — this candidate's max card is a GUARANTEED current winner given what I
-///         can see (no unseen card can beat it in its suit) (0/1)
+///   can see (no unseen card can beat it in its suit) (0/1)
 /// * 35 — game progress: cards already played this hand / deck size (0=start)
 pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; FEATURE_DIM] {
     let mut f = [0.0f32; FEATURE_DIM];

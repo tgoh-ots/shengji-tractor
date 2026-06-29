@@ -6,7 +6,6 @@
   "license": "MIT",
   "dependencies": {
     "@sentry/react": "^9.13.0",
-    "@sentry/tracing": "^7.120.3",
     "@types/canvas-confetti": "^1.0.0",
     "@types/classnames": "^2.2.10",
     "@types/jest": "^29.5.14",
@@ -20,6 +19,7 @@
     "jest": "^29.7.0",
     "json-schema-to-typescript": "^15.0.4",
     "react": "19.1.0",
+    "react-color": "^2.18.1",
     "react-dom": "19.1.0",
     "react-is": "^19.1.0",
     "react-modal": "^3.11.2",
@@ -31,7 +31,6 @@
     "ts-loader": "^9.5.1",
     "typescript": "^5.7.2"
   },
-  "prettier": {},
   "scripts": {
     "build": "rimraf dist/ && webpack",
     "dev": "rimraf dist/ && webpack --mode=development",
@@ -57,13 +56,11 @@
     "eslint-plugin-promise": "^7.2.1",
     "eslint-plugin-react": "^7.37.2",
     "globals": "^16.0.0",
-    "hook-shell-script-webpack-plugin": "^0.4.0",
     "html-webpack-plugin": "^5.3.2",
     "mini-css-extract-plugin": "^2.9.2",
     "postcss": "^8.5.15",
     "postcss-loader": "^8.2.1",
     "prettier": "^3.4.1",
-    "react-color": "^2.18.1",
     "rimraf": "^6.0.1",
     "tailwindcss": "^4.3.1",
     "terser-webpack-plugin": "^5.1.3",

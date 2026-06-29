@@ -60,7 +60,7 @@ fn play_one_hand_ab(
     // Seats 0,2 are the landlord (defending) team; 1,3 attack. Tier `a` occupies
     // the landlord team iff `a_is_landlord_team`.
     let tier_of = |idx: usize| -> BotDifficulty {
-        let is_landlord_team = idx % 2 == 0;
+        let is_landlord_team = idx.is_multiple_of(2);
         if is_landlord_team == a_is_landlord_team {
             a
         } else {
@@ -238,11 +238,11 @@ fn main() {
     println!("{:>10}", "OVERALL");
     for i in 0..n {
         print!("{:>12}", tier_label(TIERS[i]));
-        for j in 0..n {
+        for (j, rate) in win_rate[i].iter().enumerate() {
             if i == j {
                 print!("{:>12}", "—");
             } else {
-                print!("{:>11.1}%", win_rate[i][j]);
+                print!("{:>11.1}%", rate);
             }
         }
         let overall = if games_for[i] > 0 {
@@ -264,11 +264,11 @@ fn main() {
     println!();
     for i in 0..n {
         print!("{:>12}", tier_label(TIERS[i]));
-        for j in 0..n {
+        for (j, m) in margin[i].iter().enumerate() {
             if i == j {
                 print!("{:>12}", "—");
             } else {
-                print!("{:>+12.2}", margin[i][j]);
+                print!("{:>+12.2}", m);
             }
         }
         println!();

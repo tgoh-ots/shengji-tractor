@@ -8,6 +8,7 @@
     "target": "es5",
     "jsx": "react",
     "allowJs": true,
+    "skipLibCheck": true,
     "lib": ["dom", "es6", "es2017", "es2019", "esnext.asynciterable", "esnext.array"],
     "noUnusedLocals": true
   },

@@ -186,7 +186,7 @@ fn play_one_hand(
     // Seats 0,2 are the landlord (defending) team; 1,3 attack. The NEW config
     // occupies the landlord team iff `new_is_landlord_team`.
     let side_of = |seat_idx: usize| -> (Side, bool) {
-        let is_landlord_team = seat_idx % 2 == 0;
+        let is_landlord_team = seat_idx.is_multiple_of(2);
         let is_new = is_landlord_team == new_is_landlord_team;
         if is_new {
             (new_side, true)

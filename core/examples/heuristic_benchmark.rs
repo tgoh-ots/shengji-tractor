@@ -38,7 +38,7 @@ struct GameOutcome {
 /// always the landlord. `new_is_landlord_team` chooses which partnership uses the
 /// NEW heuristic this hand.
 fn version_for_seat(seat_idx: usize, new_is_landlord_team: bool) -> HeuristicVersion {
-    let is_landlord_team = seat_idx % 2 == 0;
+    let is_landlord_team = seat_idx.is_multiple_of(2);
     if is_landlord_team == new_is_landlord_team {
         HeuristicVersion::New
     } else {

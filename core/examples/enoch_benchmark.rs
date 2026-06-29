@@ -84,7 +84,7 @@ fn play_one_hand_ab(
     rng: &mut StdRng,
 ) -> Option<GameOutcome> {
     let brain_of = |idx: usize| -> Brain {
-        let is_landlord_team = idx % 2 == 0;
+        let is_landlord_team = idx.is_multiple_of(2);
         if is_landlord_team == enoch_is_landlord_team {
             enoch
         } else {

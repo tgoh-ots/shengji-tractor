@@ -69,7 +69,7 @@ const JoinRoom = (props: IProps): JSX.Element => {
     window.crypto.getRandomValues(arr);
     setShouldGenerate(false);
     props.setRoomName(
-      Array.from(arr, (d) => ("0" + d.toString(16)).substr(-2)).join(""),
+      Array.from(arr, (d) => ("0" + d.toString(16)).slice(-2)).join(""),
     );
   };
 
@@ -135,6 +135,7 @@ const JoinRoom = (props: IProps): JSX.Element => {
           <a
             href={`rules.html?lang=${lang}`}
             target="_blank"
+            rel="noreferrer"
             className="text-[var(--accent)] underline"
           >
             {t("join.readRules")}

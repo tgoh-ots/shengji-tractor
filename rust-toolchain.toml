@@ -1,0 +1,10 @@
+# Pin the Rust toolchain so the build is reproducible everywhere (local,
+# CI, and the Fly.io deploy image). The backend compiles with
+# `#![deny(warnings)]`, so a floating `stable` could turn a green main into a
+# hard deploy failure the moment a new release adds a lint. Workspace deps need
+# rustc >= 1.87; 1.92.0 is the version the repo is developed and verified against
+# (see CLAUDE.md). Bump deliberately, then re-run fmt/clippy/test.
+[toolchain]
+channel = "1.92.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

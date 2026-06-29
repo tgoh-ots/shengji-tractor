@@ -151,7 +151,7 @@ fn test_bot_view_hides_other_seats_cards() {
                 break;
             }
         }
-        match next_bot_action(&mut game, false).unwrap() {
+        match next_bot_action(&game, false).unwrap() {
             Some((bot_id, action)) => {
                 game.interact(action, bot_id, &logger).unwrap();
             }
@@ -522,7 +522,7 @@ fn test_determinizer_respects_counts_and_seen_cards() {
                 break;
             }
         }
-        match next_bot_action(&mut game, false).unwrap() {
+        match next_bot_action(&game, false).unwrap() {
             Some((id, action)) => {
                 game.interact(action, id, &logger).unwrap();
             }
@@ -596,7 +596,7 @@ fn test_determinizer_full_memory_conserves_played_cards() {
                 break;
             }
         }
-        match next_bot_action(&mut game, false).unwrap() {
+        match next_bot_action(&game, false).unwrap() {
             Some((id, action)) => {
                 game.interact(action, id, &logger).unwrap();
             }
@@ -1235,7 +1235,7 @@ fn test_deal_one_human_three_bots_normal() {
             if turn == host {
                 game.interact(Action::DrawCard, host, &logger).unwrap();
             } else {
-                let (bot_id, action) = next_bot_action(&mut game, false)
+                let (bot_id, action) = next_bot_action(&game, false)
                     .unwrap()
                     .expect("a bot must be able to act on its turn");
                 // A bot may DECLARE a trump suit mid-draw (an opening declaration
@@ -1484,7 +1484,7 @@ fn test_deal_bot_is_landlord_buries_legal_kitty() {
                             // Human's turn to draw.
                             game.interact(Action::DrawCard, host, &logger).unwrap();
                         } else if let Some((bot_id, action)) =
-                            next_bot_action(&mut game, false).unwrap()
+                            next_bot_action(&game, false).unwrap()
                         {
                             game.interact(action, bot_id, &logger).unwrap();
                         } else {
@@ -1495,7 +1495,7 @@ fn test_deal_bot_is_landlord_buries_legal_kitty() {
                         // is a bot, the bot driver picks up; if it's the human, the
                         // human picks up (it became the winning bidder only if it
                         // bid, which it didn't — so this is a bot).
-                        if let Some((bot_id, action)) = next_bot_action(&mut game, false).unwrap() {
+                        if let Some((bot_id, action)) = next_bot_action(&game, false).unwrap() {
                             game.interact(action, bot_id, &logger).unwrap();
                         } else if p.next_player().map(|n| n == host).unwrap_or(false) {
                             game.interact(Action::PickUpKitty, host, &logger).unwrap();
@@ -1507,7 +1507,7 @@ fn test_deal_bot_is_landlord_buries_legal_kitty() {
                         // driver bid / reveal; if it can't and the human is the
                         // responsible seat, the human reveals the bottom (legal only
                         // when a landlord exists) to make progress.
-                        if let Some((bot_id, action)) = next_bot_action(&mut game, false).unwrap() {
+                        if let Some((bot_id, action)) = next_bot_action(&game, false).unwrap() {
                             game.interact(action, bot_id, &logger).unwrap();
                         } else if p.next_player().map(|n| n == host).unwrap_or(false) {
                             // Bots cannot bid and won't reveal; the human must act to
@@ -1546,9 +1546,7 @@ fn test_deal_bot_is_landlord_buries_legal_kitty() {
                     }
                     if let Some(action) = next_action_for_human(&state, host) {
                         game.interact(action, host, &logger).unwrap();
-                    } else if let Some((bot_id, action)) =
-                        next_bot_action(&mut game, false).unwrap()
-                    {
+                    } else if let Some((bot_id, action)) = next_bot_action(&game, false).unwrap() {
                         game.interact(action, bot_id, &logger).unwrap();
                     } else {
                         panic!("trial {}: exchange stalled with no actor", trial);
@@ -3897,7 +3895,7 @@ fn test_enoch_full_memory_recalls_earlier_tricks_and_exact_boss() {
             }
         }
 
-        match next_bot_action(&mut game, false).unwrap() {
+        match next_bot_action(&game, false).unwrap() {
             Some((id, action)) => {
                 game.interact(action, id, &logger).unwrap();
             }

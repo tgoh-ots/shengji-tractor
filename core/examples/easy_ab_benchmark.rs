@@ -94,7 +94,7 @@ fn play_one_hand_ab(
     // Seats 0,2 are the landlord (defending) team. The NEW knobs occupy the
     // landlord team iff `new_is_landlord_team`.
     let seat_of = |idx: usize| -> Seat {
-        let is_landlord_team = idx % 2 == 0;
+        let is_landlord_team = idx.is_multiple_of(2);
         if is_landlord_team == new_is_landlord_team {
             new_knobs.seat()
         } else {

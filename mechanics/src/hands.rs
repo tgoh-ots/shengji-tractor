@@ -146,6 +146,7 @@ impl Hands {
         !self.hands.values().any(|h| h.values().any(|c| *c > 0))
     }
 
+    #[cfg(test)]
     pub fn _get_cards(&self, id: PlayerID) -> Result<Vec<Card>, HandError> {
         self.exists(id)?;
         let mut cards = Card::cards(self.hands[&id].iter())

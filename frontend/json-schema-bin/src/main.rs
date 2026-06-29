@@ -11,7 +11,7 @@ use shengji_types::wasm_rpc::{
     ScoreSegment, SortAndGroupCardsRequest, SortAndGroupCardsResponse, SuitGroup,
 };
 use shengji_types::GameMessage;
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 #[derive(JsonSchema)]
 pub struct _Combined {
@@ -47,7 +47,7 @@ fn main() {
     let path = &args[1];
     let contents = serde_json::to_string_pretty(&schema_for!(_Combined)).unwrap();
 
-    let tmp = TempDir::new("jsonschema").unwrap();
+    let tmp = TempDir::new().unwrap();
     let tmp_path = tmp.path().join("tmp.json");
     std::fs::write(&tmp_path, &contents).unwrap();
 

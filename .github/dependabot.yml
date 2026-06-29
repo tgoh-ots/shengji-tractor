@@ -5,3 +5,17 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+
+  # Rust crates (the whole Cargo workspace lives at the repo root).
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # Frontend npm packages.
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
