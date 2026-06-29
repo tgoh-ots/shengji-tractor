@@ -39,8 +39,22 @@ import sys
 from collections import defaultdict
 
 import numpy as np
-import torch
-import torch.nn as nn
+
+# torch is only needed for TRAINING/EXPORT, not for the pure-numpy `--analyze`
+# data diagnostic. Import it lazily so the aliasing analysis runs with just numpy
+# (no heavy torch install). When torch is absent, `CandidateScorer` still DEFINES
+# (inheriting `object`); only INSTANTIATING it — the training path — needs torch.
+try:
+    import torch
+    import torch.nn as nn
+
+    _NN_MODULE = nn.Module
+    _HAS_TORCH = True
+except ModuleNotFoundError:
+    torch = None
+    nn = None
+    _NN_MODULE = object
+    _HAS_TORCH = False
 
 # The feature dimension MUST match `bot::expert::FEATURE_DIM` in the Rust crate.
 FEATURE_DIM = 36
@@ -87,7 +101,71 @@ def load_groups(path):
     return groups
 
 
-class CandidateScorer(nn.Module):
+def analyze_aliasing(groups, granularities=(2, 1, 0)):
+    """Estimate the BEHAVIORAL-CLONING CEILING: how often the HONEST features
+    simply cannot identify the teacher's pick.
+
+    The Expert net is trained to imitate a PERFECT-INFORMATION teacher from
+    HONEST-only features. For many positions that is information-theoretically
+    impossible: two candidates with identical honest features can carry different
+    labels depending on UNSEEN cards. This irreducible "aliasing floor" is a hard
+    cap that more epochs / a bigger net / more data cannot cross — so its size
+    tells you whether to keep polishing the policy (low floor) or invest elsewhere
+    (high floor → value head / kitty, per docs/bot-training-roadmap.md).
+
+    Two complementary metrics, reported at several rounding granularities (coarser
+    rounding collides more vectors → a more conservative/looser floor):
+
+      * row-level Bayes error — bucket every candidate row by its rounded feature
+        vector; the best any function of these features can do is predict each
+        bucket's MAJORITY label, so the majority-vote error (rows whose label !=
+        their bucket majority) is a floor on per-candidate error.
+      * decision-level unwinnable rate — the fraction of decisions where the
+        teacher's chosen candidate shares a rounded feature key with a REJECTED
+        candidate in the SAME decision: an UNWINNABLE decision for any
+        honest-feature scorer (the listwise top-1 task can never separate them).
+    """
+    from collections import defaultdict
+
+    n_rows = sum(g[0].shape[0] for g in groups)
+    n_groups = len(groups)
+    print("\n=== label-aliasing analysis (behavioral-cloning ceiling) ===")
+    avg_c = n_rows / max(1, n_groups)
+    print(f"{n_groups} decisions, {n_rows} candidate rows.")
+    print(f"avg {avg_c:.2f} candidates/decision; random-guess top-1 ≈ {1.0 / avg_c:.1%}")
+
+    for dec in granularities:
+        buckets_pos = defaultdict(int)
+        buckets_tot = defaultdict(int)
+        collided = 0
+        for X, y in groups:
+            keys = [tuple(np.round(X[i], dec).tolist()) for i in range(X.shape[0])]
+            for i, k in enumerate(keys):
+                buckets_tot[k] += 1
+                if i == y:
+                    buckets_pos[k] += 1
+            chosen = keys[y]
+            if any(j != y and keys[j] == chosen for j in range(len(keys))):
+                collided += 1
+        # Row-level majority-vote (Bayes) error.
+        maj_err_rows = sum(
+            tot - max(buckets_pos[k], tot - buckets_pos[k])
+            for k, tot in buckets_tot.items()
+        )
+        maj_err = maj_err_rows / max(1, n_rows)
+        coll_frac = collided / max(1, n_groups)
+        print(
+            f"  round={dec}dp: row Bayes-error floor {maj_err:5.1%}  |  "
+            f"unwinnable decisions {coll_frac:5.1%}  "
+            f"({len(buckets_tot)} distinct feature keys)"
+        )
+    print(
+        "Higher = more of the teacher signal is unidentifiable from honest "
+        "features (a ceiling that cloning / bigger nets / more data cannot cross)."
+    )
+
+
+class CandidateScorer(_NN_MODULE):
     """MLP scoring ONE candidate feature vector -> scalar logit.
 
     A 3-hidden-layer net (`in -> hidden -> hidden -> hidden//2 -> 1`) with ReLU
@@ -230,10 +308,15 @@ def main():
     )
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--analyze",
+        action="store_true",
+        help="report the label-aliasing / behavioral-cloning ceiling and exit "
+        "(no training). See analyze_aliasing.",
+    )
     args = ap.parse_args()
 
     np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
 
     if not os.path.exists(args.data):
         sys.exit(
@@ -244,6 +327,19 @@ def main():
     groups = load_groups(args.data)
     if not groups:
         sys.exit("No usable training groups found in the data.")
+
+    if args.analyze:
+        analyze_aliasing(groups)
+        return
+
+    if not _HAS_TORCH:
+        sys.exit(
+            "Training requires PyTorch. Install the training deps first:\n"
+            "  pip install -r requirements.txt\n"
+            "(The --analyze data diagnostic runs with just numpy.)"
+        )
+    # torch is required from here on (seeding, model, training, export).
+    torch.manual_seed(args.seed)
 
     # Train/val split by group.
     perm = np.random.permutation(len(groups))

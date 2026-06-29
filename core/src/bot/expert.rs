@@ -75,6 +75,18 @@ pub const FEATURE_DIM: usize = 36;
 /// `onnxruntime` / `ort` C dependency).
 static MODEL_BYTES: &[u8] = include_bytes!("expert_model.onnx");
 
+/// Environment variable that, when set to a readable path, overrides the embedded
+/// [`MODEL_BYTES`] with an ONNX model loaded from disk AT RUNTIME.
+///
+/// The net is otherwise [`include_bytes!`]-baked into the binary, so A/B-testing a
+/// freshly-trained net costs a full Rust rebuild. This override lets the eval
+/// harness (and a manual `cargo run --example ...`) swap in a candidate model with
+/// just a flag — the single biggest iteration-speed unlock for net training (see
+/// `docs/bot-training-roadmap.md`). Read ONCE, lazily, on the first Expert
+/// decision (the model is cached in a [`OnceLock`]), so set it BEFORE the process
+/// makes any bot decision. Leave it unset in production to use the embedded net.
+pub const MODEL_PATH_ENV: &str = "SHENGJI_EXPERT_MODEL_PATH";
+
 type Model = tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedModel>;
 
 /// Lazily-parsed model, shared across all Expert decisions. `None` means the
@@ -90,19 +102,38 @@ fn model() -> Option<&'static Model> {
         .as_ref()
 }
 
-/// Parse and optimize the embedded ONNX model into a runnable plan. The model
-/// takes a single input named `x` of shape `[N, FEATURE_DIM]` (a batch of N
-/// candidates) and produces `[N, 1]` logits.
+/// Parse and optimize the ONNX model into a runnable plan, choosing the byte
+/// source: a runtime override file ([`MODEL_PATH_ENV`]) if set, else the embedded
+/// [`MODEL_BYTES`].
+///
+/// When the override is set but the file cannot be read, we surface the error (so
+/// the caller's fall-back to the heuristic is the SAME as a missing net) rather
+/// than silently using the embedded net — a silent fallback would make a net A/B
+/// quietly compare the embedded net against itself.
 fn load_model() -> tract_onnx::prelude::TractResult<Model> {
+    match std::env::var_os(MODEL_PATH_ENV) {
+        Some(path) if !path.is_empty() => {
+            let bytes = std::fs::read(&path)
+                .map_err(|e| anyhow::anyhow!("failed to read {MODEL_PATH_ENV} ({path:?}): {e}"))?;
+            model_from_bytes(&bytes)
+        }
+        _ => model_from_bytes(MODEL_BYTES),
+    }
+}
+
+/// Parse and optimize ONNX bytes into a runnable plan. The model takes a single
+/// input named `x` of shape `[N, FEATURE_DIM]` (a batch of N candidates) and
+/// produces `[N, 1]` logits.
+fn model_from_bytes(bytes: &[u8]) -> tract_onnx::prelude::TractResult<Model> {
     use tract_onnx::prelude::*;
 
     // A near-empty / placeholder file can't be a valid ONNX graph; bail early so
     // we fall back to the heuristic rather than erroring deeper in the parser.
-    if MODEL_BYTES.len() < 64 {
+    if bytes.len() < 64 {
         anyhow::bail!("expert model is a placeholder (too small to be ONNX)");
     }
 
-    let mut cursor = std::io::Cursor::new(MODEL_BYTES);
+    let mut cursor = std::io::Cursor::new(bytes);
     let mut model = tract_onnx::onnx().model_for_read(&mut cursor)?;
     // Fix the input to a runtime-variable batch (`N`) of FEATURE_DIM-length rows
     // so a single inference call can score a whole candidate set at once.
@@ -541,4 +572,54 @@ pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; 
     f[35] = (revealed as f32 / deck_size as f32).clamp(0.0, 1.0);
 
     f
+}
+
+#[cfg(test)]
+mod model_path_tests {
+    use super::*;
+
+    /// The embedded model + the runtime override ([`MODEL_PATH_ENV`]) round-trip,
+    /// and an unreadable / placeholder source errors (so the caller falls back to
+    /// the heuristic). These call the private `load_model` / `model_from_bytes`
+    /// directly so the test is deterministic and does NOT touch the cached
+    /// `model()` `OnceLock` other tests rely on. The single test serializes its own
+    /// env mutations (sibling tests run in parallel threads).
+    #[test]
+    fn model_path_override_round_trips() {
+        // 1) No override → the embedded net loads (it is a real trained model,
+        //    not the <64-byte placeholder).
+        std::env::remove_var(MODEL_PATH_ENV);
+        assert!(
+            load_model().is_ok(),
+            "the embedded expert model should load with no override"
+        );
+
+        // 2) Override pointing at the real embedded asset → loads identically.
+        let real = concat!(env!("CARGO_MANIFEST_DIR"), "/src/bot/expert_model.onnx");
+        std::env::set_var(MODEL_PATH_ENV, real);
+        assert!(
+            load_model().is_ok(),
+            "override pointing at the real onnx should load"
+        );
+
+        // 3) Override pointing at a missing file → Err (caller falls back to the
+        //    heuristic; it does NOT silently use the embedded net).
+        std::env::set_var(MODEL_PATH_ENV, "/nonexistent/does-not-exist.onnx");
+        assert!(
+            load_model().is_err(),
+            "a missing override file must error, not silently use the embedded net"
+        );
+
+        // Clean up so the cached model() and sibling tests are unaffected.
+        std::env::remove_var(MODEL_PATH_ENV);
+    }
+
+    /// A placeholder / truncated source is rejected before the ONNX parser runs.
+    #[test]
+    fn placeholder_bytes_rejected() {
+        assert!(
+            model_from_bytes(&[0u8; 16]).is_err(),
+            "a <64-byte source is not a valid ONNX graph"
+        );
+    }
 }

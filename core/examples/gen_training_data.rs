@@ -26,7 +26,12 @@
 //! Env knobs:
 //!   GEN_GAMES   number of self-play hands to export (default 200)
 //!   GEN_OUT     output CSV path (default training/data.csv)
-//!   SHENGJI_BOT_BUDGET_MS  teacher search budget per decision (default small)
+//!   GEN_TEACHER_BUDGET_MS  teacher (Omniscient) perfect-info search budget per
+//!               decision, in ms (default 400). This directly sets LABEL QUALITY:
+//!               an 8ms label is near-noise. Applied via SHENGJI_BOT_BUDGET_MS
+//!               (the only search in this all-Easy-driven process is the teacher's).
+//!   SHENGJI_BOT_BUDGET_MS  if set explicitly, OVERRIDES GEN_TEACHER_BUDGET_MS
+//!               (back-compat).
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -58,13 +63,40 @@ struct Row {
     label: u8,
 }
 
+/// Counts of decisions that were SKIPPED (no row emitted) and why. A quick
+/// fact-check on label coverage: in particular `teacher_outside_candidates`
+/// should be ~0, because the teacher and the candidate generator both go through
+/// `heuristics::{lead,follow}_candidates` — if it is large, the assumption that
+/// the teacher always picks a generated candidate is wrong.
+#[derive(Default)]
+struct DropStats {
+    /// Fewer than 2 legal candidates: no learning signal (a forced move).
+    degenerate: usize,
+    /// The teacher produced no `PlayCards` action (should not happen in Play).
+    teacher_no_play: usize,
+    /// The teacher's pick was not among the generated candidates (expected ~0).
+    teacher_outside_candidates: usize,
+}
+
 fn main() {
-    // Keep the teacher's perfect-info search fast by default (it runs at EVERY
-    // recorded decision); override with SHENGJI_BOT_BUDGET_MS for a stronger
-    // (slower) teacher.
+    // The teacher (Omniscient) runs a perfect-information search at EVERY recorded
+    // decision to produce the label, so its budget directly sets LABEL QUALITY: an
+    // 8ms label is near-noise. Default to a meaningfully stronger teacher, tunable
+    // independently via GEN_TEACHER_BUDGET_MS. We apply it through the shared
+    // `SHENGJI_BOT_BUDGET_MS` knob (the only search in this all-Easy-driven process
+    // is the teacher's), but an explicit SHENGJI_BOT_BUDGET_MS still wins.
+    let teacher_budget_ms: u64 = std::env::var("GEN_TEACHER_BUDGET_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(400);
     if std::env::var("SHENGJI_BOT_BUDGET_MS").is_err() {
-        std::env::set_var("SHENGJI_BOT_BUDGET_MS", "8");
+        std::env::set_var("SHENGJI_BOT_BUDGET_MS", teacher_budget_ms.to_string());
     }
+    eprintln!(
+        "teacher budget: SHENGJI_BOT_BUDGET_MS={} ms (GEN_TEACHER_BUDGET_MS default {})",
+        std::env::var("SHENGJI_BOT_BUDGET_MS").unwrap_or_default(),
+        teacher_budget_ms,
+    );
     let games: usize = std::env::var("GEN_GAMES")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -76,9 +108,16 @@ fn main() {
     let mut group_counter: u64 = 0;
     let mut rows: Vec<Row> = Vec::new();
     let mut decisions = 0usize;
+    let mut drops = DropStats::default();
 
     for g in 0..games {
-        play_one_hand_collecting(&mut rng, &mut group_counter, &mut rows, &mut decisions);
+        play_one_hand_collecting(
+            &mut rng,
+            &mut group_counter,
+            &mut rows,
+            &mut decisions,
+            &mut drops,
+        );
         if g % 25 == 0 {
             eprintln!(
                 "  game {g}/{games}: {decisions} decisions, {} rows so far ({:.0}s)",
@@ -117,6 +156,13 @@ fn main() {
         out_path,
         start.elapsed().as_secs_f64()
     );
+    let total_seen =
+        decisions + drops.degenerate + drops.teacher_no_play + drops.teacher_outside_candidates;
+    eprintln!(
+        "Skipped decisions: {} degenerate(<2 cands), {} teacher-no-play, {} teacher-outside-candidates \
+         (of {} positions seen). teacher-outside should be ~0.",
+        drops.degenerate, drops.teacher_no_play, drops.teacher_outside_candidates, total_seen,
+    );
 }
 
 /// Drive one all-bot hand, recording per-candidate rows at every play decision.
@@ -125,6 +171,7 @@ fn play_one_hand_collecting(
     group_counter: &mut u64,
     rows: &mut Vec<Row>,
     decisions: &mut usize,
+    drops: &mut DropStats,
 ) {
     let n = 4;
     let mut init = InitializePhase::new();
@@ -241,7 +288,7 @@ fn play_one_hand_collecting(
                     Some(actor) => {
                         // Record the decision (per-candidate rows) BEFORE applying
                         // a move to advance the game.
-                        record_decision(s, actor, group_counter, rows, decisions);
+                        record_decision(s, actor, group_counter, rows, decisions, drops);
 
                         // Advance with the (noisy) behaviour policy from the
                         // honest redacted view.
@@ -272,6 +319,7 @@ fn record_decision(
     group_counter: &mut u64,
     rows: &mut Vec<Row>,
     decisions: &mut usize,
+    drops: &mut DropStats,
 ) {
     // Honest, redacted view: feature computation must only ever see this.
     let view_state = GameState::Play(full.clone()).for_player(actor);
@@ -288,6 +336,7 @@ fn record_decision(
     };
     // A degenerate decision with 0 or 1 candidate carries no learning signal.
     if candidates.len() < 2 {
+        drops.degenerate += 1;
         return;
     }
 
@@ -300,7 +349,10 @@ fn record_decision(
         .flatten()
     {
         Some(Action::PlayCards(c)) => c,
-        _ => return,
+        _ => {
+            drops.teacher_no_play += 1;
+            return;
+        }
     };
 
     // Match the teacher's pick to one of our (honest) candidates by multiset of
@@ -311,7 +363,10 @@ fn record_decision(
         .position(|c| same_multiset(c, &teacher_pick));
     let teacher_idx = match teacher_idx {
         Some(i) => i,
-        None => return,
+        None => {
+            drops.teacher_outside_candidates += 1;
+            return;
+        }
     };
 
     let group = *group_counter;

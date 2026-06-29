@@ -33,18 +33,15 @@ use std::env;
 use std::time::{Duration, Instant};
 
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
 use rand::SeedableRng;
 
+use shengji_core::bot::harness::seeded_draw_phase;
 use shengji_core::bot::policy;
 use shengji_core::bot::search::{search_play, Policy, SearchConfig};
 use shengji_core::bot::BotDifficulty;
-use shengji_core::game_state::draw_phase::DrawPhase;
-use shengji_core::game_state::initialize_phase::InitializePhase;
 use shengji_core::game_state::play_phase::PlayPhase;
 use shengji_core::game_state::GameState;
 use shengji_core::interactive::Action;
-use shengji_core::settings::GameModeSettings;
 
 use shengji_mechanics::deck::Deck;
 use shengji_mechanics::types::{Card, PlayerID};
@@ -129,48 +126,6 @@ impl Latency {
             self.total.as_secs_f64() * 1000.0 / self.moves as f64
         }
     }
-}
-
-/// Build a fully-seeded 4-player, 2-deck Tractor Draw phase, seat 0 preselected as
-/// landlord (mirrors `enoch_benchmark`'s `seeded_draw_phase`).
-fn seeded_draw_phase(decks: &[Deck], rng: &mut StdRng) -> DrawPhase {
-    let mut deck: Vec<_> = decks.iter().flat_map(|d| d.cards()).collect();
-    deck.shuffle(rng);
-
-    let num_players = 4;
-    let mut kitty_size = deck.len() % num_players;
-    if kitty_size == 0 {
-        kitty_size = num_players;
-    }
-    if kitty_size < 5 {
-        kitty_size += num_players;
-    }
-
-    let mut init = InitializePhase::new();
-    for i in 0..num_players {
-        init.add_player(format!("seat{i}")).unwrap();
-    }
-    init.set_num_decks(Some(decks.len())).unwrap();
-    init.set_game_mode(GameModeSettings::Tractor).unwrap();
-    let real_seats: Vec<PlayerID> = init.players().iter().map(|p| p.id).collect();
-    init.set_landlord(Some(real_seats[0])).unwrap();
-    let propagated = (*init).clone();
-
-    let level = Some(propagated.players()[0].rank());
-    let hands_deck = deck[0..deck.len() - kitty_size].to_vec();
-    let kitty = deck[deck.len() - kitty_size..].to_vec();
-
-    DrawPhase::new(
-        propagated,
-        0,
-        hands_deck,
-        kitty,
-        decks.len(),
-        shengji_core::settings::GameMode::Tractor,
-        level,
-        decks.to_vec(),
-        vec![],
-    )
 }
 
 /// Pick the play-phase cards for `actor` using the determinized search at `side`'s

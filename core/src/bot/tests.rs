@@ -566,6 +566,93 @@ fn test_determinizer_respects_counts_and_seen_cards() {
     }
 }
 
+/// Enoch's full-memory determinizer must NEVER re-deal a card that has already
+/// been played this hand. We step several tricks deep (so the public history
+/// exceeds the single `last_trick` the limited-memory sampler remembers), sample
+/// a full-memory world, and assert GLOBAL card conservation: across my real hand,
+/// every opponent's sampled hand, the cards resting in the current trick, and the
+/// full `played_this_hand` history, no card exceeds `num_decks` copies. Under the
+/// old limited-memory sampler a card played before the last trick could be dealt
+/// to an opponent a second time, violating this; full memory fixes it.
+#[test]
+fn test_determinizer_full_memory_conserves_played_cards() {
+    use crate::bot::determinize::sample_hidden_hands;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use std::collections::HashMap;
+
+    let logger = null_logger();
+    let (mut game, bot_ids) = setup_all_bot_game(&logger);
+    let me = bot_ids[0];
+
+    // Step until at least ~3 completed tricks worth of history exists (so the
+    // history meaningfully exceeds `last_trick`) and the hand is still live.
+    let mut steps = 0;
+    loop {
+        let state = game.dump_state().unwrap();
+        if let GameState::Play(p) = &state {
+            let history: usize = p.played_this_hand().values().sum();
+            if !p.game_finished() && !p.hands().is_empty() && history >= 12 {
+                break;
+            }
+        }
+        match next_bot_action(&mut game, false).unwrap() {
+            Some((id, action)) => {
+                game.interact(action, id, &logger).unwrap();
+            }
+            None => panic!("ran out of bot actions before accruing trick history"),
+        }
+        steps += 1;
+        assert!(steps < 5000, "could not accrue enough trick history");
+    }
+
+    let view = game.dump_state_for_player(me).unwrap();
+    let view_play = match &view {
+        GameState::Play(v) => v,
+        _ => panic!("expected play phase"),
+    };
+    let num_decks = view_play.num_decks();
+
+    let mut rng = StdRng::seed_from_u64(99);
+    let world = sample_hidden_hands(view_play, me, /* full_memory */ true, &mut rng)
+        .expect("full-memory sampling should succeed");
+
+    // Tally every copy of every card that is accounted for in the sampled world.
+    let mut totals: HashMap<Card, usize> = HashMap::new();
+    // (a) every seat's sampled hand (mine == real; opponents == sampled).
+    for &pid in &bot_ids {
+        for (card, &ct) in world.play.hands().get(pid).unwrap().iter() {
+            if *card != Card::Unknown {
+                *totals.entry(*card).or_default() += ct;
+            }
+        }
+    }
+    // (b) cards resting on the table in the current (incomplete) trick.
+    for pc in world.play.trick().played_cards() {
+        for card in &pc.cards {
+            if *card != Card::Unknown {
+                *totals.entry(*card).or_default() += 1;
+            }
+        }
+    }
+    // (c) the full public history of completed tricks this hand.
+    for (card, &ct) in world.play.played_this_hand() {
+        if *card != Card::Unknown {
+            *totals.entry(*card).or_default() += ct;
+        }
+    }
+
+    for (card, &count) in &totals {
+        assert!(
+            count <= num_decks,
+            "full-memory determinizer over-allocated {:?}: {} copies > {} decks (an already-played card was re-dealt)",
+            card,
+            count,
+            num_decks,
+        );
+    }
+}
+
 // ===========================================================================
 // Omniscient (perfect-information CHEATER tier) validation.
 // ===========================================================================

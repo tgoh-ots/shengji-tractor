@@ -10,6 +10,7 @@ use crate::interactive::{Action, BroadcastMessage, InteractiveGame};
 
 pub mod determinize;
 pub mod expert;
+pub mod harness;
 pub mod heuristics;
 pub mod policy;
 pub mod search;

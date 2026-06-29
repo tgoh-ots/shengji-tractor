@@ -44,6 +44,7 @@
 //! and leaf evaluator below; only the prior differs, so Expert (search + learned
 //! prior) can beat the heuristic-prior search on the same compute.
 
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use rand::rngs::StdRng;
@@ -127,6 +128,22 @@ impl Default for SearchConfig {
     }
 }
 
+/// Whether per-decision search tracing is enabled (env `SHENGJI_SEARCH_TRACE`,
+/// any non-empty value other than "0"). Read ONCE and cached, so the hot search
+/// path pays nothing when it is off. When on, [`search_play`] logs, per decision,
+/// the candidate count, worlds completed vs the cap, wall-clock spent vs the
+/// budget, and whether the decision was TIME- or WORLDS-bound — the diagnostic
+/// that answers whether the production budget is actually being exhausted (see
+/// `docs/bot-training-roadmap.md`, the 1-day plan).
+fn search_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SHENGJI_SEARCH_TRACE")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
 /// Run the determinized search and return the chosen cards, or `None` if no
 /// candidate could be produced (caller should fall back to the heuristic /
 /// dumb policy).
@@ -190,6 +207,24 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, config: SearchConfig) -> Option<
             }
         }
         worlds_done += 1;
+    }
+
+    if search_trace_enabled() {
+        let elapsed = start.elapsed();
+        // `worlds_done` counts both fully-simulated and skipped (unsatisfiable)
+        // samples; both consume the budget, so it is the right denominator for
+        // "did we run out of TIME or out of the WORLDS cap?".
+        let time_bound = elapsed >= config.time_budget;
+        eprintln!(
+            "[search] seat={} cands={} worlds={}/{} elapsed={:.1}ms budget={}ms bound={}",
+            me.0,
+            candidates.len(),
+            worlds_done,
+            config.max_worlds,
+            elapsed.as_secs_f64() * 1000.0,
+            config.time_budget.as_millis(),
+            if time_bound { "TIME" } else { "WORLDS" },
+        );
     }
 
     // Per-candidate mean leaf value (a candidate that never got simulated falls

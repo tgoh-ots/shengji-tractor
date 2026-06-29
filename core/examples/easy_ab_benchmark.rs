@@ -9,17 +9,10 @@
 //!   * Easy@NEW — ε = 0.06, T = 1.1 (the strengthened, less-noisy Easy)
 //!   * Easy@OLD — ε = 0.28, T = 3.5 (the original, very noisy Easy)
 //!
-//! Because both sides share the identical heuristic candidate list (the public
-//! `heuristics::ranked_leads` / `ranked_follows`), the bidding/kitty driver, and
-//! the deal, any win-rate edge is attributable purely to the knob change. We
-//! alternate which partnership is NEW across games to cancel the landlord/dealer
-//! positional edge.
-//!
-//! The Easy policy reproduced here mirrors `bot::policy::choose_play` for the
-//! search-less (`search_worlds == 0`) Easy tier: with probability ε pick a random
-//! legal candidate (a blunder), otherwise softmax-sample the top-4 heuristic
-//! candidates at temperature T. It reads only the actor's own redacted, honest
-//! per-player view, exactly like production.
+//! The deal, the per-hand driver, the per-decision Easy policy, and the honesty
+//! boundary are all shared with the other benchmarks via
+//! `shengji_core::bot::harness` (`PlayBrain::Easy`). We alternate which
+//! partnership is NEW across games to cancel the landlord/dealer positional edge.
 //!
 //! Run with:
 //!   cargo run --release --example easy_ab_benchmark -- [num_games] [base_seed]
@@ -31,20 +24,10 @@ use std::env;
 use std::time::Instant;
 
 use rand::rngs::StdRng;
-use rand::seq::SliceRandom;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 
-use shengji_core::bot::heuristics::{self, ScoredPlay};
-use shengji_core::bot::{policy, BotDifficulty};
-use shengji_core::game_state::draw_phase::DrawPhase;
-use shengji_core::game_state::initialize_phase::InitializePhase;
-use shengji_core::game_state::play_phase::PlayPhase;
-use shengji_core::game_state::GameState;
-use shengji_core::interactive::Action;
-use shengji_core::settings::GameModeSettings;
-
-use shengji_mechanics::deck::Deck;
-use shengji_mechanics::types::{Card, PlayerID};
+use shengji_core::bot::harness::{play_one_hand, PlayBrain, Seat};
+use shengji_core::bot::BotDifficulty;
 
 /// One Easy knob configuration (the only thing that differs between the A/B
 /// sides). Mirrors the `epsilon` / `temperature` fields of `policy::Knobs`.
@@ -79,104 +62,19 @@ const OLD_EASY: EasyKnobs = EasyKnobs {
     temperature: 3.5,
 };
 
-/// Reproduce the Easy tier's search-less play policy for `actor` under `knobs`,
-/// honoring the honesty boundary (only the actor's own redacted view). Returns
-/// `None` only if no legal candidate exists (the engine then errors out).
-fn easy_play_for(
-    s: &PlayPhase,
-    actor: PlayerID,
-    knobs: EasyKnobs,
-    rng: &mut StdRng,
-) -> Option<Vec<Card>> {
-    let view = GameState::Play(s.clone()).for_player(actor);
-    let pp = match &view {
-        GameState::Play(pp) => pp,
-        _ => return None,
-    };
-    let leading = pp.trick().played_cards().is_empty();
-    // The shared heuristic candidate list (identical scorer for both sides).
-    let ranked: Vec<ScoredPlay> = if leading {
-        heuristics::ranked_leads(pp, actor)
-    } else {
-        heuristics::ranked_follows(pp, actor)
-    };
-    if ranked.is_empty() {
-        return None;
-    }
-
-    // ε-blunder: with probability `epsilon`, play a uniformly random legal
-    // candidate instead of a scored move (the beginner "obvious blunder").
-    if rng.gen_bool(knobs.epsilon.clamp(0.0, 1.0)) {
-        let idx = rng.gen_range(0..ranked.len());
-        return Some(ranked[idx].cards.clone());
-    }
-
-    // Otherwise softmax-sample the top-4 candidates at temperature T (T = 0 would
-    // be a greedy argmax; both Easy configs use a warm T). Mirrors
-    // `policy::pick_from_ranked`.
-    if knobs.temperature <= 0.0 {
-        return Some(ranked[0].cards.clone());
-    }
-    let top = &ranked[..ranked.len().min(4)];
-    let max = top.iter().map(|c| c.score).fold(f64::MIN, f64::max);
-    let weights: Vec<f64> = top
-        .iter()
-        .map(|c| ((c.score - max) / knobs.temperature).exp())
-        .collect();
-    let total: f64 = weights.iter().sum();
-    if total <= 0.0 || !total.is_finite() {
-        return Some(top[0].cards.clone());
-    }
-    let mut pick = rng.gen::<f64>() * total;
-    for (c, w) in top.iter().zip(weights.iter()) {
-        pick -= w;
-        if pick <= 0.0 {
-            return Some(c.cards.clone());
+impl EasyKnobs {
+    fn seat(self) -> Seat {
+        Seat {
+            play: PlayBrain::Easy {
+                epsilon: self.epsilon,
+                temperature: self.temperature,
+            },
+            // Bidding + kitty are knob-independent (shared Easy driver), so both
+            // sides use the same Easy bid/bury policy and only the play knobs differ.
+            bid: BotDifficulty::Easy,
+            kitty: BotDifficulty::Easy,
         }
     }
-    Some(top[top.len() - 1].cards.clone())
-}
-
-/// Build a fully-seeded 4-player, 2-deck Tractor Draw phase, seat 0 preselected as
-/// landlord (mirrors `heuristic_benchmark`'s `seeded_draw_phase`).
-fn seeded_draw_phase(decks: &[Deck], rng: &mut StdRng) -> DrawPhase {
-    let mut deck: Vec<_> = decks.iter().flat_map(|d| d.cards()).collect();
-    deck.shuffle(rng);
-
-    let num_players = 4;
-    let mut kitty_size = deck.len() % num_players;
-    if kitty_size == 0 {
-        kitty_size = num_players;
-    }
-    if kitty_size < 5 {
-        kitty_size += num_players;
-    }
-
-    let mut init = InitializePhase::new();
-    for i in 0..num_players {
-        init.add_player(format!("seat{i}")).unwrap();
-    }
-    init.set_num_decks(Some(decks.len())).unwrap();
-    init.set_game_mode(GameModeSettings::Tractor).unwrap();
-    let real_seats: Vec<PlayerID> = init.players().iter().map(|p| p.id).collect();
-    init.set_landlord(Some(real_seats[0])).unwrap();
-    let propagated = (*init).clone();
-
-    let level = Some(propagated.players()[0].rank());
-    let hands_deck = deck[0..deck.len() - kitty_size].to_vec();
-    let kitty = deck[deck.len() - kitty_size..].to_vec();
-
-    DrawPhase::new(
-        propagated,
-        0,
-        hands_deck,
-        kitty,
-        decks.len(),
-        shengji_core::settings::GameMode::Tractor,
-        level,
-        decks.to_vec(),
-        vec![],
-    )
 }
 
 /// The outcome of one finished hand, from the NEW partnership's perspective.
@@ -186,126 +84,30 @@ struct GameOutcome {
 }
 
 /// Drive one seeded hand. `new_is_landlord_team` selects which partnership plays
-/// with the NEW Easy knobs; the other uses the OLD knobs. Both partnerships bid /
-/// exchange identically via the shared Easy driver, so only the play-phase knobs
-/// differ.
-fn play_one_hand(
+/// with the NEW Easy knobs; the other uses the OLD knobs.
+fn play_one_hand_ab(
     new_is_landlord_team: bool,
     new_knobs: EasyKnobs,
     old_knobs: EasyKnobs,
     rng: &mut StdRng,
 ) -> Option<GameOutcome> {
-    let decks = vec![Deck::default(), Deck::default()];
-    let draw = seeded_draw_phase(&decks, rng);
-    let seats: Vec<PlayerID> = draw.propagated().players().iter().map(|p| p.id).collect();
-
-    // Seats 0,2 are the landlord (defending) team; 1,3 attack. The NEW knobs
-    // occupy the landlord team iff `new_is_landlord_team`.
-    let knobs_of = |seat_idx: usize| -> EasyKnobs {
-        let is_landlord_team = seat_idx % 2 == 0;
+    // Seats 0,2 are the landlord (defending) team. The NEW knobs occupy the
+    // landlord team iff `new_is_landlord_team`.
+    let seat_of = |idx: usize| -> Seat {
+        let is_landlord_team = idx % 2 == 0;
         if is_landlord_team == new_is_landlord_team {
-            new_knobs
+            new_knobs.seat()
         } else {
-            old_knobs
+            old_knobs.seat()
         }
     };
-
-    let mut state = GameState::Draw(draw);
-    let mut iters = 0usize;
-    loop {
-        iters += 1;
-        if iters > 2_000_000 {
-            return None;
-        }
-        match &mut state {
-            GameState::Initialize(_) => return None,
-            GameState::Draw(s) => {
-                if !s.done_drawing() {
-                    let p = s.next_player().ok()?;
-                    s.draw_card(p).ok()?;
-                } else if s.bid_decided() {
-                    let responsible = s.next_player().ok()?;
-                    state = GameState::Exchange(s.advance(responsible).ok()?);
-                } else {
-                    // Both partnerships bid via the same Easy driver so the trump /
-                    // landlord is identical regardless of side.
-                    let mut bid = false;
-                    for &seat in &seats {
-                        if let Some(b) = policy::choose_bid(s, seat, BotDifficulty::Easy) {
-                            if s.bid(seat, b.card, b.count) {
-                                bid = true;
-                                break;
-                            }
-                        }
-                    }
-                    if !bid && s.reveal_card().is_err() {
-                        for &seat in &seats {
-                            if let Some(b) =
-                                s.valid_bids(seat).ok()?.into_iter().min_by_key(|b| b.count)
-                            {
-                                if s.bid(seat, b.card, b.count) {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            GameState::Exchange(s) => {
-                // Kitty burying is knob-independent (shared Easy driver).
-                let landlord = s.landlord();
-                let view = GameState::Exchange(s.clone()).for_player(landlord);
-                match policy::select_action(&view, landlord, BotDifficulty::Easy).ok()? {
-                    Some(Action::MoveCardToKitty(c)) => s.move_card_to_kitty(landlord, c).ok()?,
-                    Some(Action::MoveCardToHand(c)) => s.move_card_to_hand(landlord, c).ok()?,
-                    Some(Action::SetFriends(f)) => s.set_friends(landlord, f).ok()?,
-                    _ => state = GameState::Play(s.advance(landlord).ok()?),
-                }
-            }
-            GameState::Play(s) => {
-                if s.game_finished() {
-                    let (non_landlord_points, _) = s.calculate_points();
-                    let (_init, landlord_won, _msgs) = s.finish_game().ok()?;
-
-                    // NEW is the defending (landlord) team iff new_is_landlord_team.
-                    let new_is_defender = new_is_landlord_team;
-                    let new_won = landlord_won == new_is_defender;
-                    let new_point_margin = if new_is_defender {
-                        -non_landlord_points
-                    } else {
-                        non_landlord_points
-                    };
-                    return Some(GameOutcome {
-                        new_won,
-                        new_point_margin,
-                    });
-                }
-                match s.trick().next_player() {
-                    None => {
-                        s.finish_trick().ok()?;
-                    }
-                    Some(actor) => {
-                        let actor_idx = seats.iter().position(|x| *x == actor)?;
-                        let knobs = knobs_of(actor_idx);
-                        // Deterministic per-decision seed from the observable state
-                        // so each side gets independent but stable randomness.
-                        let hand_size = s
-                            .hands()
-                            .get(actor)
-                            .map(|h| h.values().sum::<usize>())
-                            .unwrap_or(0);
-                        let seed = (actor.0 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                            ^ (hand_size as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
-                            ^ (s.trick().played_cards().len() as u64)
-                                .wrapping_mul(0x94D0_49BB_1331_11EB);
-                        let mut decision_rng = StdRng::seed_from_u64(seed);
-                        let cards = easy_play_for(s, actor, knobs, &mut decision_rng)?;
-                        s.play_cards(actor, &cards).ok()?;
-                    }
-                }
-            }
-        }
-    }
+    let seats = [seat_of(0), seat_of(1), seat_of(2), seat_of(3)];
+    let r = play_one_hand(&seats, rng)?;
+    let (new_won, new_point_margin) = r.subject_outcome(new_is_landlord_team);
+    Some(GameOutcome {
+        new_won,
+        new_point_margin,
+    })
 }
 
 fn run_match(num_games: usize, base_seed: u64) {
@@ -319,7 +121,7 @@ fn run_match(num_games: usize, base_seed: u64) {
     for g in 0..num_games {
         let mut rng = StdRng::seed_from_u64(base_seed.wrapping_add(g as u64));
         let new_is_landlord_team = g % 2 == 0;
-        match play_one_hand(new_is_landlord_team, new_easy, OLD_EASY, &mut rng) {
+        match play_one_hand_ab(new_is_landlord_team, new_easy, OLD_EASY, &mut rng) {
             Some(outcome) => {
                 completed += 1;
                 if outcome.new_won {

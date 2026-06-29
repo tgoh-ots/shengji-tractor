@@ -55,6 +55,14 @@ cargo test -p shengji --test e2e_game e2e_game_no_hidden_card_leakage
 
 # Regression: legacy "Hard" bot difficulty must still deserialize (as Expert).
 cargo test -p shengji-core legacy_hard_difficulty_deserializes_as_expert
+
+# Committed-baseline strength gate (fast, search-less, paired CIs): fails only if a
+# build drops a load-bearing relationship below its floor (Easy@NEW>OLD, NEW
+# heuristic>=LEGACY). Re-measure + update floors if you change the shared scorer /
+# Easy knobs. See docs/bot-eval-baseline.md.
+cargo test -p shengji-core --test baseline_gate
+# Coarse release-only search/net gate (Expert beats Easy):
+SHENGJI_BOT_BUDGET_MS=60 cargo test -p shengji-core --release --test baseline_gate -- --ignored
 ```
 
 ### Bot benchmarks (headless self-play harnesses)
@@ -81,7 +89,30 @@ cargo run --release --example heuristic_benchmark
 # Original Easy/Expert/Enoch/Omniscient ladder eval; search-budget sweep
 cargo run --release --example eval
 cargo run --release --example budget_benchmark
+
+# Paired-on-mirrored-deck A/B with Wilson + bootstrap CIs and a minimum-detectable
+# -effect (the statistically-sound measurement substrate). Each deck is played in
+# BOTH orientations to cancel deal luck. `fast` = search-less matchups; `search`
+# honors SHENGJI_BOT_BUDGET_MS. See docs/bot-eval-baseline.md.
+cargo run --release --example paired_eval -- 400 0x5EED fast
+SHENGJI_BOT_BUDGET_MS=400 cargo run --release --example paired_eval -- 200 0x5EED search
 ```
+
+All of the above share ONE driver — `core/src/bot/harness.rs` (`seeded_draw_phase`
++ the `Seat`/`PlayBrain` per-hand driver + the honesty boundary + the paired-AB
+stats). Add a new benchmark by configuring `Seat`s, NOT by re-copying the loop.
+
+> ⚠️ The benchmarks are NOT byte-reproducible run-to-run (Rust `HashMap` iteration
+> order is per-process and leaks into tie-breaks). Compare CIs/distributions, never
+> a byte-diff. See `docs/bot-eval-baseline.md`.
+
+> Toolchain: build/test with `cargo +1.92.0 …` in this repo's dev env — deps need
+> rustc ≥ 1.87 and the machine's default `stable` may be older.
+
+Useful bot debug env vars: `SHENGJI_EXPERT_MODEL_PATH` (load a candidate ONNX at
+runtime — A/B a net with no rebuild), `SHENGJI_SEARCH_TRACE=1` (log per-decision
+worlds/budget/TIME-vs-WORLDS-bound from `search_play`), `SHENGJI_BOT_BUDGET_MS`
+(per-decision search budget).
 
 ### Code Quality
 ```bash
@@ -121,13 +152,27 @@ the musl deploy image). See `training/README.md`.
 ```bash
 # 1. Generate distillation data (Omniscient teacher labels; Easy bots drive the
 #    game for diverse states). Writes training/data.csv (group, f0..f35, label).
-GEN_GAMES=5000 SHENGJI_BOT_BUDGET_MS=500 \
+#    GEN_TEACHER_BUDGET_MS (default 400) sets the teacher search budget = label
+#    QUALITY independently of any inherited SHENGJI_BOT_BUDGET_MS. It also prints
+#    skipped-decision counts (degenerate / teacher-no-play / teacher-outside).
+GEN_GAMES=5000 GEN_TEACHER_BUDGET_MS=400 \
   cargo run --release --example gen_training_data
+
+# 1b. (optional) Estimate the behavioral-cloning CEILING before training: the
+#     label-aliasing floor + "unwinnable decision" rate (high => stop polishing the
+#     policy, invest in a value head / kitty). Runs with just numpy (no torch).
+python training/train_expert.py --data training/data.csv --analyze
 
 # 2. Train + export ONNX (MLP 36->128->128->64->1, listwise softmax CE, early
 #    stop on top-1 acc). Default --out is ../core/src/bot/expert_model.onnx.
 cd training && pip install -r requirements.txt   # torch, onnx, numpy
 python train_expert.py --data data.csv --out ../core/src/bot/expert_model.onnx
+
+# 3. A/B the candidate net vs the embedded one WITHOUT rebuilding, via the runtime
+#    model-path override (expert.rs::MODEL_PATH_ENV). A bad/missing path falls back
+#    to the heuristic (it does NOT silently use the embedded net).
+SHENGJI_EXPERT_MODEL_PATH=$PWD/candidate.onnx \
+  cargo run --release --example paired_eval -- 200 0x5EED search
 ```
 CONTRACT: `FEATURE_DIM` (currently 36) is defined in `core/src/bot/expert.rs`
 (`candidate_features`) AND hardcoded in `train_expert.py`; the CSV has
@@ -159,7 +204,8 @@ Key files:
 - `policy.rs` — per-tier `Knobs` (ε, temperature, search worlds/candidates/rollout-tricks) and the dispatch in `select_action`. Search config: budget **~2200ms** (`search_budget_ms()`, override with `SHENGJI_BOT_BUDGET_MS`), **144 worlds**, **12 rollout-tricks** for Expert/Enoch. Most decisions finish in tens of ms; the budget is the safety ceiling.
 - `search.rs` — the determinized search with the `Policy` enum (`Heuristic` / `Net` / `EnochHeuristic`) for the root prior and rollout policy.
 - `expert.rs` — the ONNX net inference + the `candidate_features` honest-feature encoding (the contract shared with training).
-- `determinize.rs` — samples plausible hidden hands consistent with the redacted view (`Knowledge`, void tracking).
+- `determinize.rs` — samples plausible hidden hands consistent with the redacted view (`Knowledge`, void tracking). `sample_hidden_hands(.., full_memory, ..)`: Enoch passes `true` (perfect public memory — never re-deals a played card, full-hand voids); Easy/Expert pass `false`.
+- `harness.rs` — the SHARED self-play benchmark engine: `seeded_draw_phase`, the `Seat`/`PlayBrain` per-hand driver (`play_one_hand`, honesty-correct `play_cards_for`), and the paired-on-mirrored-deck A/B + stats (`run_paired_ab`, Wilson/bootstrap CIs, MDE). Every `core/examples/` benchmark builds on this; `core/tests/baseline_gate.rs` gates on it.
 - `mod.rs` — `BotDifficulty` (with `#[serde(alias = "Hard")]` on Expert so old states still deserialize), the `advance_bots` driver, and the **plan/apply split** for the non-blocking driver: `classify_next_bot_work` (cheaply decides whose turn / what kind of work), `plan_next_bot_action` (does the expensive search OFF the lock on a snapshot), `apply_planned_bot_action` (briefly re-acquires the lock to apply the precomputed move). This is why bot thinking doesn't lag chat/UI — see `shengji_handler.rs::drive_bots_non_blocking` (snapshot → `spawn_blocking` compute → apply-under-lock).
 - `tests.rs` — bot unit tests incl. the cheat-boundary and `legacy_hard_difficulty_deserializes_as_expert` regression tests.
 
