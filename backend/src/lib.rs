@@ -139,7 +139,11 @@ pub fn build_app(
             "/default_settings.json",
             get(|| async { Json(settings::PropagatedState::default()) }),
         )
-        .route("/full_state.json", get(state_dump::dump_state))
+        // NOTE: `/full_state.json` is deliberately NOT exposed. `dump_state`
+        // returns the fully un-redacted `GameState` (every player's hand, the
+        // kitty, the deck) for every room, so serving it to anonymous callers
+        // would defeat the honesty/redaction model. The on-disk recovery dump it
+        // produces is still driven internally by `periodically_dump_state`.
         .route("/stats", get(get_stats))
         .route("/runtime.js", get(runtime_settings))
         .route("/cards.json", get(|| async { Json(CARDS_JSON.clone()) }))

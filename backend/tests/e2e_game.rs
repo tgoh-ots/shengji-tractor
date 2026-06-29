@@ -590,3 +590,54 @@ async fn e2e_chat_responsive_while_bot_thinks() {
 
     let _ = socket.close(None).await;
 }
+
+/// Regression test for the critical leak fixed in the audit: the
+/// `/full_state.json` route served the fully un-redacted `GameState` (every
+/// player's hand, the kitty, the deck) for every room to any anonymous caller,
+/// defeating the same honesty/redaction model `e2e_game_no_hidden_card_leakage`
+/// protects on the WebSocket. The route must NOT be reachable; the
+/// redaction-safe public lobby listing must still be.
+#[tokio::test]
+async fn full_state_json_route_is_not_exposed() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let origin_policy = OriginPolicy::from_raw("*");
+    let logger = slog::Logger::root(slog::Discard, slog::o!());
+    let backend_storage = HashMapStorage::<VersionedGame>::new(logger);
+    let stats = Arc::new(Mutex::new(InMemoryStats::default()));
+    let resource_limits = Arc::new(ResourceLimits::default());
+    let app = shengji::build_app(backend_storage, stats, origin_policy, resource_limits);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/full_state.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "/full_state.json must not be exposed: it leaks every player's hidden hand"
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/public_games.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the redaction-safe public lobby listing should remain reachable"
+    );
+}

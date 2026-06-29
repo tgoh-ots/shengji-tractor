@@ -620,10 +620,20 @@ impl PlayPhase {
             return false;
         }
 
-        let last_trick = last_trick.unwrap();
-        let TrickEnded {
+        // Guard every fallible step: this is reachable from an untrusted
+        // `EndGameEarly`/`StartNewGame` sequence where no trick has been played
+        // yet, and a panic here would take down the shared (single-process)
+        // server for every room. The safe default is "the jack rule does not
+        // apply".
+        let Some(last_trick) = last_trick else {
+            return false;
+        };
+        let Ok(TrickEnded {
             winner: winner_pid, ..
-        } = last_trick.complete().unwrap();
+        }) = last_trick.complete()
+        else {
+            return false;
+        };
 
         // In any jack variation, the rule can only applies if the non-landord team wins the
         // last trick
@@ -632,10 +642,10 @@ impl PlayPhase {
         }
 
         let lt_played_cards = last_trick.played_cards();
-        let PlayedCards { cards, .. } = lt_played_cards
-            .iter()
-            .find(|pc| pc.id == winner_pid)
-            .unwrap();
+        let Some(PlayedCards { cards, .. }) = lt_played_cards.iter().find(|pc| pc.id == winner_pid)
+        else {
+            return false;
+        };
 
         // In the jack variation, the last trick must be won with a single (trump) jack
         jack_variation.compute(cards)

@@ -1114,7 +1114,7 @@ const Initialize = (props: IProps): JSX.Element => {
           case "hide_throw_halting_player":
             send({ Action: { SetHideThrowHaltingPlayer: value } });
             break;
-          case "set_jack_variation":
+          case "jack_variation":
             send({ Action: { SetJackVariation: value } });
             break;
           case "game_scoring_parameters":

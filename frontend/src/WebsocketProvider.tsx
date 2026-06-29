@@ -248,21 +248,33 @@ const WebsocketProvider: React.FunctionComponent<
         } else {
           // Binary message (compressed)
           const f = (buf: ArrayBuffer): void => {
-            const message = decodeWireFormat(
-              new Uint8Array(buf),
-            ) as GameMessage;
-            if (message && typeof message === "object" && "Kicked" in message) {
-              deliberateCloseRef.current = true;
-              ws.close();
-            } else {
-              updateStateRef.current({
-                connected: true,
-                everConnected: true,
-                reconnecting: false,
-                ...websocketHandler(stateRef.current, message, (msg) => {
-                  ws.send(JSON.stringify(msg));
-                }),
-              });
+            // Mirror the text branch's error handling: decodeWireFormat
+            // (zstd decompress + JSON.parse) can throw on a corrupt frame, and
+            // an uncaught throw here escapes the queue callback and can stall
+            // the message pump for queued frames.
+            try {
+              const message = decodeWireFormat(
+                new Uint8Array(buf),
+              ) as GameMessage;
+              if (
+                message &&
+                typeof message === "object" &&
+                "Kicked" in message
+              ) {
+                deliberateCloseRef.current = true;
+                ws.close();
+              } else {
+                updateStateRef.current({
+                  connected: true,
+                  everConnected: true,
+                  reconnecting: false,
+                  ...websocketHandler(stateRef.current, message, (msg) => {
+                    ws.send(JSON.stringify(msg));
+                  }),
+                });
+              }
+            } catch (e) {
+              console.error("Failed to decode binary message:", e);
             }
           };
 
