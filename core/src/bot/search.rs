@@ -924,7 +924,9 @@ pub fn search_play_perfect_info(
     mut config: SearchConfig,
 ) -> Option<Vec<Card>> {
     let decision_start = Instant::now();
-    let mut candidates: Vec<ScoredPlay> = ranked_candidates(p, me, config.policy);
+    let mut candidates: Vec<ScoredPlay> =
+        ranked_candidates_perfect_information(p, me, config.policy);
+    remove_known_failed_throws(p, me, &mut candidates);
     if candidates.is_empty() {
         return None;
     }
@@ -1016,6 +1018,35 @@ pub fn search_play_perfect_info(
     Some(candidates[best_idx].cards.clone())
 }
 
+/// Remove root throw attempts that the true world proves will fail.
+///
+/// This belongs exclusively on the perfect-information path. In a fixed world,
+/// submitting the larger failed throw is dominated by submitting its forced
+/// component directly: the committed cards and trick format are the same, while
+/// the failed attempt additionally reveals cards and may incur a table penalty.
+/// Every non-empty hand has a legal atomic lead, so removing these attempts cannot
+/// leave a valid position without a candidate. Honest search cannot make this
+/// determination from redacted hands and must not call this helper.
+fn remove_known_failed_throws(p: &PlayPhase, me: PlayerID, candidates: &mut Vec<ScoredPlay>) {
+    if !p.trick().played_cards().is_empty() {
+        return;
+    }
+
+    candidates.retain(|candidate| {
+        if candidate.cards.len() < 2 {
+            return true;
+        }
+        let mut probe = p.clone();
+        if probe.play_cards(me, &candidate.cards).is_err() {
+            return true;
+        }
+        let Some(played) = probe.trick().played_cards().last() else {
+            return true;
+        };
+        played.bad_throw_cards.is_empty()
+    });
+}
+
 /// Rank the legal candidates for `me` under the given [`Policy`] (best first).
 ///
 /// For [`Policy::Heuristic`] this is exactly the heuristic ranking. For
@@ -1026,7 +1057,19 @@ pub fn search_play_perfect_info(
 /// candidates), we transparently fall back to the heuristic ranking, so the
 /// search is never starved of candidates.
 fn ranked_candidates(p: &PlayPhase, me: PlayerID, policy: Policy) -> Vec<ScoredPlay> {
-    canonicalize_ranked_candidates(ranked_candidates_raw(p, me, policy))
+    canonicalize_ranked_candidates(ranked_candidates_raw(p, me, policy, false))
+}
+
+/// Perfect-information root counterpart to [`ranked_candidates`]. Honest root
+/// rankings suppress Joker compounds whose safety is not publicly provable.
+/// Omniscient must start from the wider set, then [`remove_known_failed_throws`]
+/// uses the true world to keep actual successes and discard actual failures.
+fn ranked_candidates_perfect_information(
+    p: &PlayPhase,
+    me: PlayerID,
+    policy: Policy,
+) -> Vec<ScoredPlay> {
+    canonicalize_ranked_candidates(ranked_candidates_raw(p, me, policy, true))
 }
 
 fn canonicalize_ranked_candidates(candidates: Vec<ScoredPlay>) -> Vec<ScoredPlay> {
@@ -1066,12 +1109,21 @@ fn canonicalize_ranked_candidates(candidates: Vec<ScoredPlay>) -> Vec<ScoredPlay
         .collect()
 }
 
-fn ranked_candidates_raw(p: &PlayPhase, me: PlayerID, policy: Policy) -> Vec<ScoredPlay> {
+fn ranked_candidates_raw(
+    p: &PlayPhase,
+    me: PlayerID,
+    policy: Policy,
+    perfect_information_root: bool,
+) -> Vec<ScoredPlay> {
     let leading = p.trick().played_cards().is_empty();
 
     let heuristic_ranked = || -> Vec<ScoredPlay> {
         if leading {
-            heuristics::ranked_leads(p, me)
+            if perfect_information_root {
+                heuristics::ranked_leads_unfiltered(p, me)
+            } else {
+                heuristics::ranked_leads(p, me)
+            }
         } else {
             heuristics::ranked_follows(p, me)
         }
@@ -1081,18 +1133,26 @@ fn ranked_candidates_raw(p: &PlayPhase, me: PlayerID, policy: Policy) -> Vec<Sco
         Policy::Heuristic => heuristic_ranked(),
         Policy::EnochHeuristic => {
             if leading {
-                heuristics::ranked_leads_enoch(p, me)
+                if perfect_information_root {
+                    heuristics::ranked_leads_enoch_unfiltered(p, me)
+                } else {
+                    heuristics::ranked_leads_enoch(p, me)
+                }
             } else {
                 heuristics::ranked_follows_enoch(p, me)
             }
         }
         Policy::Net => {
             // Generate the legal candidates the net should rank.
-            let cands: Vec<Vec<Card>> = if leading {
+            let mut cands: Vec<Vec<Card>> = if leading {
                 heuristics::lead_candidates(p, me)
             } else {
                 heuristics::follow_candidates(p, me)
             };
+            if leading && !perfect_information_root {
+                let ctx = heuristics::EvalCtx::build(p, me);
+                cands.retain(|cards| heuristics::admissible_ranked_lead(&ctx, p, cards));
+            }
             if cands.len() < 2 {
                 // 0 or 1 candidate: nothing for the net to discriminate; defer to
                 // the heuristic ranking (which also handles its own fallbacks).
@@ -1284,11 +1344,15 @@ fn rollout_ranked(
             ranked.into_iter().map(|s| s.cards).collect()
         }
         Policy::Net => {
-            let cands: Vec<Vec<Card>> = if leading {
+            let mut cands: Vec<Vec<Card>> = if leading {
                 heuristics::rollout_lead_candidates(view, actor)
             } else {
                 heuristics::rollout_follow_candidates(view, actor)
             };
+            if leading {
+                let ctx = heuristics::EvalCtx::build(view, actor);
+                cands.retain(|cards| heuristics::admissible_ranked_lead(&ctx, view, cards));
+            }
             if cands.len() < 2 {
                 return heuristic_cards();
             }
@@ -1562,12 +1626,84 @@ fn net_value_estimate(sim: &PlayPhase, me: PlayerID) -> Option<f64> {
 mod tests {
     use super::{
         adaptive_fraction_from_signals, canonicalize_ranked_candidates, normalized_entropy,
-        risk_adjusted_value, RiskConfig, ScoredPlay,
+        ranked_candidates, ranked_candidates_perfect_information, remove_known_failed_throws,
+        risk_adjusted_value, Policy, RiskConfig, ScoredPlay,
     };
-    use shengji_mechanics::types::{Card, Number, Suit};
+    use shengji_mechanics::deck::Deck;
+    use shengji_mechanics::hands::Hands;
+    use shengji_mechanics::player::Player;
+    use shengji_mechanics::types::{Card, Number, PlayerID, Suit, Trump};
+
+    use crate::game_state::play_phase::PlayPhase;
+    use crate::settings::{GameMode, PropagatedState};
 
     fn card(suit: Suit, number: Number) -> Card {
         Card::Suited { suit, number }
+    }
+
+    fn joker_throw_position(opponent_can_halt: bool) -> (PlayPhase, Vec<PlayerID>) {
+        let ids: Vec<PlayerID> = (0..4).map(PlayerID).collect();
+        let mut propagated = PropagatedState::default();
+        propagated.players = ids
+            .iter()
+            .map(|id| Player::new(*id, format!("p{}", id.0)))
+            .collect();
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let low_trump = card(Suit::Hearts, Number::Three);
+        let mut hands = Hands::new(ids.iter().copied());
+        hands.set_trump(trump);
+        hands
+            .add(
+                ids[0],
+                [Card::BigJoker, low_trump, card(Suit::Clubs, Number::Three)],
+            )
+            .unwrap();
+        let mut opponent_cards = vec![card(Suit::Clubs, Number::Four)];
+        if opponent_can_halt {
+            // This higher trump invalidates the low-trump component.
+            opponent_cards.push(card(Suit::Hearts, Number::Four));
+        } else {
+            opponent_cards.push(card(Suit::Clubs, Number::Five));
+        }
+        hands.add(ids[1], opponent_cards).unwrap();
+        hands
+            .add(
+                ids[2],
+                [
+                    card(Suit::Diamonds, Number::Three),
+                    card(Suit::Diamonds, Number::Four),
+                ],
+            )
+            .unwrap();
+        hands
+            .add(
+                ids[3],
+                [
+                    card(Suit::Spades, Number::Three),
+                    card(Suit::Spades, Number::Four),
+                ],
+            )
+            .unwrap();
+
+        let play = PlayPhase::new(
+            propagated,
+            1,
+            GameMode::Tractor,
+            hands,
+            vec![],
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0], ids[2]],
+            vec![],
+            vec![Deck::default()],
+            vec![],
+        )
+        .unwrap();
+        (play, ids)
     }
 
     fn keys(candidates: &[ScoredPlay]) -> Vec<Vec<char>> {
@@ -1618,6 +1754,84 @@ mod tests {
         assert_eq!(first.len(), 3, "equivalent card multisets are one action");
         assert!(first[0].score >= first[1].score);
         assert!(first[1].score >= first[2].score);
+    }
+
+    #[test]
+    fn perfect_information_drops_a_known_failed_throw_in_favor_of_its_forced_unit() {
+        let (play, ids) = joker_throw_position(true);
+        let low_trump = card(Suit::Hearts, Number::Three);
+        let failed_throw = vec![low_trump, Card::BigJoker];
+
+        let mut probe = play.clone();
+        probe.play_cards(ids[0], &failed_throw).unwrap();
+        let played = probe.trick().played_cards().last().unwrap();
+        assert_eq!(played.cards, vec![low_trump]);
+        assert_eq!(played.bad_throw_cards, vec![Card::BigJoker]);
+
+        let mut candidates = vec![
+            ScoredPlay {
+                cards: failed_throw.clone(),
+                score: 100.0,
+            },
+            ScoredPlay {
+                cards: vec![low_trump],
+                score: 0.0,
+            },
+        ];
+        remove_known_failed_throws(&play, ids[0], &mut candidates);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].cards, vec![low_trump]);
+
+        let net_ranked = ranked_candidates(&play, ids[0], Policy::Net);
+        assert!(
+            !net_ranked.iter().any(|candidate| {
+                candidate.cards.len() == 2
+                    && candidate.cards.contains(&low_trump)
+                    && candidate.cards.contains(&Card::BigJoker)
+            }),
+            "the honest Net prior must apply the same unsafe-Joker lead filter"
+        );
+    }
+
+    #[test]
+    fn perfect_information_restores_an_actual_safe_throw_hidden_from_honest_ranking() {
+        let (play, ids) = joker_throw_position(false);
+        let mut safe_throw = vec![card(Suit::Hearts, Number::Three), Card::BigJoker];
+        safe_throw.sort_by_key(|card| card.as_char());
+
+        let honest = ranked_candidates(&play, ids[0], Policy::EnochHeuristic);
+        assert!(
+            !honest.iter().any(|candidate| {
+                let mut cards = candidate.cards.clone();
+                cards.sort_by_key(|card| card.as_char());
+                cards == safe_throw
+            }),
+            "honest ranking must reject a Joker throw that is not publicly proven safe"
+        );
+
+        let mut perfect =
+            ranked_candidates_perfect_information(&play, ids[0], Policy::EnochHeuristic);
+        remove_known_failed_throws(&play, ids[0], &mut perfect);
+        assert!(
+            perfect.iter().any(|candidate| {
+                let mut cards = candidate.cards.clone();
+                cards.sort_by_key(|card| card.as_char());
+                cards == safe_throw
+            }),
+            "perfect-information ranking must retain a throw that succeeds in the true world"
+        );
+
+        let mut perfect_net = ranked_candidates_perfect_information(&play, ids[0], Policy::Net);
+        remove_known_failed_throws(&play, ids[0], &mut perfect_net);
+        assert!(
+            perfect_net.iter().any(|candidate| {
+                let mut cards = candidate.cards.clone();
+                cards.sort_by_key(|card| card.as_char());
+                cards == safe_throw
+            }),
+            "the perfect-information Net prior must retain actual-safe Joker throws"
+        );
     }
 
     #[test]

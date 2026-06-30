@@ -1289,6 +1289,114 @@ pub fn score_lead_legacy(p: &PlayPhase, _me: PlayerID, cards: &[Card]) -> f64 {
     score
 }
 
+#[derive(Clone, Copy, Debug)]
+struct LeadSafety {
+    single_unit: bool,
+    whole_play_safe: bool,
+}
+
+fn trick_unit_is_proven_safe(ctx: &EvalCtx, unit: &TrickUnit) -> bool {
+    match unit {
+        TrickUnit::Repeated { count, card } => {
+            if *count == 1 {
+                is_boss_card(&ctx.k, ctx.trump, card.card)
+            } else {
+                repeated_unbeatable_above(
+                    ctx,
+                    ctx.trump.effective_suit(card.card),
+                    boss_strength(ctx.trump, card.card),
+                    *count,
+                )
+            }
+        }
+        TrickUnit::Tractor { count, members } => members.last().is_some_and(|top| {
+            // Any strictly higher tractor must contain a repeated card above
+            // this tractor's top. Proving that no such repeated holding exists
+            // is conservative but sufficient to prove the tractor safe.
+            repeated_unbeatable_above(
+                ctx,
+                ctx.trump.effective_suit(top.card),
+                boss_strength(ctx.trump, top.card),
+                *count,
+            )
+        }),
+    }
+}
+
+/// Classify whether a lead is one indivisible trick unit, or a compound whose
+/// every component is provably immune to throw invalidation from public
+/// information. The same decomposition selected by
+/// [`shengji_mechanics::trick::TrickFormat::from_cards`] is checked unit-by-unit,
+/// so cards consumed by a tractor cannot hide a vulnerable leftover singleton.
+/// The proof is deliberately conservative: singleton components must be boss
+/// cards, and repeated/tractor components must have no unseen strictly-higher
+/// repeated holding capable of stopping them.
+fn lead_safety(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> LeadSafety {
+    if cards.is_empty() {
+        return LeadSafety {
+            single_unit: false,
+            whole_play_safe: false,
+        };
+    }
+
+    let mut decompositions: Vec<Vec<TrickUnit>> = TrickUnit::find_plays(
+        ctx.trump,
+        p.propagated().tractor_requirements,
+        cards.iter().copied(),
+    )
+    .into_iter()
+    .collect();
+    // Keep this ordering in lockstep with TrickFormat::from_cards(None): the
+    // engine chooses the decomposition containing the largest unit, preferring
+    // a tractor over a repeated unit of equal size, and takes the final tie.
+    decompositions.sort_by_key(|units| {
+        units
+            .iter()
+            .map(|unit| (unit.size(), unit.is_tractor()))
+            .max()
+    });
+    let Some(units) = decompositions.pop() else {
+        return LeadSafety {
+            single_unit: false,
+            whole_play_safe: false,
+        };
+    };
+
+    let single_unit = units.len() == 1;
+    if single_unit {
+        return LeadSafety {
+            single_unit,
+            whole_play_safe: true,
+        };
+    }
+
+    let whole_play_safe = units
+        .iter()
+        .all(|unit| trick_unit_is_proven_safe(ctx, unit));
+
+    LeadSafety {
+        single_unit,
+        whole_play_safe,
+    }
+}
+
+/// Joker compounds are especially prone to a misleading max-card score: one
+/// unbeatable joker can mask a beatable low component. Keep single-unit joker
+/// plays and compounds whose *whole* throw is proven safe; omit speculative
+/// joker compounds from production lead rankings. The raw lead generator stays
+/// exhaustive for callers that need it, and follow candidates are unaffected.
+pub(crate) fn admissible_ranked_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> bool {
+    let contains_joker = cards
+        .iter()
+        .any(|card| matches!(card, Card::BigJoker | Card::SmallJoker));
+    if !contains_joker {
+        return true;
+    }
+
+    let safety = lead_safety(ctx, p, cards);
+    safety.single_unit || safety.whole_play_safe
+}
+
 /// Score a candidate lead (the NEW boss-aware scorer used by all real tiers).
 ///
 /// Encodes leading strategy with honest card-memory:
@@ -1313,6 +1421,11 @@ pub fn score_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
         .map(|c| boss_strength(trump, *c))
         .max()
         .unwrap_or(0);
+    let min_boss_strength = cards
+        .iter()
+        .map(|c| boss_strength(trump, *c))
+        .min()
+        .unwrap_or(0);
     let point_total: i32 = cards
         .iter()
         .filter_map(|c| c.points().map(|x| x as i32))
@@ -1326,34 +1439,19 @@ pub fn score_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
         .copied()
         .max_by_key(|c| boss_strength(trump, *c))
         .unwrap_or(lead);
-    let boss_worth_checking = max_boss_strength >= 13 || trumping;
+    let safety = lead_safety(ctx, p, cards);
+    let whole_play_safe = safety.whole_play_safe;
+    let boss_worth_checking = whole_play_safe && (max_boss_strength >= 13 || trumping);
     let is_boss = boss_worth_checking && is_boss_card(&ctx.k, trump, top);
-    let one_unit = TrickUnit::find_plays(
-        trump,
-        p.propagated().tractor_requirements,
-        cards.iter().copied(),
-    )
-    .into_iter()
-    .any(|units| units.len() == 1);
-    let playbook_safe_throw = ctx.enoch
-        && !one_unit
-        && Card::count(cards.iter().copied())
-            .into_iter()
-            .all(|(card, count)| {
-                if count == 1 {
-                    is_boss_card(&ctx.k, trump, card)
-                } else {
-                    repeated_unbeatable_above(
-                        ctx,
-                        trump.effective_suit(card),
-                        boss_strength(trump, card),
-                        count,
-                    )
-                }
-            });
-    let safe_throw = one_unit
-        || cards.iter().all(|card| is_boss_card(&ctx.k, trump, *card))
-        || playbook_safe_throw;
+
+    // A failed compound is governed by its vulnerable component, not by the
+    // joker or other winner attached to it. Safe units/throws receive their
+    // strongest-card value; speculative compounds receive only their weakest.
+    let credited_strength = if whole_play_safe {
+        max_boss_strength
+    } else {
+        min_boss_strength
+    };
 
     let mut score = 0.0;
 
@@ -1364,16 +1462,17 @@ pub fn score_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
     // Without this guard, the old max-card approximation gave an unsafe throw
     // containing one joker roughly +50 raw-strength points and treated its total
     // length like a tractor, causing routine failed throws.
-    if !safe_throw {
+    if !whole_play_safe {
         score -= (len - 1.0) * 50.0;
     }
 
-    // Modest reward for raw strength.
-    score += max_boss_strength as f64 * 0.05;
+    // Modest reward for raw strength. Unsafe compounds use their weakest
+    // component, so attaching a joker cannot manufacture a +50 strength bonus.
+    score += credited_strength as f64 * 0.05;
 
     // Guaranteed-winner bonuses. Jokers keep their flat floor; a *boss*
     // (uncatchable in its suit) non-trump unit is excellent.
-    if max_boss_strength >= 990 {
+    if whole_play_safe && max_boss_strength >= 990 {
         score += 8.0;
     }
     if is_boss && !trumping {
@@ -1386,7 +1485,11 @@ pub fn score_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
 
     // Near-boss: exactly one stronger copy still unseen in this suit. Leading it
     // is still strong (only one card can take it).
-    if !is_boss && boss_worth_checking && unseen_dominators(&ctx.k, trump, top) == 1 {
+    if whole_play_safe
+        && !is_boss
+        && boss_worth_checking
+        && unseen_dominators(&ctx.k, trump, top) == 1
+    {
         score += 3.0;
     }
 
@@ -1405,7 +1508,8 @@ pub fn score_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
         let counts = Card::count(cards.iter().copied());
         let joker_pair = counts.get(&Card::BigJoker).copied().unwrap_or(0) >= 2
             || counts.get(&Card::SmallJoker).copied().unwrap_or(0) >= 2;
-        if joker_pair {
+        let protected_joker_pair = whole_play_safe && joker_pair;
+        if protected_joker_pair {
             score += 2.0;
         }
         let me_is_landlord_side = !ctx.me_is_attacker;
@@ -1413,7 +1517,7 @@ pub fn score_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
             let draw_scale =
                 (ctx.unseen_trumps as f64 / (ctx.num_decks * 2) as f64).clamp(0.0, 1.0);
             score += 3.0 * draw_scale;
-        } else if !joker_pair {
+        } else if !protected_joker_pair {
             // Defender, or a small / non-boss trump: hoard it.
             score -= 5.0;
         }
@@ -2212,6 +2316,29 @@ pub fn ranked_leads(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
     let ctx = EvalCtx::build(p, me);
     let mut scored: Vec<ScoredPlay> = lead_candidates(p, me)
         .into_iter()
+        .filter(|cards| admissible_ranked_lead(&ctx, p, cards))
+        .map(|cards| {
+            let score = score_lead(&ctx, p, &cards);
+            ScoredPlay { cards, score }
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored
+}
+
+/// Root lead ranking without the public-information Joker-compound filter.
+/// Omniscient search uses this wider proposal set before validating candidates
+/// against its actual world, so a throw that is safe in that world is not lost
+/// merely because its safety was not publicly provable. Scores remain the same
+/// honest heuristic scores as [`ranked_leads`]. Rollout rankings stay filtered.
+pub(crate) fn ranked_leads_unfiltered(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
+    let ctx = EvalCtx::build(p, me);
+    let mut scored: Vec<ScoredPlay> = lead_candidates(p, me)
+        .into_iter()
         .map(|cards| {
             let score = score_lead(&ctx, p, &cards);
             ScoredPlay { cards, score }
@@ -2248,6 +2375,7 @@ pub(crate) fn ranked_leads_for_rollout(p: &PlayPhase, me: PlayerID) -> Vec<Score
     let ctx = EvalCtx::build(p, me);
     let mut scored: Vec<ScoredPlay> = rollout_lead_candidates(p, me)
         .into_iter()
+        .filter(|cards| admissible_ranked_lead(&ctx, p, cards))
         .map(|cards| ScoredPlay {
             score: score_lead(&ctx, p, &cards),
             cards,
@@ -2282,9 +2410,10 @@ fn dedup_card_sets(sets: &mut Vec<Vec<Card>>) {
     });
 }
 
-/// Whether a PAIR (or each pair of a tractor) whose top is `top` strength in side
-/// suit `eff` cannot be beaten by a higher PAIR an opponent could assemble — i.e.
-/// no strictly-higher same-suit rank still has >= 2 unseen copies. HONEST (reads
+/// Whether a PAIR (or each pair of a tractor) whose top is `top` strength in
+/// effective suit `eff` cannot be beaten by a higher PAIR a follower could
+/// assemble — i.e. no strictly-higher same-suit rank still has >= 2 unseen
+/// copies. HONEST (reads
 /// only `ctx.k.seen`, which counts our own hand + public play). Conservative for
 /// tractors (it requires each pair to be unbeatable, stronger than "no higher
 /// tractor"), so it never green-lights an unsafe throw.
@@ -2305,10 +2434,10 @@ fn pair_unbeatable_above(ctx: &EvalCtx, eff: EffectiveSuit, top: i32) -> bool {
     repeated_unbeatable_above(ctx, eff, top, 2)
 }
 
-/// Enoch-ONLY extra lead candidates: multi-unit "throws" (甩牌). The shared
-/// [`lead_candidates`] emits only single trick units, so without this Enoch (and
-/// Grandmaster, which proposes from the same playbook) could never make a throw.
-/// We emit two kinds of throw, each SAFE to lay down:
+/// Enoch-ONLY extra lead candidates: playbook-shaped multi-unit "throws" (甩牌).
+/// The shared [`lead_candidates`] emits bounded generic throws; this augments
+/// them with larger safe whole-suit/subset throws that Enoch and Grandmaster
+/// should actively consider. We emit two kinds, each SAFE to lay down:
 ///
 /// 1. The whole-suit throw, when it is safe wholesale: every card is an uncatchable
 ///    boss, OR every opponent is already known void in the suit (they can only
@@ -2408,13 +2537,14 @@ fn enoch_throw_candidates(ctx: &EvalCtx, p: &PlayPhase, me: PlayerID) -> Vec<Vec
 /// and as the search prior / rollout policy).
 pub fn ranked_leads_enoch(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
     let ctx = EvalCtx::build_enoch(p, me);
-    // Augment the shared single-unit candidates with full-suit throws (the shared
-    // generator never emits multi-unit leads), then de-duplicate.
+    // Augment the shared bounded candidates with the playbook's larger safe
+    // full-suit/subset throws, then de-duplicate.
     let mut cand_sets = lead_candidates(p, me);
     cand_sets.extend(enoch_throw_candidates(&ctx, p, me));
     dedup_card_sets(&mut cand_sets);
     let mut scored: Vec<ScoredPlay> = cand_sets
         .into_iter()
+        .filter(|cards| admissible_ranked_lead(&ctx, p, cards))
         .map(|cards| {
             let score = score_lead(&ctx, p, &cards);
             ScoredPlay { cards, score }
@@ -2425,6 +2555,25 @@ pub fn ranked_leads_enoch(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    scored
+}
+
+/// Enoch-policy counterpart to [`ranked_leads_unfiltered`]. This widens only
+/// root proposals for exact-world validation; normal Enoch rankings and all
+/// rollout rankings continue to reject unproven Joker compounds.
+pub(crate) fn ranked_leads_enoch_unfiltered(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
+    let ctx = EvalCtx::build_enoch(p, me);
+    let mut candidates = lead_candidates(p, me);
+    candidates.extend(enoch_throw_candidates(&ctx, p, me));
+    dedup_card_sets(&mut candidates);
+    let mut scored: Vec<ScoredPlay> = candidates
+        .into_iter()
+        .map(|cards| ScoredPlay {
+            score: score_lead(&ctx, p, &cards),
+            cards,
+        })
+        .collect();
+    scored.sort_by(|a, b| b.score.total_cmp(&a.score));
     scored
 }
 
@@ -2454,6 +2603,7 @@ pub(crate) fn ranked_leads_enoch_for_rollout(p: &PlayPhase, me: PlayerID) -> Vec
     dedup_card_sets(&mut candidates);
     let mut scored: Vec<ScoredPlay> = candidates
         .into_iter()
+        .filter(|cards| admissible_ranked_lead(&ctx, p, cards))
         .map(|cards| ScoredPlay {
             score: score_lead(&ctx, p, &cards),
             cards,
@@ -3215,6 +3365,262 @@ mod tests {
         );
         // Default 1-deck step size is 20.
         assert_eq!(ctx_landlord.step_size, Some(20));
+    }
+
+    #[test]
+    fn test_unsafe_joker_throw_uses_weakest_component_and_is_filtered_from_leads() {
+        let low_trump = card(Number::Three, Suit::Hearts);
+        let mut unsafe_throw = vec![Card::BigJoker, low_trump];
+        let (pp, ids) = make_play_phase([
+            unsafe_throw.clone(),
+            vec![card(Number::Ace, Suit::Hearts)],
+            vec![card(Number::King, Suit::Hearts)],
+            vec![card(Number::Queen, Suit::Hearts)],
+        ]);
+        canonicalize_play(pp.trump(), &mut unsafe_throw);
+
+        let ctx = EvalCtx::build(&pp, ids[0]);
+        let safety = lead_safety(&ctx, &pp, &unsafe_throw);
+        assert!(!safety.single_unit, "joker + low trump must be a throw");
+        assert!(
+            !safety.whole_play_safe,
+            "the beatable low-trump component makes the whole throw unsafe"
+        );
+
+        let throw_score = score_lead(&ctx, &pp, &unsafe_throw);
+        let low_score = score_lead(&ctx, &pp, &[low_trump]);
+        assert!(
+            throw_score < low_score,
+            "an unsafe joker throw ({}) must not inherit enough joker value to beat the direct low lead ({})",
+            throw_score,
+            low_score
+        );
+
+        assert!(
+            lead_candidates(&pp, ids[0]).contains(&unsafe_throw),
+            "the exhaustive raw root generator should remain unchanged"
+        );
+        assert!(
+            rollout_lead_candidates(&pp, ids[0]).contains(&unsafe_throw),
+            "the exhaustive raw rollout generator should remain unchanged"
+        );
+        assert!(
+            ranked_leads_unfiltered(&pp, ids[0])
+                .iter()
+                .any(|play| play.cards == unsafe_throw),
+            "exact-world root search must still be able to inspect the raw compound"
+        );
+        assert!(
+            ranked_leads_enoch_unfiltered(&pp, ids[0])
+                .iter()
+                .any(|play| play.cards == unsafe_throw),
+            "exact-world Enoch root search must still be able to inspect the raw compound"
+        );
+
+        let assert_filtered = |name: &str, ranked: Vec<ScoredPlay>| {
+            assert!(
+                !ranked.iter().any(|play| play.cards == unsafe_throw),
+                "{} must filter the unsafe joker compound",
+                name
+            );
+            assert!(
+                ranked.iter().any(|play| play.cards == vec![Card::BigJoker]),
+                "{} must retain the legitimate one-unit joker lead",
+                name
+            );
+        };
+        assert_filtered("normal root ranking", ranked_leads(&pp, ids[0]));
+        assert_filtered(
+            "normal rollout ranking",
+            ranked_leads_for_rollout(&pp, ids[0]),
+        );
+        assert_filtered("Enoch root ranking", ranked_leads_enoch(&pp, ids[0]));
+        assert_filtered(
+            "Enoch rollout ranking",
+            ranked_leads_enoch_for_rollout(&pp, ids[0]),
+        );
+    }
+
+    #[test]
+    fn test_throw_safety_checks_leftover_units_after_tractor_decomposition() {
+        let three = card(Number::Three, Suit::Hearts);
+        let four = card(Number::Four, Suit::Hearts);
+        let five = card(Number::Five, Suit::Hearts);
+        let throw = vec![three, three, three, four, four, Card::BigJoker];
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let (pp, ids) = make_play_phase_decks(
+            [
+                throw.clone(),
+                vec![five],
+                vec![card(Number::Six, Suit::Clubs)],
+                vec![card(Number::Seven, Suit::Diamonds)],
+            ],
+            3,
+            trump,
+        );
+
+        let decompositions: Vec<Vec<TrickUnit>> = TrickUnit::find_plays(
+            trump,
+            pp.propagated().tractor_requirements,
+            throw.iter().copied(),
+        )
+        .into_iter()
+        .collect();
+        assert!(decompositions.iter().any(|units| {
+            units.iter().any(TrickUnit::is_tractor)
+                && units.iter().any(|unit| unit.cards() == vec![three])
+        }));
+
+        let mut probe = pp.clone();
+        probe.play_cards(ids[0], &throw).unwrap();
+        assert!(
+            !probe
+                .trick()
+                .played_cards()
+                .last()
+                .unwrap()
+                .bad_throw_cards
+                .is_empty(),
+            "the hidden lone five must halt the leftover three singleton"
+        );
+
+        // Model a late-game public history where every higher trump is accounted
+        // for except one Five. Aggregate rank counts would call the triple Three
+        // and pair Four safe, but the tractor consumes two Threes and exposes the
+        // remaining Three as a beatable singleton.
+        let mut ctx = EvalCtx::build(&pp, ids[0]);
+        for higher in
+            boss_stronger_cards_in_suit(trump, EffectiveSuit::Trump, boss_strength(trump, three))
+        {
+            let configured = ctx.k.configured_copies(higher);
+            ctx.k.seen.insert(higher, configured);
+        }
+        let configured_fives = ctx.k.configured_copies(five);
+        ctx.k.seen.insert(five, configured_fives - 1);
+
+        assert!(repeated_unbeatable_above(
+            &ctx,
+            EffectiveSuit::Trump,
+            boss_strength(trump, three),
+            3
+        ));
+        assert!(repeated_unbeatable_above(
+            &ctx,
+            EffectiveSuit::Trump,
+            boss_strength(trump, four),
+            2
+        ));
+        assert!(
+            !is_boss_card(&ctx.k, trump, three),
+            "the one unseen Five still beats the leftover singleton"
+        );
+
+        let safety = lead_safety(&ctx, &pp, &throw);
+        assert!(!safety.single_unit);
+        assert!(
+            !safety.whole_play_safe,
+            "unit-aware safety must reject the vulnerable leftover singleton"
+        );
+        assert!(
+            !admissible_ranked_lead(&ctx, &pp, &throw),
+            "the overlapping unsafe Joker throw must be filtered"
+        );
+    }
+
+    #[test]
+    fn test_proven_safe_multi_unit_joker_throw_is_retained() {
+        // With both one-deck jokers in our hand, the small joker is also boss:
+        // the only higher card (the big joker) is accounted for. The two
+        // singleton components therefore form a provably safe compound.
+        let mut safe_throw = vec![Card::BigJoker, Card::SmallJoker];
+        let (pp, ids) = make_play_phase([
+            safe_throw.clone(),
+            vec![card(Number::Ace, Suit::Clubs)],
+            vec![card(Number::Ace, Suit::Diamonds)],
+            vec![card(Number::Ace, Suit::Spades)],
+        ]);
+        canonicalize_play(pp.trump(), &mut safe_throw);
+
+        let ctx = EvalCtx::build(&pp, ids[0]);
+        let safety = lead_safety(&ctx, &pp, &safe_throw);
+        assert!(!safety.single_unit, "two distinct jokers are two units");
+        assert!(
+            safety.whole_play_safe,
+            "every component is publicly proven unbeatable"
+        );
+
+        let assert_retained = |name: &str, ranked: Vec<ScoredPlay>| {
+            assert!(
+                ranked.iter().any(|play| play.cards == safe_throw),
+                "{} must retain a proven-safe joker compound",
+                name
+            );
+        };
+        assert_retained("normal root ranking", ranked_leads(&pp, ids[0]));
+        assert_retained(
+            "normal rollout ranking",
+            ranked_leads_for_rollout(&pp, ids[0]),
+        );
+        assert_retained("Enoch root ranking", ranked_leads_enoch(&pp, ids[0]));
+        assert_retained(
+            "Enoch rollout ranking",
+            ranked_leads_enoch_for_rollout(&pp, ids[0]),
+        );
+    }
+
+    #[test]
+    fn test_joker_plus_low_trump_follow_candidate_is_unaffected() {
+        let lead_trump = card(Number::Three, Suit::Hearts);
+        let low_trump = card(Number::Four, Suit::Hearts);
+        let mut follow = vec![Card::BigJoker, low_trump];
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let (mut pp, ids) = make_play_phase_decks(
+            [
+                vec![lead_trump, lead_trump],
+                follow.clone(),
+                vec![card(Number::Five, Suit::Clubs)],
+                vec![card(Number::Six, Suit::Clubs)],
+            ],
+            2,
+            trump,
+        );
+        pp.play_cards(ids[0], &[lead_trump, lead_trump]).unwrap();
+        canonicalize_play(pp.trump(), &mut follow);
+
+        assert!(
+            follow_candidates(&pp, ids[1]).contains(&follow),
+            "lead-only filtering must not alter the raw follow candidates"
+        );
+        assert!(
+            ranked_follows(&pp, ids[1])
+                .iter()
+                .any(|play| play.cards == follow),
+            "normal follow ranking must retain joker + low trump"
+        );
+        assert!(
+            ranked_follows_for_rollout(&pp, ids[1])
+                .iter()
+                .any(|play| play.cards == follow),
+            "normal rollout follow ranking must retain joker + low trump"
+        );
+        assert!(
+            ranked_follows_enoch(&pp, ids[1])
+                .iter()
+                .any(|play| play.cards == follow),
+            "Enoch follow ranking must retain joker + low trump"
+        );
+        assert!(
+            ranked_follows_enoch_for_rollout(&pp, ids[1])
+                .iter()
+                .any(|play| play.cards == follow),
+            "Enoch rollout follow ranking must retain joker + low trump"
+        );
     }
 
     /// #5 / #6 — Enoch/Grandmaster should open with a safe "near-unbeatable" set

@@ -249,7 +249,13 @@ impl Solver {
                 return Err(Aborted);
             }
             let mut probe = play.clone();
-            if probe.play_cards(actor, &cards).is_ok() {
+            if probe.play_cards(actor, &cards).is_ok()
+                && probe
+                    .trick()
+                    .played_cards()
+                    .last()
+                    .is_none_or(|played| played.bad_throw_cards.is_empty())
+            {
                 legal.push(cards);
             }
         }
@@ -373,6 +379,49 @@ mod tests {
         (play, ids)
     }
 
+    fn failed_joker_throw_position() -> (PlayPhase, Vec<PlayerID>) {
+        let ids: Vec<PlayerID> = (0..4).map(PlayerID).collect();
+        let mut propagated = PropagatedState::default();
+        propagated.players = ids
+            .iter()
+            .map(|id| Player::new(*id, format!("p{}", id.0)))
+            .collect();
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let low_trump = Card::Suited {
+            suit: Suit::Hearts,
+            number: Number::Three,
+        };
+        let high_trump = Card::Suited {
+            suit: Suit::Hearts,
+            number: Number::Four,
+        };
+        let mut hands = Hands::new(ids.iter().copied());
+        hands.set_trump(trump);
+        hands.add(ids[0], [Card::BigJoker, low_trump]).unwrap();
+        hands.add(ids[1], [high_trump]).unwrap();
+        hands.add(ids[2], [card(Number::Three)]).unwrap();
+        hands.add(ids[3], [card(Number::Four)]).unwrap();
+        let play = PlayPhase::new(
+            propagated,
+            1,
+            GameMode::Tractor,
+            hands,
+            vec![],
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0], ids[2]],
+            vec![],
+            vec![Deck::default()],
+            vec![],
+        )
+        .unwrap();
+        (play, ids)
+    }
+
     #[test]
     fn multiset_enumeration_is_complete_and_unique() {
         let mut hand = std::collections::HashMap::new();
@@ -401,5 +450,21 @@ mod tests {
         assert!(
             solve_small_endgame_exact(&hidden, ids[0], 4, 100, Duration::from_secs(1)).is_none()
         );
+    }
+
+    #[test]
+    fn exact_solver_omits_known_failed_throw_actions() {
+        let (play, ids) = failed_joker_throw_position();
+        let low_trump = Card::Suited {
+            suit: Suit::Hearts,
+            number: Number::Three,
+        };
+        let solver = Solver::new(ids[0], 100, None);
+        let actions = solver.legal_actions(&play, ids[0]).unwrap();
+
+        assert!(actions.contains(&vec![low_trump]));
+        assert!(!actions.iter().any(|action| {
+            action.len() == 2 && action.contains(&low_trump) && action.contains(&Card::BigJoker)
+        }));
     }
 }
