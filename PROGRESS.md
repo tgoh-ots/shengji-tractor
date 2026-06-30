@@ -10,6 +10,24 @@
 
 ## Current state (2026-06-30)
 
+### 2026-06-30 — Unsafe Joker throws fixed (live v39) + endgame ruff/model handoff
+
+- **Unsafe Joker compound fix (`4f9e5a8`, deployed as Fly v39):** lead safety now
+  follows the engine's actual trick-unit decomposition; unsafe compounds score from
+  their weakest component and cannot inherit Joker/boss bonuses. Honest rankings
+  suppress speculative Joker compounds, while Omniscient validates throws against
+  the true world and preserves genuinely safe ones. Exact endgame search also drops
+  known failed attempts. Core suite, bot baselines, clippy/fmt, and the end-to-end
+  hidden-information test passed before deployment.
+- **Next strategy/model work:** a late-game discussion exposed a real missing plan:
+  deliberately shed nontrumps, preserve matching trump quantity/shape, and defend or
+  attack the multiplied last-trick kitty instead of overpaying for empty tricks.
+  Exact mechanics corrections, current coverage, concrete heuristic/search gaps,
+  schema-v3 feature proposals, and deterministic test fixtures are recorded in
+  **`docs/strategy/endgame-ruff-kitty-model-handoff.md`**. Read that note before
+  changing Enoch/Grandmaster/Omniscient or retraining Expert; heuristic/search work
+  comes first because the named top tiers do not use the Expert net by default.
+
 ### 2026-06-30 — Playtest fixes (shipped v36) + eval tooling + re-distill finding
 From a round of user playtest feedback (parallel to, and merged with, the
 `codex/bot-overhaul` work in `610607c`/`bd2f3f6`):
