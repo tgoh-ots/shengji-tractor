@@ -39,7 +39,7 @@ mkdir -p "$WORKDIR"
 LOG="$WORKDIR/run.log"
 say() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
 
-VENV="$WORKDIR/venv"
+VENV="${VENV:-$HOME/.shengji-value-run/venv}"
 GEN="$REPO/target/release/examples/gen_training_data"
 PEVAL="$REPO/target/release/examples/paired_eval"
 FULL="$WORKDIR/data_full.csv"
@@ -108,7 +108,7 @@ fi
 say "stage3: concatenating $NUM_SHARDS shards (with per-shard group-id offsets) -> data_full.csv"
 head -1 "$WORKDIR/shard_0.csv" > "$FULL"
 for i in $(seq 0 $((NUM_SHARDS - 1))); do
-  awk -F, -v OFS=, -v off="$((i * 1000000000))" 'NR>1 { $1 = $1 + off; print }' "$WORKDIR/shard_$i.csv" >> "$FULL"
+  awk -F, -v OFS=, -v off="$((i * 10000000))" 'NR>1 { $1 = $1 + off; print }' "$WORKDIR/shard_$i.csv" >> "$FULL"
 done
 say "stage3: dataset has $(wc -l < "$FULL") rows, $(awk -F, 'NR>1{print $1}' "$FULL" | sort -u | wc -l | tr -d ' ') distinct decisions"
 

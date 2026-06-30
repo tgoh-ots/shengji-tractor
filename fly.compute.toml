@@ -1,0 +1,8 @@
+# Throwaway config for the CPU compute box (bot-training pipelines).
+# Used only to build/push the compute image without colliding with the game's
+# fly.toml. Not a long-running service — we run a machine + ssh in.
+app = "shengji-compute"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.compute"

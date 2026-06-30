@@ -41,7 +41,7 @@ use shengji_mechanics::types::{Card, PlayerID};
 
 use crate::bot::heuristics::{self, HeuristicVersion, ScoredPlay};
 use crate::bot::search::{search_play, SearchConfig};
-use crate::bot::{policy, BotDifficulty};
+use crate::bot::{expert, policy, BotDifficulty};
 use crate::game_state::draw_phase::DrawPhase;
 use crate::game_state::initialize_phase::InitializePhase;
 use crate::game_state::play_phase::PlayPhase;
@@ -69,6 +69,17 @@ pub enum PlayBrain {
     /// The search-less Easy policy with explicit knobs (ε blunder rate + softmax
     /// temperature), used by the Easy knob A/B. Honest (own redacted view).
     Easy { epsilon: f64, temperature: f64 },
+    /// Search-FREE argmax over the learned net's per-candidate score — the Oracle
+    /// (Deep Monte-Carlo) serve path. Honest (own redacted view). Scores candidates
+    /// with the process-global net (embedded or `SHENGJI_EXPERT_MODEL_PATH`) and
+    /// plays the best; falls back to the New-heuristic direct play if the net can't
+    /// run, so it is never illegal/None.
+    NetGreedy,
+    /// TEST-ONLY: plays like `Tier(difficulty)`, but biases the determinizer toward
+    /// the TRUE hidden hands with the given `belief` strength (oracle-belief
+    /// upper-bound for the Seer feasibility test). The search still reads ONLY the
+    /// redacted view; only the world-sampler peeks at the truth, and only here.
+    TierOracle { difficulty: BotDifficulty, belief: f64 },
 }
 
 /// One seat's full configuration: how it plays, bids, and buries the kitty. The
@@ -313,6 +324,33 @@ pub fn play_cards_for(s: &PlayPhase, actor: PlayerID, brain: &PlayBrain) -> Opti
             };
             let mut rng = StdRng::seed_from_u64(decision_seed(pp, actor));
             easy_play(pp, actor, *epsilon, *temperature, &mut rng)
+        }
+        PlayBrain::NetGreedy => {
+            let view = GameState::Play(s.clone()).for_player(actor);
+            match &view {
+                GameState::Play(pp) => expert::choose_play_expert(pp, actor)
+                    .or_else(|| heuristics::choose_play_direct(pp, actor, HeuristicVersion::New)),
+                _ => None,
+            }
+        }
+        PlayBrain::TierOracle { difficulty, belief } => {
+            // Honest search over the redacted view; the oracle sampler peeks at the
+            // TRUE hands (extracted from the unredacted `s`) — TEST ONLY.
+            let view = GameState::Play(s.clone()).for_player(actor);
+            let mut true_hands: std::collections::HashMap<PlayerID, Vec<Card>> =
+                std::collections::HashMap::new();
+            for p in s.propagated().players() {
+                if let Ok(h) = s.hands().get(p.id) {
+                    true_hands.insert(p.id, Card::cards(h.iter()).copied().collect());
+                }
+            }
+            crate::bot::determinize::set_oracle_belief(*belief, true_hands);
+            let res = match policy::select_action(&view, actor, *difficulty).ok().flatten() {
+                Some(Action::PlayCards(c)) => Some(c),
+                _ => None,
+            };
+            crate::bot::determinize::clear_oracle_belief();
+            res
         }
     }
 }

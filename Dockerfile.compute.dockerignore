@@ -1,0 +1,13 @@
+# Build-context ignore for the COMPUTE image (Dockerfile.compute). Unlike the
+# repo-root .dockerignore (tuned for the game deploy image, which excludes
+# training/ and *.md), this KEEPS training/ + the workspace sources and only
+# drops the heavy build/dep artifacts. BuildKit uses <dockerfile>.dockerignore
+# when present.
+.git/
+target/
+**/target/
+node_modules/
+**/node_modules/
+frontend/dist/
+**/dist/
+**/pkg/

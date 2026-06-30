@@ -23,9 +23,33 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 
 use shengji_mechanics::hands::Hands;
+use std::cell::RefCell;
+
 use shengji_mechanics::types::{Card, EffectiveSuit, PlayerID, Trump, FULL_DECK};
 
 use crate::game_state::play_phase::PlayPhase;
+
+thread_local! {
+    /// TEST-ONLY "oracle belief": `(strength, true_hands)`. Set ONLY by the
+    /// benchmark harness (`bot::harness`) to feasibility-test a learned belief
+    /// model (Seer): with probability `strength`, [`sample_hidden_hands`] pre-places
+    /// each hidden seat's TRUE cards, biasing the determinized world toward reality.
+    /// It is `None` in all production paths, so the live bot's sampling is byte-
+    /// unchanged and the honesty invariant is untouched (the SEARCH still reads only
+    /// the redacted view; only the world-SAMPLER peeks, and only under test).
+    static ORACLE_BELIEF: RefCell<Option<(f64, std::collections::HashMap<PlayerID, Vec<Card>>)>> =
+        const { RefCell::new(None) };
+}
+
+/// Install a test-only oracle belief for the current thread (see [`ORACLE_BELIEF`]).
+pub fn set_oracle_belief(strength: f64, true_hands: std::collections::HashMap<PlayerID, Vec<Card>>) {
+    ORACLE_BELIEF.with(|o| *o.borrow_mut() = Some((strength, true_hands)));
+}
+
+/// Clear the test-only oracle belief (restores pure honest sampling).
+pub fn clear_oracle_belief() {
+    ORACLE_BELIEF.with(|o| *o.borrow_mut() = None);
+}
 
 /// A determinized "world": a guess at every seat's full hand, consistent with
 /// the acting player's knowledge.
@@ -292,6 +316,36 @@ pub fn sample_hidden_hands<R: Rng>(
     }
     let mut remaining: HashMap<PlayerID, usize> =
         targets.iter().map(|(pid, ct)| (*pid, *ct)).collect();
+
+    // TEST-ONLY oracle-belief pre-pass (None in production → skipped entirely). With
+    // probability `strength`, pre-place each hidden seat's TRUE cards into its hand
+    // (removing them from `pool`), so the rest of the deal fills around a world biased
+    // toward reality. strength=1 ⇒ the exact true world; strength=0 ⇒ unchanged. This
+    // is the cheap upper bound for a learned belief model.
+    let oracle = ORACLE_BELIEF.with(|o| o.borrow().clone());
+    if let Some((strength, true_hands)) = oracle {
+        if strength > 0.0 {
+            for (pid, _) in &targets {
+                let truth = match true_hands.get(pid) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                for &card in truth {
+                    if *remaining.get(pid).unwrap_or(&0) == 0 {
+                        break;
+                    }
+                    if !rng.gen_bool(strength.clamp(0.0, 1.0)) {
+                        continue;
+                    }
+                    if let Some(idx) = pool.iter().position(|c| *c == card) {
+                        pool.remove(idx);
+                        assignment.get_mut(pid).unwrap().push(card);
+                        *remaining.get_mut(pid).unwrap() -= 1;
+                    }
+                }
+            }
+        }
+    }
 
     let void_of = |pid: PlayerID, suit: EffectiveSuit| -> bool {
         knowledge

@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1
+#
+# THROWAWAY CPU compute image for the bot-training pipelines
+# (docs/bot-superplay-plan.md). Built + run on a Fly performance machine; this is
+# NOT the game's deploy image (that's Dockerfile.deploy). It bakes in the Rust
+# toolchain, a CPU-torch venv, the repo, and the prebuilt release examples, then
+# idles so we can shell in and launch the (long, resumable) run under nohup.
+#
+#   fly machine run --dockerfile Dockerfile.compute --app shengji-compute \
+#     --region iad --vm-size performance-16x --vm-memory 32768
+#   fly ssh console -a shengji-compute     # then: cd /app && nohup bash training/run_all_cloud.sh > /root/all.out 2>&1 &
+FROM rust:1-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-venv python3-pip ca-certificates procps \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . /app
+
+# CPU-torch venv at the path every runner expects ($HOME=/root in the container).
+RUN python3 -m venv /root/.shengji-value-run/venv \
+ && /root/.shengji-value-run/venv/bin/pip install --no-cache-dir -q --upgrade pip \
+ && /root/.shengji-value-run/venv/bin/pip install --no-cache-dir -q numpy onnx \
+ && /root/.shengji-value-run/venv/bin/pip install --no-cache-dir -q \
+      torch --index-url https://download.pytorch.org/whl/cpu \
+ && /root/.shengji-value-run/venv/bin/python -c 'import torch,numpy,onnx; print("torch",torch.__version__)'
+
+# The base image's default stable toolchain is >= 1.87, so plain `cargo` works
+# (the pipelines read $CARGO; override the default "cargo +1.92.0").
+# Disable LTO + cap codegen units / jobs: LTO-linking 6 example binaries in
+# parallel OOM-kills the Fly remote builder (signal 9). The examples don't need
+# LTO (their runtime is dominated by the search budget, not codegen).
+ENV CARGO=cargo \
+    CARGO_PROFILE_RELEASE_LTO=false \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+RUN cargo build --release -j 2 -p shengji-core \
+      --example gen_training_data --example gen_dmc_data --example gen_exit_data \
+      --example paired_eval --example oracle_eval --example tournament
+
+# Idle; we launch the resumable pipeline via `fly ssh console`.
+CMD ["sleep", "infinity"]
