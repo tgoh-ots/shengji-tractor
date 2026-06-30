@@ -74,6 +74,17 @@ ladder is surfaced in the lobby (`AddAIPlayer.tsx`, i18n en/zh, regenerated
 win-rate gaps between strong policies are tiny (even the cheater is only ~61%);
 point-margin and large-n CIs are the reliable signals, and small samples mislead.
 
+**Value-head experiment (learned leaf eval) — executed, result NEUTRAL.** Ran the
+full `run_value_pipeline.sh` (DAgger data → multi-task policy+value ONNX → A/B) with
+the fixed Omniscient as teacher. Found+fixed a CRITICAL bug (sharded group IDs
+collided → trainer loaded ~10 of 226k decisions → junk net; fixed in the concat,
+commit `5351d8f`). Retrained net (226k decisions, value-RMSE 0.41) measured neutral
+on Expert/Enoch/Grandmaster — the aliasing floor + 12-trick static leaf already
+captures most signal. Value head stays default-OFF. **Full session writeup +
+operational gotchas (paired_eval is single-threaded, value blend is a no-op at a
+terminal leaf, duplicate-deck scoring bias, OMNI_BUDGET_MULT inflates the teacher,
+WORKDIR staleness, long-job SIGTERM reaping): `docs/grandmaster-and-value-head-findings.md`.**
+
 ### Bot ladder overhaul (earlier major work — shipped)
 The bot tiers were redesigned from `Easy/Hard/Expert/Omniscient` into a cleaner
 **four-tier ladder `Easy < Expert <= Enoch < Omniscient`**. (See `CLAUDE.md` →
