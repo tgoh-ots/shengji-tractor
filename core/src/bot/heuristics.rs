@@ -293,6 +293,36 @@ pub struct EvalCtx {
     pub kitty_points: Option<isize>,
 }
 
+/// Honest expected point value of the buried kitty for a seat that did NOT bury it
+/// (a non-exchanger), estimated from the UNSEEN card pool. The kitty is a random
+/// subset of the cards `me` cannot see (other hands + the kitty itself), so its
+/// expected points are its share of the points still unaccounted for:
+/// `unseen_points × kitty_size / unseen_cards`. As non-point cards leave play and
+/// points stay hidden (e.g. a strong declarer buried them), the unseen pool's point
+/// density — and thus this estimate — rises, which is exactly the "heavy bank when
+/// the declarer is strong" signal. HONEST: reads only `k.seen` (own hand + public
+/// play) and the PUBLIC kitty size; the buried cards themselves are never consulted.
+fn estimate_kitty_points(k: &Knowledge, kitty_size: usize, num_decks: usize) -> isize {
+    if kitty_size == 0 {
+        return 0;
+    }
+    // A standard deck holds 100 points (4×5 + 4×10 + 4×K = 100) and 54 cards.
+    let total_points = 100isize * num_decks as isize;
+    let total_cards = 54usize * num_decks;
+    let seen_points: isize = k
+        .seen
+        .iter()
+        .map(|(c, &n)| c.points().map(|x| x as isize).unwrap_or(0) * n as isize)
+        .sum();
+    let seen_cards: usize = k.seen.values().copied().sum();
+    let unseen_points = (total_points - seen_points).max(0);
+    let unseen_cards = total_cards.saturating_sub(seen_cards);
+    if unseen_cards == 0 {
+        return 0;
+    }
+    (unseen_points * kitty_size as isize) / unseen_cards as isize
+}
+
 impl EvalCtx {
     /// Build the context once for the acting player `me` from the redacted view
     /// (no Enoch playbook — used by Easy/Expert/Omniscient).
@@ -351,17 +381,27 @@ impl EvalCtx {
             Err(_) => (0, 0),
         };
 
-        // Kitty point value, but ONLY if we are the seat that buried it (the
-        // exchanger), for whom the kitty is un-redacted. Attackers / other
-        // defenders see `None` (the honesty boundary), so the endgame protection
-        // rule only fires for the seat that legitimately knows the kitty.
-        let kitty_points = if enoch && p.landlord() == me {
-            p.visible_kitty().map(|kitty| {
-                kitty
-                    .iter()
-                    .filter_map(|c| c.points().map(|x| x as isize))
-                    .sum()
-            })
+        // Kitty point value. The EXCHANGER (the landlord who buried it) knows it
+        // EXACTLY (un-redacted view). Every OTHER seat gets an HONEST ESTIMATE from
+        // the unseen-card point density (#2: "value the bank from what the declarer
+        // has been playing"): the kitty is a random subset of the cards we cannot
+        // see, so its expected value is its share of the points still unaccounted
+        // for. This naturally rises as non-point cards leave play and points stay
+        // hidden (a strong declarer who buried points leaves them unseen), so the
+        // endgame rules make a non-declarer play for the doubled bank on the last
+        // trick when it looks heavy. HONEST — the estimate reads only `k.seen`
+        // (own hand + public play) and the PUBLIC kitty SIZE, never the buried cards.
+        let kitty_points = if enoch {
+            if p.landlord() == me {
+                p.visible_kitty().map(|kitty| {
+                    kitty
+                        .iter()
+                        .filter_map(|c| c.points().map(|x| x as isize))
+                        .sum()
+                })
+            } else {
+                Some(estimate_kitty_points(&k, p.kitty_size(), num_decks))
+            }
         } else {
             None
         };
@@ -491,8 +531,9 @@ pub fn follow_candidates(p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
     }
 
     // If we have enough in-suit cards, also offer a few "which same-suit cards"
-    // variants: play the lowest non-points, and (separately) play points. These
-    // give the scorer meaningful choices when discarding within the led suit.
+    // variants: play the lowest cards, the highest cards, and a POINT-PROTECTING
+    // set (lowest NON-POINT first). These give the scorer meaningful choices when
+    // discarding within the led suit.
     if available_cards.len() >= num_required {
         let mut low_first = available_cards.clone();
         low_first.sort_by_key(|c| card_strength(trump, *c));
@@ -501,6 +542,15 @@ pub fn follow_candidates(p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
         let mut high_first = available_cards.clone();
         high_first.sort_by_key(|c| std::cmp::Reverse(card_strength(trump, *c)));
         candidates.push(high_first.iter().take(num_required).copied().collect());
+
+        // Point-protecting: on a large in-suit throw we may be forced to lay down
+        // several cards we can't win with — keep the 5s/10s/Ks and shed the lowest
+        // NON-POINT cards first (#3: "what to lay down on a big throw"). Only reaches
+        // for point cards if we must play more than we hold in non-points. (Filtered
+        // by `can_play_cards` below if the led throw's structure forbids it.)
+        let mut nonpoint_first = available_cards.clone();
+        nonpoint_first.sort_by_key(|c| (is_point(*c), card_strength(trump, *c)));
+        candidates.push(nonpoint_first.iter().take(num_required).copied().collect());
     } else {
         // We are short / void in the led suit. We must play all available in-suit
         // cards, then fill with off-suit. Offer variants of the off-suit fill:
@@ -535,6 +585,22 @@ pub fn follow_candidates(p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
                 vb.extend(trumps.iter().take(need).copied());
                 if vb.len() == num_required {
                     candidates.push(vb);
+                }
+
+                // Variant B': ruff preferring NON-PAIRED trumps, so we don't
+                // fragment a trump pair to take a trick that doesn't need one
+                // (#7: take a non-pair throw with non-paired trump). Singletons in
+                // hand first, then by strength; the scorer's pair-break penalty
+                // then favors this over Variant B when both can win.
+                let mut singleton_first = trumps.clone();
+                singleton_first.sort_by_key(|c| {
+                    let paired = hand.get(c).copied().unwrap_or(0) >= 2;
+                    (paired as i32, card_strength(trump, *c))
+                });
+                let mut vbp = available_cards.clone();
+                vbp.extend(singleton_first.iter().take(need).copied());
+                if vbp.len() == num_required {
+                    candidates.push(vbp);
                 }
             }
         } else if need == 0 {
@@ -1230,6 +1296,66 @@ pub fn score_follow_legacy(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> f64 {
 ///   defender) with the cheapest winner; otherwise starve them of points.
 /// * Threshold awareness: escalate point discipline when a donation would flip
 ///   the round, and reward feeds that push our team past a level threshold.
+///
+/// How costly it is to SPEND `card` on a trick we have already concluded we
+/// cannot win — i.e. the future-winner value we throw away by playing it now.
+/// Used by [`score_follow`]'s can't-win branch so the bot ducks with its LOWEST
+/// card and never burns a winner on a lost trick (the reported "plays the Ace /
+/// a redundant trump-rank card / a small joker under a higher one" blunders).
+///
+/// The ordering, worst-to-waste first: a joker, then the trump-rank card, then a
+/// high trump, then an uncatchable side-suit boss (e.g. an Ace), then ordinary
+/// cards (cost rising gently with rank so the absolute lowest junk is preferred).
+/// It is deliberately STEEP relative to the rest of the can't-win terms so the
+/// duck is decisive enough to survive the determinized search's prior/blend (the
+/// crude leaf `control` term alone washes out against rollout point variance).
+///
+/// Honest — reads only the trump declaration and (for the boss test) `ctx.k`,
+/// which derives purely from the redacted view + public play history.
+fn waste_penalty(ctx: &EvalCtx, card: Card) -> f64 {
+    let trump = ctx.trump;
+    let s = boss_strength(trump, card);
+    if s >= 999 {
+        12.0 // a joker — never burn one on a lost trick
+    } else if s >= 997 {
+        9.0 // the trump-rank (trump-number) card
+    } else if is_trump(trump, card) {
+        if s >= 11 {
+            6.0 // a high trump-suit card (J/Q/K/A of trump)
+        } else {
+            2.0 + s as f64 * 0.2 // a low trump still has ruffing value
+        }
+    } else if s >= 13 && is_boss_card(&ctx.k, trump, card) {
+        // An uncatchable side-suit card (e.g. an Ace) is a winner to cash later;
+        // the `s >= 13` gate keeps the (O(13)) boss scan off the low cards.
+        4.0
+    } else {
+        // Ordinary non-trump: cheap to throw, but prefer the absolute lowest.
+        s as f64 * 0.12
+    }
+}
+
+/// How many trump PAIRS in `me`'s hand would be fragmented (reduced to a lone
+/// singleton) by playing `cards`. Used to discourage breaking up a trump pair to
+/// ruff a trick that does not require one — #7: "take a non-pair throw with
+/// non-paired trump cards, not paired trumps." Honest — reads only our own hand.
+fn trump_pairs_broken(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> usize {
+    let hand = match p.hands().get(ctx.me) {
+        Ok(h) => h,
+        Err(_) => return 0,
+    };
+    let played = Card::count(cards.iter().copied());
+    let mut broken = 0usize;
+    for (&card, &pc) in &played {
+        if !is_trump(ctx.trump, card) {
+            continue;
+        }
+        let held = hand.get(&card).copied().unwrap_or(0);
+        broken += (held / 2).saturating_sub(held.saturating_sub(pc) / 2);
+    }
+    broken
+}
+
 pub fn score_follow(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
     if cards.is_empty() {
         return f64::NEG_INFINITY;
@@ -1374,9 +1500,16 @@ pub fn score_follow(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
                 score -= max_strength as f64 * 0.03;
             }
         } else {
-            // Branch D: we cannot (or shouldn't) win — starve them of points.
+            // Branch D: we cannot (or shouldn't) win — starve them of points and
+            // throw away the LEAST valuable card. "If the opponent is winning and
+            // no card you can play will win the trick, play the absolute lowest
+            // card." We penalize by each card's retention value (`waste_penalty`)
+            // so a joker / trump-rank / high trump / side-suit boss is never burnt
+            // on a lost trick — the bot ducks with its lowest junk instead. This is
+            // STEEP enough to survive the determinized search's prior/blend, where
+            // the crude leaf `control` term alone washes out against point variance.
             score -= my_point_contribution as f64 * 4.0;
-            score -= max_strength as f64 * 0.05;
+            score -= cards.iter().map(|c| waste_penalty(ctx, *c)).sum::<f64>();
             if trumping_in {
                 score -= 6.0;
             }
@@ -1415,6 +1548,27 @@ pub fn score_follow(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
             if our_total >= cur_step + step {
                 score += 5.0;
             }
+        }
+    }
+
+    // #7: when RUFFING a lead made up entirely of SINGLES (a single or a throw of
+    // singles — no pairs/tractors to match), winning needs only individual trumps,
+    // so don't fragment a trump pair to do it. Penalize each trump pair this play
+    // would break, so a non-paired-trump ruff (Variant B') is chosen over breaking
+    // a pair (Variant B) when both win. Gated to all-singles leads so a genuine
+    // pair/tractor ruff (which REQUIRES a trump pair) is never discouraged.
+    if trumping_in && would_beat {
+        let lead_all_singles = trick
+            .played_cards()
+            .first()
+            .map(|pc| {
+                Card::count(pc.cards.iter().copied())
+                    .values()
+                    .all(|&c| c == 1)
+            })
+            .unwrap_or(false);
+        if lead_all_singles {
+            score -= trump_pairs_broken(ctx, p, cards) as f64 * 4.0;
         }
     }
 
@@ -1526,16 +1680,42 @@ fn dedup_card_sets(sets: &mut Vec<Vec<Card>>) {
     });
 }
 
-/// Enoch-ONLY extra lead candidates: multi-unit "throws" (甩牌) — laying an entire
-/// non-trump side suit down at once. The shared [`lead_candidates`] emits only
-/// single trick units, so without this Enoch could never make the playbook's
-/// signature "lay out a long suit to drain everyone's trump" play. We only emit a
-/// full-suit throw when it is SAFE to lay down: either every card is an
-/// uncatchable boss (no opponent can beat any unit) OR every opponent is already
-/// known void in the suit (they can only ruff). The engine's [`PlayPhase::can_play_cards`]
-/// is the final arbiter of throw legality. HONEST — reads only our own hand +
-/// `ctx.k` (public memory). Returns nothing for non-Enoch tiers (never called by
-/// them).
+/// Whether a PAIR (or each pair of a tractor) whose top is `top` strength in side
+/// suit `eff` cannot be beaten by a higher PAIR an opponent could assemble — i.e.
+/// no strictly-higher same-suit rank still has >= 2 unseen copies. HONEST (reads
+/// only `ctx.k.seen`, which counts our own hand + public play). Conservative for
+/// tractors (it requires each pair to be unbeatable, stronger than "no higher
+/// tractor"), so it never green-lights an unsafe throw.
+fn pair_unbeatable_above(ctx: &EvalCtx, eff: EffectiveSuit, top: i32) -> bool {
+    let decks = ctx.k.num_decks.max(1);
+    for higher in boss_stronger_cards_in_suit(ctx.trump, eff, top) {
+        let unseen = decks.saturating_sub(ctx.k.seen.get(&higher).copied().unwrap_or(0));
+        if unseen >= 2 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Enoch-ONLY extra lead candidates: multi-unit "throws" (甩牌). The shared
+/// [`lead_candidates`] emits only single trick units, so without this Enoch (and
+/// Grandmaster, which proposes from the same playbook) could never make a throw.
+/// We emit two kinds of throw, each SAFE to lay down:
+///
+/// 1. The whole-suit throw, when it is safe wholesale: every card is an uncatchable
+///    boss, OR every opponent is already known void in the suit (they can only
+///    ruff — the trump-drain play).
+/// 2. The maximal SAFE SUBSET throw: the combination of every unit that is
+///    individually un-beatable IN SUIT — a boss single (e.g. an Ace), or a pair /
+///    tractor no higher pair can beat (e.g. `KK+A`, `AA+K`, a boss tractor + an
+///    Ace, or — holding `KQJ` — `TT+A`). Gated to when NO opponent is known void in
+///    the suit (so the throw can't simply be ruffed). This is the playbook's "open
+///    with an unbeatable / near-unbeatable set throw" idea, and it always attaches
+///    the cashable Ace to a safe tractor/pair.
+///
+/// The engine's [`PlayPhase::can_play_cards`] is the final arbiter of throw
+/// legality; duplicates against the single-unit candidates are removed by the
+/// caller's [`dedup_card_sets`]. HONEST — reads only our own hand + `ctx.k`.
 fn enoch_throw_candidates(ctx: &EvalCtx, p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
     let trump = ctx.trump;
     let hand = match p.hands().get(me) {
@@ -1558,7 +1738,13 @@ fn enoch_throw_candidates(ctx: &EvalCtx, p: &PlayPhase, me: PlayerID) -> Vec<Vec
         if eff == EffectiveSuit::Trump || suit_cards.len() < 2 {
             continue;
         }
-        let all_boss = suit_cards.iter().all(|c| is_boss_card(&ctx.k, trump, *c));
+        let any_opp_void = opp_ids.iter().any(|id| {
+            ctx.k
+                .voids
+                .get(id)
+                .map(|v| v.contains(&eff))
+                .unwrap_or(false)
+        });
         let all_opp_void = !opp_ids.is_empty()
             && opp_ids.iter().all(|id| {
                 ctx.k
@@ -1567,12 +1753,41 @@ fn enoch_throw_candidates(ctx: &EvalCtx, p: &PlayPhase, me: PlayerID) -> Vec<Vec
                     .map(|v| v.contains(&eff))
                     .unwrap_or(false)
             });
-        if !(all_boss || all_opp_void) {
-            continue;
+
+        // (1) Whole-suit throw, safe wholesale.
+        let all_boss = suit_cards.iter().all(|c| is_boss_card(&ctx.k, trump, *c));
+        if (all_boss || all_opp_void) && p.can_play_cards(me, &suit_cards).is_ok() {
+            out.push(suit_cards.clone());
         }
-        // The maximal throw: every card we hold in this suit, laid down at once.
-        if p.can_play_cards(me, &suit_cards).is_ok() {
-            out.push(suit_cards);
+
+        // (2) Maximal SAFE-SUBSET throw — only when no opponent can ruff it.
+        if !any_opp_void {
+            let counts = Card::count(suit_cards.iter().copied());
+            let mut safe: Vec<Card> = Vec::new();
+            let mut distinct_units = 0usize;
+            for (&card, &ct) in &counts {
+                let top = boss_strength(trump, card);
+                let unit_safe = if ct >= 2 {
+                    pair_unbeatable_above(ctx, eff, top)
+                } else {
+                    is_boss_card(&ctx.k, trump, card)
+                };
+                if unit_safe {
+                    for _ in 0..ct {
+                        safe.push(card);
+                    }
+                    distinct_units += 1;
+                }
+            }
+            // A genuine throw spans >= 2 units; a lone safe pair/tractor/single is
+            // already a single-unit lead candidate. Sort low-first for a stable
+            // representative `cards[0]`; dedup + legality are handled downstream.
+            if distinct_units >= 2 && safe.len() >= 2 {
+                safe.sort_by(|a, b| trump.compare(*a, *b));
+                if p.can_play_cards(me, &safe).is_ok() {
+                    out.push(safe);
+                }
+            }
         }
     }
     out
@@ -2304,6 +2519,42 @@ mod tests {
         (pp, ids)
     }
 
+    /// Like [`make_play_phase`] but with a configurable deck count and trump, for
+    /// tests (e.g. safe-throw generation) that need pairs/tractors a single deck
+    /// can't form. Seats 0 & 2 are the landlord team; seat 0 leads.
+    fn make_play_phase_decks(
+        hands: [Vec<Card>; 4],
+        num_decks: usize,
+        trump: Trump,
+    ) -> (PlayPhase, Vec<PlayerID>) {
+        let ids: Vec<PlayerID> = (0..4).map(PlayerID).collect();
+        let mut propagated = PropagatedState::default();
+        propagated.players = ids
+            .iter()
+            .map(|id| Player::new(*id, format!("p{}", id.0)))
+            .collect();
+        let mut h = Hands::new(ids.iter().copied());
+        h.set_trump(trump);
+        for (i, cards) in hands.iter().enumerate() {
+            h.add(ids[i], cards.iter().copied()).unwrap();
+        }
+        let pp = PlayPhase::new(
+            propagated,
+            num_decks,
+            GameMode::Tractor,
+            h,
+            vec![],
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0], ids[2]],
+            vec![],
+            vec![Deck::default(); num_decks],
+        )
+        .unwrap();
+        (pp, ids)
+    }
+
     #[test]
     fn test_evalctx_role_orientation() {
         // Seat 0 (landlord team) is a defender; seat 1 (non-landlord) is attacker.
@@ -2325,6 +2576,247 @@ mod tests {
         );
         // Default 1-deck step size is 20.
         assert_eq!(ctx_landlord.step_size, Some(20));
+    }
+
+    /// #5 / #6 — Enoch/Grandmaster should open with a safe "near-unbeatable" set
+    /// throw, attaching the cashable Ace to a pair no higher pair can beat. Holding
+    /// (in spades) an Ace + a King pair, the OTHER ace is the only spade above the
+    /// Kings; we hold one ace, so no `AA` pair can form → the `KK` pair is safe and
+    /// `KK + A` is a safe throw.
+    #[test]
+    fn test_enoch_throws_safe_pair_plus_ace() {
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let a_s = card(Number::Ace, Suit::Spades);
+        let k_s = card(Number::King, Suit::Spades);
+        let (pp, ids) = make_play_phase_decks(
+            [
+                vec![a_s, k_s, k_s, card(Number::Three, Suit::Clubs)], // seat0 Enoch leads
+                vec![
+                    card(Number::Four, Suit::Clubs),
+                    card(Number::Five, Suit::Diamonds),
+                ],
+                vec![
+                    card(Number::Six, Suit::Clubs),
+                    card(Number::Seven, Suit::Diamonds),
+                ],
+                vec![
+                    card(Number::Eight, Suit::Clubs),
+                    card(Number::Nine, Suit::Diamonds),
+                ],
+            ],
+            2,
+            trump,
+        );
+        let ctx = EvalCtx::build_enoch(&pp, ids[0]);
+        let throws = enoch_throw_candidates(&ctx, &pp, ids[0]);
+        let has_kk_a = throws.iter().any(|t| {
+            t.len() == 3
+                && t.iter().filter(|c| **c == a_s).count() == 1
+                && t.iter().filter(|c| **c == k_s).count() == 2
+        });
+        assert!(
+            has_kk_a,
+            "should generate the safe KK+A throw; got {:?}",
+            throws
+        );
+        // And the greedy Enoch lead should actually make the multi-card throw
+        // (attaching the Ace) rather than dribble out a single.
+        let played = choose_play_direct_enoch(&pp, ids[0]).unwrap();
+        assert!(
+            played.len() >= 3 && played.contains(&a_s),
+            "Enoch should open with the KK+A throw; got {:?}",
+            played
+        );
+    }
+
+    /// #3 — following a large throw we cannot win, lay down the lowest NON-POINT
+    /// cards and KEEP the points. Seat 0 throws four high spades; seat 1 must follow
+    /// four spades from {5♠(point) 6 7 8 9} and should shed 6-9, keeping the 5.
+    #[test]
+    fn test_follow_big_throw_protects_points() {
+        let five_s = card(Number::Five, Suit::Spades); // 5-point
+        let (mut pp, ids) = make_play_phase([
+            vec![
+                card(Number::Ace, Suit::Spades),
+                card(Number::King, Suit::Spades),
+                card(Number::Queen, Suit::Spades),
+                card(Number::Jack, Suit::Spades),
+            ],
+            vec![
+                five_s,
+                card(Number::Six, Suit::Spades),
+                card(Number::Seven, Suit::Spades),
+                card(Number::Eight, Suit::Spades),
+                card(Number::Nine, Suit::Spades),
+            ],
+            vec![card(Number::Three, Suit::Clubs)],
+            vec![card(Number::Four, Suit::Clubs)],
+        ]);
+        pp.play_cards(
+            ids[0],
+            &[
+                card(Number::Ace, Suit::Spades),
+                card(Number::King, Suit::Spades),
+                card(Number::Queen, Suit::Spades),
+                card(Number::Jack, Suit::Spades),
+            ],
+        )
+        .unwrap();
+        let played = choose_play_direct(&pp, ids[1], HeuristicVersion::New).unwrap();
+        assert!(
+            !played.contains(&five_s) && played.len() == 4,
+            "should keep the 5-point and shed non-points; got {:?}",
+            played
+        );
+    }
+
+    /// #7 — ruff a non-pair lead with a NON-PAIRED trump rather than fragmenting a
+    /// trump pair. Seat 0 leads the 10-point King of spades; seat 1 (attacker) is
+    /// void in spades and holds a low trump PAIR (3♥3♥) plus a singleton trump
+    /// (5♥). It should ruff with the singleton 5♥, keeping the pair intact.
+    #[test]
+    fn test_follow_ruffs_with_nonpaired_trump() {
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let three_h = card(Number::Three, Suit::Hearts);
+        let five_h = card(Number::Five, Suit::Hearts);
+        let (mut pp, ids) = make_play_phase_decks(
+            [
+                vec![
+                    card(Number::King, Suit::Spades),
+                    card(Number::Two, Suit::Clubs),
+                ],
+                vec![three_h, three_h, five_h, card(Number::Nine, Suit::Clubs)],
+                vec![
+                    card(Number::Four, Suit::Spades),
+                    card(Number::Six, Suit::Clubs),
+                ],
+                vec![
+                    card(Number::Seven, Suit::Spades),
+                    card(Number::Eight, Suit::Clubs),
+                ],
+            ],
+            2,
+            trump,
+        );
+        pp.play_cards(ids[0], &[card(Number::King, Suit::Spades)])
+            .unwrap();
+        let ctx = EvalCtx::build(&pp, ids[1]);
+        let ruff_singleton = score_follow(&ctx, &pp, &[five_h]);
+        let ruff_break_pair = score_follow(&ctx, &pp, &[three_h]);
+        assert!(
+            ruff_singleton > ruff_break_pair,
+            "should ruff with the singleton 5H ({}) rather than break the 3H pair ({})",
+            ruff_singleton,
+            ruff_break_pair,
+        );
+        let played = choose_play_direct(&pp, ids[1], HeuristicVersion::New).unwrap();
+        assert_eq!(
+            played,
+            vec![five_h],
+            "greedy follow should ruff with the non-paired trump; got {:?}",
+            played
+        );
+    }
+
+    /// #1 / #4 — when an opponent is winning and NO legal card can take the trick,
+    /// duck with the absolute lowest card; never burn a future winner. These use
+    /// the PLAIN (non-Enoch) scorer to prove the rule is shared across every tier.
+    #[test]
+    fn test_follow_ducks_low_over_near_boss_when_losing() {
+        // Seat 0 (defender) leads the boss Ace of spades. Seat 1 (attacker) must
+        // follow spades with the King (a future winner once the Ace is gone) or a
+        // low 3. It can't beat the Ace on the table, so it must keep the King and
+        // duck the 3.
+        let king_s = card(Number::King, Suit::Spades);
+        let low_s = card(Number::Three, Suit::Spades);
+        let (mut pp, ids) = make_play_phase([
+            vec![card(Number::Ace, Suit::Spades)],
+            vec![king_s, low_s],
+            vec![card(Number::Four, Suit::Spades)],
+            vec![card(Number::Five, Suit::Spades)],
+        ]);
+        pp.play_cards(ids[0], &[card(Number::Ace, Suit::Spades)])
+            .unwrap();
+        let ctx = EvalCtx::build(&pp, ids[1]);
+        let duck = score_follow(&ctx, &pp, &[low_s]);
+        let waste = score_follow(&ctx, &pp, &[king_s]);
+        assert!(
+            duck > waste,
+            "must duck the low 3 ({}) rather than waste the boss King ({}) \
+             on a trick it cannot win",
+            duck,
+            waste,
+        );
+        let played = choose_play_direct(&pp, ids[1], HeuristicVersion::New).unwrap();
+        assert_eq!(played, vec![low_s], "greedy follow should duck the lowest");
+    }
+
+    /// #4 — never ruff/follow with a redundant trump-rank card (here an off-suit
+    /// trump-number, all of which TIE and so cannot beat one already on the table)
+    /// when a low trump is available. Trump is Hearts/Two.
+    #[test]
+    fn test_follow_ducks_low_trump_over_offsuit_rank() {
+        // Seat 0 leads the trump-suit rank card (2 of hearts, the boss trump). Seat
+        // 1 must follow trump with an off-suit rank card (2 of clubs — effective
+        // trump, but ties the 2s and can't win) or a low trump (3 of hearts). Keep
+        // the valuable rank card; duck the low trump.
+        let offsuit_rank = card(Number::Two, Suit::Clubs); // off-suit trump number
+        let low_trump = card(Number::Three, Suit::Hearts);
+        let (mut pp, ids) = make_play_phase([
+            vec![card(Number::Two, Suit::Hearts)],
+            vec![offsuit_rank, low_trump],
+            vec![card(Number::Four, Suit::Hearts)],
+            vec![card(Number::Five, Suit::Hearts)],
+        ]);
+        pp.play_cards(ids[0], &[card(Number::Two, Suit::Hearts)])
+            .unwrap();
+        let ctx = EvalCtx::build(&pp, ids[1]);
+        let duck = score_follow(&ctx, &pp, &[low_trump]);
+        let waste = score_follow(&ctx, &pp, &[offsuit_rank]);
+        assert!(
+            duck > waste,
+            "must duck the low trump ({}) rather than waste the off-suit rank \
+             card ({}) on a trick it cannot win",
+            duck,
+            waste,
+        );
+    }
+
+    /// #4 — never play a small joker under a big joker already on the table.
+    #[test]
+    fn test_follow_ducks_under_higher_joker() {
+        // Seat 0 leads the Big Joker (the unbeatable trump top). Seat 1 must follow
+        // trump with the Small Joker (can't win) or a low trump; keep the joker.
+        let low_trump = card(Number::Three, Suit::Hearts);
+        let (mut pp, ids) = make_play_phase([
+            vec![Card::BigJoker],
+            vec![Card::SmallJoker, low_trump],
+            vec![card(Number::Four, Suit::Hearts)],
+            vec![card(Number::Five, Suit::Hearts)],
+        ]);
+        pp.play_cards(ids[0], &[Card::BigJoker]).unwrap();
+        let ctx = EvalCtx::build(&pp, ids[1]);
+        let duck = score_follow(&ctx, &pp, &[low_trump]);
+        let waste = score_follow(&ctx, &pp, &[Card::SmallJoker]);
+        assert!(
+            duck > waste,
+            "must duck the low trump ({}) rather than waste the small joker \
+             ({}) under the big joker",
+            duck,
+            waste,
+        );
+        let played = choose_play_direct(&pp, ids[1], HeuristicVersion::New).unwrap();
+        assert_eq!(
+            played,
+            vec![low_trump],
+            "greedy follow should keep the joker"
+        );
     }
 
     #[test]
@@ -2814,11 +3306,12 @@ mod tests {
         );
     }
 
-    /// The Enoch endgame kitty-protection read only fires for the seat that buried
-    /// the kitty (the exchanger/landlord) — an attacker, who cannot see the kitty,
-    /// gets `kitty_points == None`, preserving the honesty boundary.
+    /// #2 — the exchanger reads its OWN buried kitty EXACTLY; every other seat gets
+    /// an HONEST ESTIMATE from the unseen-card point density (never the buried
+    /// cards). We assert the non-exchanger's value equals the public-info estimate,
+    /// proving the honesty boundary holds (no hidden-card leak).
     #[test]
-    fn test_enoch_kitty_points_visible_only_to_exchanger() {
+    fn test_enoch_kitty_points_estimate_is_honest_for_non_exchanger() {
         let (pp, ids) = make_play_phase([
             vec![card(Number::Ace, Suit::Spades)],
             vec![card(Number::King, Suit::Spades)],
@@ -2828,15 +3321,19 @@ mod tests {
         // Seat 0 is the landlord/exchanger here; an attacker (seat 1) is not.
         let ctx_landlord = EvalCtx::build_enoch(&pp, ids[0]);
         let ctx_attacker = EvalCtx::build_enoch(&pp, ids[1]);
-        // The test fixture buries an empty kitty (vec![]), so the landlord sees a
-        // (zero-point) kitty value, while the attacker sees None.
         assert!(
             ctx_landlord.kitty_points.is_some(),
-            "the exchanger may read its own buried kitty"
+            "the exchanger may read its own buried kitty exactly"
         );
-        assert!(
-            ctx_attacker.kitty_points.is_none(),
-            "a non-exchanger must NOT see the kitty (honesty boundary)"
+        // The non-exchanger now gets an estimate (Some), derived ONLY from public
+        // info — it must match the value recomputed from its own honest Knowledge
+        // plus the PUBLIC kitty size, never the real buried cards.
+        let k = Knowledge::from_play_view_full_memory(&pp, ids[1]);
+        let expected = estimate_kitty_points(&k, pp.kitty_size(), pp.num_decks());
+        assert_eq!(
+            ctx_attacker.kitty_points,
+            Some(expected),
+            "a non-exchanger's kitty value must be the honest public-info estimate"
         );
     }
 

@@ -208,6 +208,15 @@ impl PlayPhase {
         }
     }
 
+    /// The NUMBER of cards buried in the kitty. This is public information (the
+    /// redacted view replaces the kitty cards with [`Card::Unknown`] but keeps the
+    /// count), so unlike [`PlayPhase::visible_kitty`] every seat may read it — used
+    /// by the bot heuristic to ESTIMATE the kitty's point value from the unseen
+    /// card pool without seeing the actual buried cards.
+    pub fn kitty_size(&self) -> usize {
+        self.kitty.len()
+    }
+
     /// The scoring "step size" (points per level threshold) for this hand, used
     /// by the bot heuristic to reason about how close the attacking team is to
     /// flipping the round. Returns `None` if the configured parameters are

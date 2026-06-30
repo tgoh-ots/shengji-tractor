@@ -3035,6 +3035,187 @@ fn test_pinned_bot_landlord_reveals_when_no_declaration() {
 }
 
 // ===========================================================================
+// Regression: a pinned BOT landlord at rank NO-TRUMP must ADVANCE (pick up the
+// kitty), NOT be handed `Action::RevealCard`.
+//
+// Production bug: with the landlord pinned at rank NT, the deck fully drawn, and
+// no bids possible ("No bidding in no trump!"), the no-bid branch of
+// `next_bot_action` handed the bot landlord `Action::RevealCard`. But
+// `DrawPhase::reveal_card` bails with "can't reveal card if the level is no
+// trump!" at NT, so the non-blocking driver logged the error and re-drove on
+// every tick — an endless red error flood ("Failed to drive bots
+// (non-blocking): can't reveal card if the level is no trump!") with the game
+// wedged. The fix: at NT a bot landlord PICKS UP the kitty (which
+// `DrawPhase::advance` handles for `Rank::NoTrump`, needing no bid) to advance
+// into Exchange; a human landlord still parks for the UI.
+// ===========================================================================
+
+/// Pin a fully-drawn Draw phase to a single bot landlord at rank NO-TRUMP, with
+/// no bids and un-biddable hands, then return the rebuilt game plus the bot
+/// landlord id. Mirrors the `serde_json` state-patching pattern of
+/// `test_pinned_bot_landlord_reveals_when_no_declaration`, additionally forcing
+/// every seat's level to NT ("NT" is `Rank::NoTrump`'s serialized form).
+fn pinned_no_trump_bot_landlord(logger: &Logger) -> (InteractiveGame, PlayerID) {
+    use shengji_mechanics::types::cards::{C_3, C_4};
+
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".to_string()).unwrap();
+    let mut bot_ids = vec![];
+    for _ in 0..4 {
+        let msgs = game
+            .interact(
+                Action::AddAIPlayer {
+                    difficulty: BotDifficulty::Easy,
+                },
+                host,
+                logger,
+            )
+            .unwrap();
+        bot_ids.push(added_bot_id(&msgs));
+    }
+    // Drop the human host so the table is all bots (no human-bid window applies
+    // at NT anyway, but this keeps the all-bot completion test below clean).
+    game.interact(Action::MakeObserver(host), host, logger)
+        .unwrap();
+    game.interact(Action::StartGame, bot_ids[0], logger)
+        .unwrap();
+    let landlord_bot = bot_ids[0];
+
+    let state = game.dump_state().unwrap();
+    let mut json = serde_json::to_value(&state).unwrap();
+    {
+        let draw = json.get_mut("Draw").expect("must be in Draw phase");
+        draw["deck"] = serde_json::json!([]);
+        draw["bids"] = serde_json::json!([]);
+        draw["autobid"] = serde_json::Value::Null;
+        // PINNED landlord = a bot, and every seat is at rank NO-TRUMP ("NT").
+        draw["propagated"]["landlord"] = serde_json::json!(landlord_bot.0);
+        for pl in draw["propagated"]["players"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+        {
+            pl["level"] = serde_json::json!("NT");
+        }
+
+        let c3 = C_3.as_char().to_string();
+        let c4 = C_4.as_char().to_string();
+        // Un-biddable junk (no jokers): nobody can declare at NT.
+        let mut hands_map = serde_json::Map::new();
+        for pl in draw["propagated"]["players"].as_array().unwrap() {
+            let id = pl["id"].as_u64().unwrap() as usize;
+            hands_map.insert(
+                id.to_string(),
+                serde_json::json!({ c3.clone(): 2, c4.clone(): 2 }),
+            );
+        }
+        draw["hands"]["hands"] = serde_json::Value::Object(hands_map);
+    }
+    let patched: GameState = serde_json::from_value(json).expect("patched Draw must deserialize");
+    (InteractiveGame::new_from_state(patched), landlord_bot)
+}
+
+#[test]
+fn test_pinned_bot_landlord_picks_up_kitty_at_no_trump() {
+    let logger = null_logger();
+    let (game, landlord_bot) = pinned_no_trump_bot_landlord(&logger);
+
+    // The driver must hand the bot landlord a (legal) kitty PICKUP — never the
+    // illegal `RevealCard` that floods the log at NT.
+    let (actor, action) = next_bot_action(&game, true)
+        .expect("next_bot_action must not error at a pinned NT landlord")
+        .expect("the pinned NT bot landlord must act");
+    assert_eq!(
+        actor, landlord_bot,
+        "the NT pickup must be issued by the pinned landlord bot"
+    );
+    assert!(
+        matches!(action, Action::PickUpKitty),
+        "at NT the bot landlord must PickUpKitty (reveal is illegal), got {:?}",
+        action
+    );
+
+    // The cheap classifier must agree there is paceable work (so the non-blocking
+    // driver plans/applies it), and the planned step must survive the apply-side
+    // re-check (the `DeclareOrReveal` key now accepts the landlord bot's pickup).
+    assert_eq!(
+        classify_next_bot_work(&game, true).unwrap(),
+        NextBotWork::Paceable,
+        "a pinned NT bot-landlord must classify as paceable bot work"
+    );
+    let mut game2 = game;
+    let step = plan_next_bot_action(&game2, true).unwrap().unwrap();
+    assert!(
+        matches!(step.action, Action::PickUpKitty),
+        "the planned NT step must be a kitty pickup, got {:?}",
+        step.action
+    );
+    assert!(
+        apply_planned_bot_action(&mut game2, &step, true, &logger)
+            .unwrap()
+            .is_some(),
+        "the freshly-planned NT kitty pickup must apply, not be dropped by the re-check"
+    );
+    // The pickup must advance the game into Exchange (NT has no trump to declare).
+    assert!(
+        matches!(game2.dump_state().unwrap(), GameState::Exchange(_)),
+        "picking up the kitty at NT must advance into the Exchange phase"
+    );
+}
+
+/// End-to-end: a fully-drawn all-bot table pinned at NT must run to a finished
+/// hand WITHOUT ever erroring — proving the flood/stall is gone and that play at
+/// NT completes (it exercises `advance_bots` from the wedged position forward).
+#[test]
+fn test_all_bot_no_trump_game_runs_to_completion() {
+    let logger = null_logger();
+    let (mut game, _landlord_bot) = pinned_no_trump_bot_landlord(&logger);
+
+    let mut iterations = 0;
+    loop {
+        let before = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+        // `false` = synchronous driver: a whole sequence of bot turns runs in one
+        // call. A re-introduced illegal RevealCard would surface as an `Err` here.
+        advance_bots(&mut game, &logger, false)
+            .expect("advance_bots must never error at a pinned NT landlord");
+        let after_state = game.dump_state().unwrap();
+
+        if let GameState::Play(p) = &after_state {
+            if p.game_finished() {
+                break;
+            }
+        }
+        if let GameState::Initialize(_) = &after_state {
+            panic!("NT game unexpectedly returned to Initialize");
+        }
+
+        let after = serde_json::to_string(&after_state).unwrap();
+        assert_ne!(
+            before, after,
+            "advance_bots made no progress at NT (stuck — the flood/stall bug)"
+        );
+
+        iterations += 1;
+        assert!(
+            iterations < 200,
+            "too many advance_bots calls at NT (stuck)"
+        );
+    }
+
+    match game.dump_state().unwrap() {
+        GameState::Play(p) => {
+            assert!(p.game_finished(), "expected a finished NT hand");
+            assert!(
+                p.hands().is_empty(),
+                "the NT play phase should consume all cards"
+            );
+            let (_init, _landlord_won, _msgs) = p.finish_game().unwrap();
+        }
+        other => panic!("expected a finished Play phase at NT, got {:?}", other),
+    }
+}
+
+// ===========================================================================
 // Regression: bots DECLARE DURING THE DRAW (before the deck is fully drawn),
 // as cards come out — not only after drawing completes. Bidding is not
 // turn-based, so any bot with an already-strong (partial) hand may make an
@@ -3465,9 +3646,17 @@ fn test_human_standing_winner_does_not_deadlock() {
             let hand = if id == host.0 {
                 // The host holds the S_2 they bid (plus filler).
                 serde_json::json!({ s2.clone(): 1, s3.clone(): 1, s4.clone(): 1, s5.clone(): 1 })
+            } else if id == other_human.0 {
+                // The OTHER human holds a LEGAL counter-bid (S_2 ×2: greater length
+                // than the standing S_2 ×1) but chooses NOT to use it. This keeps the
+                // test exercising "a human who CAN bid must still click 'Done bidding'"
+                // (rather than being implicitly done because they have no valid bid).
+                // Humans never auto-bid, so the standing winner stays the host.
+                serde_json::json!({ s2.clone(): 2, c5.clone(): 1, c6.clone(): 1 })
             } else {
-                // Everyone else holds only weak off-suit singles: no legal outbid of
-                // the standing single S_2 by count, so nobody supersedes the human.
+                // The Easy bots hold only weak off-suit singles: no legal outbid of the
+                // standing single S_2, and they don't flip (only Enoch flips), so
+                // nobody supersedes the human winner.
                 serde_json::json!({ c3.clone(): 1, c4.clone(): 1, c5.clone(): 1, c6.clone(): 1 })
             };
             hands_map.insert(id.to_string(), hand);
@@ -3551,6 +3740,314 @@ fn test_human_standing_winner_does_not_deadlock() {
             "the human winner must be able to pick up the kitty and advance; got {:?}",
             other
         ),
+    }
+}
+
+/// Build the EXACT reported "bidding freeze" position: one HUMAN (`host`) plus three
+/// **Enoch** bots, the deck fully drawn, a BOT (`bidding_bot`) holding the standing
+/// bid (`S_2` ×1), and the human holding a legal FLIP (a big-joker pair, the strongest
+/// possible counter-bid). The deferred driver parks here awaiting the human's explicit
+/// "Done bidding" vote. Returns the game, the human id, and the bot ids.
+///
+/// This mirrors the report: "When I'm not the bank/kitty, and I have an opportunity to
+/// flip bid (e.g. pair of joker, pair of the trump rank) and I don't take it..."
+fn enoch_flip_setup(logger: &Logger) -> (InteractiveGame, PlayerID, Vec<PlayerID>) {
+    use shengji_mechanics::types::cards::{C_3, C_4, S_2, S_3, S_4, S_5, S_6};
+
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".to_string()).unwrap();
+    let mut bot_ids = vec![];
+    for _ in 0..3 {
+        let msgs = game
+            .interact(
+                Action::AddAIPlayer {
+                    difficulty: BotDifficulty::Enoch,
+                },
+                host,
+                logger,
+            )
+            .unwrap();
+        bot_ids.push(added_bot_id(&msgs));
+    }
+    game.interact(Action::StartGame, host, logger).unwrap();
+    let bidding_bot = bot_ids[0];
+
+    let state = game.dump_state().unwrap();
+    let mut json = serde_json::to_value(&state).unwrap();
+    {
+        let draw = json.get_mut("Draw").expect("must be in Draw phase");
+        draw["deck"] = serde_json::json!([]);
+        // A single standing bid by `bidding_bot`: S_2 (count 1). Default
+        // ByWinningBid => the (only) bidder is the standing winner.
+        draw["bids"] = serde_json::json!([{
+            "id": bidding_bot.0, "card": S_2.as_char().to_string(), "count": 1, "epoch": 0
+        }]);
+        draw["autobid"] = serde_json::Value::Null;
+        draw["propagated"]["landlord"] = serde_json::Value::Null;
+
+        let s2 = S_2.as_char().to_string();
+        let s3 = S_3.as_char().to_string();
+        let s4 = S_4.as_char().to_string();
+        let s5 = S_5.as_char().to_string();
+        let s6 = S_6.as_char().to_string();
+        let bj = Card::BigJoker.as_char().to_string();
+        let c3 = C_3.as_char().to_string();
+        let c4 = C_4.as_char().to_string();
+
+        let mut hands_map = serde_json::Map::new();
+        for pl in draw["propagated"]["players"].as_array().unwrap() {
+            let id = pl["id"].as_u64().unwrap() as usize;
+            let hand = if id == bidding_bot.0 {
+                // Holds the single S_2 it bid (plus weak spade filler).
+                serde_json::json!({
+                    s2.clone(): 1, s3.clone(): 1, s4.clone(): 1, s5.clone(): 1, s6.clone(): 1,
+                })
+            } else if id == host.0 {
+                // The human holds a big-joker PAIR: a legal flip (count 2 > the
+                // standing count 1, under the default JokerOrGreaterLength policy).
+                serde_json::json!({ bj.clone(): 2, c3.clone(): 1, c4.clone(): 1 })
+            } else {
+                // The other Enoch bots hold only weak off-suit cards: nothing to
+                // flip with (so they don't muddy the scenario).
+                serde_json::json!({ c3.clone(): 2, c4.clone(): 2 })
+            };
+            hands_map.insert(id.to_string(), hand);
+        }
+        draw["hands"]["hands"] = serde_json::Value::Object(hands_map);
+    }
+    let patched: GameState = serde_json::from_value(json).expect("patched Draw must deserialize");
+    let mut game = InteractiveGame::new_from_state(patched);
+
+    // Drive the deferred (production) driver: no bot can flip (the other Enoch bots
+    // are weak), so it parks awaiting the human's explicit "Done bidding".
+    advance_bots(&mut game, logger, true).unwrap();
+    assert!(
+        is_parked_awaiting_human_done_bidding(&game).unwrap(),
+        "setup must reach the parked-awaiting-human-done-bidding position"
+    );
+    // The human has a legal flip but is NOT yet done.
+    match game.dump_state().unwrap() {
+        GameState::Draw(p) => {
+            assert!(
+                !p.valid_bids(host).unwrap().is_empty(),
+                "the human must have a legal flip (the big-joker pair) available"
+            );
+            assert!(
+                !p.all_humans_done_bidding(),
+                "the human (with a legal bid) must not be implicitly done"
+            );
+        }
+        other => panic!("expected Draw, got {:?}", other),
+    }
+    (game, host, bot_ids)
+}
+
+/// Step-1(a) / Step-3(a) regression: the LITERAL report. One human + three Enoch bots,
+/// a bot holds the standing bid, the human holds a legal flip and DECLINES it. The
+/// human clicks "Done bidding" and the game must finalize into Exchange/Play through
+/// the DEFERRED production driver -- it must NOT hang.
+#[test]
+fn test_human_declines_flip_then_marks_done_finalizes() {
+    let logger = null_logger();
+    let (mut game, host, _bot_ids) = enoch_flip_setup(&logger);
+
+    // The human DECLINES the flip and instead clicks "Done bidding". This single
+    // user action re-runs the bot driver, which now sees the only human is done and
+    // finalizes the standing bot.
+    let mut broadcasts = game
+        .interact(Action::MarkBiddingDone { ready: true }, host, &logger)
+        .unwrap();
+    let result = advance_bots(&mut game, &logger, true).unwrap();
+    broadcasts.extend(result.messages);
+
+    match game.dump_state().unwrap() {
+        GameState::Exchange(_) | GameState::Play(_) => {}
+        other => panic!(
+            "after the human declined the flip and marked done, the standing bot must \
+             finalize and advance; got {:?}",
+            other
+        ),
+    }
+}
+
+/// Step-1(b) / Step-3(b) regression: the HARDER case. The human declines its flip; an
+/// Enoch bot then FLIPS to a higher bid the human cannot beat, which CLEARS every
+/// "done bidding" flag (re-opening the window) and leaves the human with NO legal bid.
+/// Such a stranded human must NOT be required to click again: with no valid bids it is
+/// treated as IMPLICITLY done, so `all_humans_done_bidding` is satisfied and the game
+/// finalizes on its own. (Before the fix this was the freeze: the flip re-opened the
+/// window, the human had no way to respond, and the deferred driver parked forever.)
+#[test]
+fn test_enoch_flip_strands_human_then_finalizes_without_another_click() {
+    use shengji_mechanics::types::cards::{C_3, C_4, H_2, H_3, H_4, H_5, H_6, H_7, H_8, S_2};
+
+    let logger = null_logger();
+
+    // One human + three Enoch bots. A bot holds a weak standing bid (S_2 ×1); a
+    // DIFFERENT Enoch bot holds a dominant heart hand (the H_2 pair + a run of
+    // hearts) so it will FLIP to H_2 ×2 (count 2 > 1, greater length). The human
+    // holds only a single off-suit card -- it has NO legal bid at all, so once the
+    // flip clears the window the human can never respond.
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".to_string()).unwrap();
+    let mut bot_ids = vec![];
+    for _ in 0..3 {
+        let msgs = game
+            .interact(
+                Action::AddAIPlayer {
+                    difficulty: BotDifficulty::Enoch,
+                },
+                host,
+                &logger,
+            )
+            .unwrap();
+        bot_ids.push(added_bot_id(&msgs));
+    }
+    game.interact(Action::StartGame, host, &logger).unwrap();
+    let standing_bot = bot_ids[0];
+    let flipping_bot = bot_ids[1];
+
+    let state = game.dump_state().unwrap();
+    let mut json = serde_json::to_value(&state).unwrap();
+    {
+        let draw = json.get_mut("Draw").expect("must be in Draw phase");
+        draw["deck"] = serde_json::json!([]);
+        draw["bids"] = serde_json::json!([{
+            "id": standing_bot.0, "card": S_2.as_char().to_string(), "count": 1, "epoch": 0
+        }]);
+        draw["autobid"] = serde_json::Value::Null;
+        draw["propagated"]["landlord"] = serde_json::Value::Null;
+
+        let s2 = S_2.as_char().to_string();
+        let h2 = H_2.as_char().to_string();
+        let h3 = H_3.as_char().to_string();
+        let h4 = H_4.as_char().to_string();
+        let h5 = H_5.as_char().to_string();
+        let h6 = H_6.as_char().to_string();
+        let h7 = H_7.as_char().to_string();
+        let h8 = H_8.as_char().to_string();
+        let c3 = C_3.as_char().to_string();
+        let c4 = C_4.as_char().to_string();
+
+        let mut hands_map = serde_json::Map::new();
+        for pl in draw["propagated"]["players"].as_array().unwrap() {
+            let id = pl["id"].as_u64().unwrap() as usize;
+            let hand = if id == standing_bot.0 {
+                // Holds the single S_2 it bid (plus weak filler).
+                serde_json::json!({ s2.clone(): 1, c3.clone(): 1, c4.clone(): 1 })
+            } else if id == flipping_bot.0 {
+                // Dominant hearts: the H_2 pair (trump-number twins) + a long run.
+                serde_json::json!({
+                    h2.clone(): 2, h3.clone(): 1, h4.clone(): 1, h5.clone(): 1,
+                    h6.clone(): 1, h7.clone(): 1, h8.clone(): 1,
+                })
+            } else {
+                // The human (and the third bot) hold ONLY weak off-suit singles:
+                // NO biddable card (not the level rank, not a joker) -> no legal bid.
+                serde_json::json!({ c3.clone(): 1, c4.clone(): 1 })
+            };
+            hands_map.insert(id.to_string(), hand);
+        }
+        draw["hands"]["hands"] = serde_json::Value::Object(hands_map);
+    }
+    let patched: GameState = serde_json::from_value(json).expect("patched Draw must deserialize");
+    let mut game = InteractiveGame::new_from_state(patched);
+
+    // Sanity: the human has NO legal bid, so it can never respond to a flip.
+    match game.dump_state().unwrap() {
+        GameState::Draw(p) => assert!(
+            p.valid_bids(host).unwrap().is_empty(),
+            "for this scenario the human must have no legal bid"
+        ),
+        other => panic!("expected Draw, got {:?}", other),
+    }
+
+    // Drive the deferred (production) driver. The Enoch bot flips (S_2 -> H_2 ×2),
+    // which clears the done-bidding window. The freeze would be here: a re-opened
+    // window with a human who cannot respond. With the fix, the no-valid-bids human
+    // is implicitly done, so the driver keeps making progress to finalization. Loop
+    // (finishing any deferred beats) until it leaves Draw or we run out of patience.
+    // After EACH driver step, if we are still in Draw and the flip has landed (the
+    // flipping bot now holds the standing bid), assert the stranded human is counted
+    // as implicitly done -- otherwise the deferred driver would park forever (the
+    // freeze). Returns true once the flip has been observed.
+    let mut flipped = false;
+    let check_after_step = |game: &InteractiveGame, flipped: &mut bool| {
+        if let GameState::Draw(p) = game.dump_state().unwrap() {
+            if p.winning_bid().map(|b| b.id) == Some(flipping_bot) {
+                *flipped = true;
+                assert!(
+                    p.valid_bids(host).unwrap().is_empty(),
+                    "after the flip the human still has no legal bid"
+                );
+                assert!(
+                    p.all_humans_done_bidding(),
+                    "a human with no legal bid must be implicitly done after the flip \
+                     re-opens the window (otherwise the game freezes)"
+                );
+            }
+        }
+    };
+
+    for _ in 0..5000 {
+        let result = advance_bots(&mut game, &logger, true).unwrap();
+        check_after_step(&game, &mut flipped);
+        // Resume any deferred beats (action pace / trick clear), checking the state
+        // after each resume so a flip that lands mid-burst is observed in Draw.
+        let mut pending = result.pause;
+        while pending.is_some() {
+            let r = finish_deferred_bot_trick(&mut game, &logger).unwrap();
+            check_after_step(&game, &mut flipped);
+            pending = r.pause;
+        }
+        match game.dump_state().unwrap() {
+            GameState::Exchange(_) | GameState::Play(_) => {
+                assert!(
+                    flipped,
+                    "the Enoch bot should have flipped before finalizing"
+                );
+                return;
+            }
+            GameState::Initialize(_) => panic!("unexpectedly returned to the lobby"),
+            GameState::Draw(_) => {}
+        }
+    }
+    panic!(
+        "the game never finalized after the Enoch flip stranded the human (the reported freeze)"
+    );
+}
+
+/// Step-3(c) regression: the NEW "no valid bids => implicitly done" rule must NOT
+/// over-apply. A human who DOES hold a legal bid is still required to click "Done
+/// bidding": the driver must keep parking (NOT auto-finalize) until they do. This is
+/// exactly the `enoch_flip_setup` position (the human holds a big-joker pair flip).
+#[test]
+fn test_human_with_legal_bid_still_must_mark_done() {
+    let logger = null_logger();
+    let (mut game, _host, _bot_ids) = enoch_flip_setup(&logger);
+
+    // The human has a legal flip but has NOT clicked done. The driver must keep
+    // parking -- the new rule must not let a still-able human be auto-finalized.
+    let before = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+    advance_bots(&mut game, &logger, true).unwrap();
+    let after = serde_json::to_string(&game.dump_state().unwrap()).unwrap();
+    assert_eq!(
+        before, after,
+        "a human WITH a legal bid must still click 'Done bidding'; the driver must not \
+         auto-finalize on their behalf"
+    );
+    match game.dump_state().unwrap() {
+        GameState::Draw(p) => {
+            assert!(
+                !p.all_humans_done_bidding(),
+                "a human who still holds a legal bid is NOT implicitly done"
+            );
+            assert!(
+                is_parked_awaiting_human_done_bidding(&game).unwrap(),
+                "the driver must remain parked awaiting the human's done-bidding click"
+            );
+        }
+        other => panic!("expected still-in-Draw, got {:?}", other),
     }
 }
 

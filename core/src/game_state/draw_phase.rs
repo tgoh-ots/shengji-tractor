@@ -320,6 +320,16 @@ impl DrawPhase {
     /// shown a "Done bidding" button, so requiring it would deadlock whenever the
     /// winner is a human. This is the gate that replaces the old timed counter-bid
     /// grace: the landlord may be finalized only once this returns `true`.
+    ///
+    /// A human with NO legal bid right now (`valid_bids` is empty) is ALSO treated as
+    /// implicitly done. Such a seat physically cannot respond to the standing bid, so
+    /// requiring them to click "Done bidding" would deadlock the table: e.g. when an
+    /// Enoch bot FLIPS the declaration to a higher bid (which clears everyone's "done"
+    /// flag, re-opening the window) but the human cannot beat it, the human is
+    /// stranded with no way to act AND no longer marked done — the production "bidding
+    /// freeze". Counting a no-valid-bids human as implicitly done lets finalization
+    /// proceed. (A human who DOES hold a legal bid is unaffected: they must still
+    /// click "Done bidding" to release the bots — the normal counter-bid window.)
     pub fn all_humans_done_bidding(&self) -> bool {
         let standing_winner = self.standing_winner();
         self.propagated
@@ -329,7 +339,12 @@ impl DrawPhase {
             // The standing winner finalizes via the kitty pickup, not the "Done
             // bidding" button, so never require them to mark done.
             .filter(|p| Some(p.id) != standing_winner)
-            .all(|p| self.done_bidding.contains(&p.id))
+            .all(|p| {
+                // Explicitly marked done, OR cannot legally respond (no valid bid) so
+                // there is nothing to wait on — treat as implicitly done.
+                self.done_bidding.contains(&p.id)
+                    || self.valid_bids(p.id).map(|b| b.is_empty()).unwrap_or(true)
+            })
     }
 
     pub fn take_back_bid(&mut self, id: PlayerID) -> Result<(), Error> {

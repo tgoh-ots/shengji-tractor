@@ -350,10 +350,13 @@ enum BotResponsibility {
     PickUpKitty,
     /// No bid is decided yet: a seated bot may either DECLARE a trump (place a
     /// bid — legal whether or not a landlord is pinned) or, if the landlord is a
-    /// bot and nobody declares, REVEAL the bottom. The concrete action and seat
-    /// are policy-dependent, so the re-check (see [`Self::matches_action`] and
-    /// the dedicated arm in [`apply_planned_bot_action`]) accepts either a bid
-    /// from any seated bot or the landlord bot's reveal.
+    /// bot and nobody declares, REVEAL the bottom — UNLESS the pinned landlord's
+    /// level is NoTrump, in which case there is no trump to declare and revealing
+    /// is illegal, so the bot landlord instead PICKS UP the kitty to advance. The
+    /// concrete action and seat are policy-dependent, so the re-check (see
+    /// [`Self::matches_action`] and the dedicated arm in
+    /// [`apply_planned_bot_action`]) accepts a bid from any seated bot, the
+    /// landlord bot's reveal, or the NT landlord bot's kitty pickup.
     DeclareOrReveal,
     /// The winning bot finishes a completed, bot-won trick.
     EndTrick,
@@ -370,7 +373,12 @@ impl BotResponsibility {
             BotResponsibility::ResetGame => matches!(action, Action::ResetGame),
             BotResponsibility::PickUpKitty => matches!(action, Action::PickUpKitty),
             BotResponsibility::DeclareOrReveal => {
-                matches!(action, Action::Bid(..) | Action::RevealCard)
+                // A bid, the landlord bot's reveal, or — when the pinned landlord's
+                // level is NoTrump (reveal is illegal there) — its kitty pickup.
+                matches!(
+                    action,
+                    Action::Bid(..) | Action::RevealCard | Action::PickUpKitty
+                )
             }
             BotResponsibility::EndTrick => matches!(action, Action::EndTrick),
             // A policy-selected move: any of the per-phase select actions. We do
@@ -480,16 +488,19 @@ pub fn apply_planned_bot_action(
             // No-bid draw arm: the planner may either have ANY seated bot DECLARE
             // (which seat bids is policy-dependent, not necessarily the first
             // seated bot reported cheaply here) or have the pinned landlord (a
-            // bot) REVEAL the bottom. Accept either: a bid from any seated bot, or
-            // a reveal by the landlord seat. `interact` re-validates the concrete
-            // move's legality, and the cheap key being `DeclareOrReveal` already
+            // bot) REVEAL the bottom — or, when the pinned landlord's level is
+            // NoTrump (reveal is illegal there, see `next_bot_action`), have the
+            // landlord bot PICK UP the kitty to advance. Accept any of: a bid from
+            // any seated bot, a reveal by the landlord seat, or a kitty pickup by
+            // the landlord seat. `interact` re-validates the concrete move's
+            // legality, and the cheap key being `DeclareOrReveal` already
             // invalidates the step if the phase moved on since planning (e.g. a
             // bid landed, advancing to the bid-decided arm).
             let _ = bot_id;
             let state = game.dump_state()?;
             match &step.action {
                 Action::Bid(..) => bot_for(&state, step.bot_id).is_some(),
-                Action::RevealCard => {
+                Action::RevealCard | Action::PickUpKitty => {
                     state.propagated().landlord == Some(step.bot_id)
                         && bot_for(&state, step.bot_id).is_some()
                 }
@@ -1024,10 +1035,31 @@ fn next_bot_action(
                 // No bot wanted a strategic declaration. Resolve the remaining
                 // no-bid path by whether a landlord is pinned:
                 if let Some(landlord) = state.propagated().landlord {
-                    // A landlord is pinned. If it is a BOT, it reveals the bottom
-                    // (auto-bid) to fix the trump and proceed; if it is a HUMAN,
-                    // PARK so they can reveal / declare / pick up via the UI.
+                    // A landlord is pinned. At a NO-TRUMP level there is no trump
+                    // suit to declare (the trump is already NoTrump) and no bidding
+                    // is possible (`Bid::valid_bids` bails on a pinned NT landlord),
+                    // so revealing the bottom is ILLEGAL — `DrawPhase::reveal_card`
+                    // rejects it with "can't reveal card if the level is no trump!".
+                    // Handing a pinned BOT landlord `Action::RevealCard` here would
+                    // therefore error on every drive tick, flooding the log and
+                    // wedging the game. Instead, since `DrawPhase::advance` already
+                    // handles `Rank::NoTrump` (it sets `Trump::NoTrump`) and needs no
+                    // bid, a bot landlord simply ADVANCES via `Action::PickUpKitty`;
+                    // a HUMAN landlord still parks so they pick up via the UI. (No
+                    // bidding window applies at NT — nobody can bid — so an immediate
+                    // pickup by the bot landlord is correct.)
+                    let landlord_level = state
+                        .propagated()
+                        .players()
+                        .iter()
+                        .find(|pl| pl.id == landlord)
+                        .map(|pl| pl.rank());
+                    let landlord_is_no_trump =
+                        landlord_level == Some(shengji_mechanics::types::Rank::NoTrump);
                     return match bot_for(&state, landlord) {
+                        Some(_) if landlord_is_no_trump => {
+                            Ok(Some((landlord, Action::PickUpKitty)))
+                        }
                         Some(_) => Ok(Some((landlord, Action::RevealCard))),
                         None => Ok(None),
                     };
