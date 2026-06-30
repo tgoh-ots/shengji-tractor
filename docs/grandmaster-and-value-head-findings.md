@@ -1,9 +1,10 @@
 # Grandmaster tier + value-head experiment — findings & learnings
 
 > Session log (2026-06-29), written for a parallel session. Branch `worktree-better`
-> (commits `529eb35` Grandmaster+Omniscient, `5351d8f` value-pipeline bug fix), based
-> on master `46f44e9`. Companion to `docs/bot-training-roadmap.md` and
-> `docs/bot-eval-baseline.md`. Toolchain: **`cargo +1.92.0`** (default `stable` is 1.80, too old).
+> (Grandmaster + Omniscient fix + this doc), rebased onto master. The value-pipeline
+> group-collision bug below was ALSO independently caught + fixed on master in
+> `79f79e0`. Companion to `docs/bot-training-roadmap.md` and
+> `docs/bot-eval-baseline.md`. Toolchain pinned to rustc 1.92.0 via `rust-toolchain.toml`.
 
 ## TL;DR (read this first)
 
@@ -68,7 +69,7 @@ Enoch, Grandmaster was ~56% / +6 — the Enoch upgrade closed most of that gap.)
 Ran `training/run_value_pipeline.sh` (DAgger `mix` data → multi-task policy+value ONNX →
 paired A/B) with the fixed Omniscient as a 400ms teacher, 4000 games.
 
-**CRITICAL BUG found (now fixed in `5351d8f`):** sharded data-gen numbers decision-groups
+**CRITICAL BUG found (also independently fixed on master in `79f79e0`):** sharded data-gen numbers decision-groups
 (CSV col 1) per-process from ~0; stage-3 concat didn't re-number → **group IDs collided
 across shards**. The trainer (`train_expert.py::load_groups`) keeps only groups with exactly
 one `label==1`, so each collided group (NUM_SHARDS teacher-picks) was DROPPED → **"Loaded 10

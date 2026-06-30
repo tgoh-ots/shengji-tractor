@@ -135,7 +135,7 @@ fn play_one_hand(
     let seats: Vec<PlayerID> = draw.propagated().players().iter().map(|p| p.id).collect();
 
     let tier_of = |seat_idx: usize| -> BotDifficulty {
-        let is_landlord_team = seat_idx % 2 == 0;
+        let is_landlord_team = seat_idx.is_multiple_of(2);
         if is_landlord_team == a_is_landlord_team {
             a
         } else {
@@ -284,7 +284,7 @@ fn run_pair(a: BotDifficulty, b: BotDifficulty, num_games: usize, base_seed: u64
                         break;
                     }
                     let mut rng = StdRng::seed_from_u64(base_seed.wrapping_add(g as u64));
-                    let a_is_landlord_team = g % 2 == 0;
+                    let a_is_landlord_team = g.is_multiple_of(2);
                     if let Some(o) = play_one_hand(a_is_landlord_team, a, b, &mut rng) {
                         t.completed += 1;
                         if o.a_won {

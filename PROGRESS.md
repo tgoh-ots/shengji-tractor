@@ -76,9 +76,10 @@ point-margin and large-n CIs are the reliable signals, and small samples mislead
 
 **Value-head experiment (learned leaf eval) — executed, result NEUTRAL.** Ran the
 full `run_value_pipeline.sh` (DAgger data → multi-task policy+value ONNX → A/B) with
-the fixed Omniscient as teacher. Found+fixed a CRITICAL bug (sharded group IDs
-collided → trainer loaded ~10 of 226k decisions → junk net; fixed in the concat,
-commit `5351d8f`). Retrained net (226k decisions, value-RMSE 0.41) measured neutral
+the fixed Omniscient as teacher. Found a CRITICAL bug (sharded group IDs collided →
+trainer loaded ~10 of 226k decisions → junk net) — INDEPENDENTLY also caught + fixed
+on master in `79f79e0` (per-shard `i*1e9` group-id offset in the concat). Retrained
+net (226k decisions, value-RMSE 0.41) measured neutral
 on Expert/Enoch/Grandmaster — the aliasing floor + 12-trick static leaf already
 captures most signal. Value head stays default-OFF. **Full session writeup +
 operational gotchas (paired_eval is single-threaded, value blend is a no-op at a
