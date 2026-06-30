@@ -9,6 +9,14 @@
 //! * `lost-trick POINT-LEAK` — on such a trick, shed points when a 0-point duck existed (#3)
 //! * `ruff PAIR-FRAGMENTATION` — ruffing a singles lead, broke a trump pair when a
 //!   non-pair-breaking winning ruff existed (#7)
+//! * `failed TRUMP-SET` — selected an avoidable multi-unit trump throw which the
+//!   mechanics engine rejects against the actual (benchmark-only) hidden hands
+//! * `naked JOKER` — opened an empty trick with a lone joker when another legal
+//!   lead existed
+//! * `lost-trick ACE-WASTE` — burned a non-trump Ace on a trick no legal play
+//!   could win when an Ace-free duck existed
+//! * `ruffable PARTNER-FEED` — fed points under an apparent side-suit boss while a
+//!   publicly known-void opponent was still to act and a zero-point follow existed
 //!
 //! Crucially it is a COMMON-STATE comparison: the game is advanced by ONE roller
 //! policy, and at each decision both `New` and `Legacy` are scored on the IDENTICAL
@@ -26,27 +34,39 @@
 //!   cargo run --release --example decision_metrics -- [roller] [hands] [seed]
 //!     roller ∈ {new, legacy, enoch}  (default: new) — whose play ADVANCES the game
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::env;
 
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
+use shengji_core::bot::determinize::Knowledge;
 use shengji_core::bot::harness::{play_one_hand_instrumented, PlayBrain, Seat};
 use shengji_core::bot::heuristics::{self, HeuristicVersion};
 use shengji_core::bot::BotDifficulty;
 use shengji_core::game_state::play_phase::PlayPhase;
 use shengji_core::game_state::GameState;
+use shengji_mechanics::trick::{TractorRequirements, TrickUnit};
 use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Trump};
 
 #[derive(Default)]
 struct Metrics {
     decisions: usize,
+    leads: usize,
     lost: usize,
     waste: usize,
     point_leak: usize,
     ruff_singles: usize,
     fragment: usize,
+    trump_set_opportunities: usize,
+    failed_trump_set: usize,
+    naked_joker_opportunities: usize,
+    naked_joker: usize,
+    ace_waste_opportunities: usize,
+    ace_waste: usize,
+    ruffable_partner_feed_opportunities: usize,
+    ruffable_partner_feed: usize,
 }
 
 /// A PREMIUM card — value we should not burn on a lost trick: a joker, the
@@ -85,6 +105,108 @@ fn is_trump(trump: Trump, c: Card) -> bool {
     trump.effective_suit(c) == EffectiveSuit::Trump
 }
 
+fn is_nontrump_ace(trump: Trump, c: Card) -> bool {
+    matches!(
+        c,
+        Card::Suited {
+            number: Number::Ace,
+            ..
+        }
+    ) && !is_trump(trump, c)
+}
+
+fn is_naked_joker(cards: &[Card]) -> bool {
+    cards.len() == 1 && cards[0].is_joker()
+}
+
+/// A lead spanning multiple trick units in the trump effective suit. This is the
+/// mechanically precise shape behind examples such as `low trump + Joker` and
+/// `trump pair + Joker`; an actual failed throw is labelled separately by replaying
+/// the action through the mechanics engine on the benchmark's full state.
+fn is_multi_unit_trump_set(pp: &PlayPhase, cards: &[Card]) -> bool {
+    if cards.len() < 2 || !cards.iter().all(|&card| is_trump(pp.trump(), card)) {
+        return false;
+    }
+    !TrickUnit::find_plays(
+        pp.trump(),
+        // This example drives `HarnessConfig::default()`, whose table uses the
+        // mechanics default. `PropagatedState` intentionally keeps this field
+        // crate-private, so spell out the matching public default here.
+        TractorRequirements::default(),
+        cards.iter().copied(),
+    )
+    .into_iter()
+    .any(|units| units.len() == 1)
+}
+
+/// Whether the full-information benchmark state proves this proposed throw would
+/// be halted. The policy never sees `full`; it is used only as an objective label.
+fn throw_fails(full: &PlayPhase, actor: PlayerID, cards: &[Card]) -> bool {
+    let mut sim = full.clone();
+    if sim.play_cards(actor, cards).is_err() {
+        return false;
+    }
+    sim.trick()
+        .played_cards()
+        .last()
+        .filter(|played| played.id == actor)
+        .is_some_and(|played| !played.bad_throw_cards.is_empty())
+}
+
+/// Public-card-memory boss test for the card currently on top. This deliberately
+/// means "no stronger same-effective-suit copy remains unseen", not "the whole
+/// trick is locked": a known-void later opponent may still ruff it, which is the
+/// exact risky-feed situation measured below.
+fn is_apparent_boss(knowledge: &Knowledge, trump: Trump, card: Card) -> bool {
+    let suit = trump.effective_suit(card);
+    knowledge.configured_counts.iter().all(|(&other, &copies)| {
+        trump.effective_suit(other) != suit
+            || trump.compare_effective(card, other) != Ordering::Less
+            || knowledge.seen.get(&other).copied().unwrap_or(0) >= copies
+    })
+}
+
+fn ruffable_partner_boss(pp: &PlayPhase, actor: PlayerID, knowledge: &Knowledge) -> bool {
+    let trick = pp.trick();
+    let Some(format) = trick.trick_format() else {
+        return false;
+    };
+    // Keep the label exact and interpretable: a single side-suit boss can be
+    // overruffed, whereas compound formats require structure-specific reasoning.
+    if format.size() != 1 || format.suit() == EffectiveSuit::Trump {
+        return false;
+    }
+    let Some(winner) = trick.winner_so_far() else {
+        return false;
+    };
+    if winner == actor || !heuristics::same_team(pp, actor, winner) {
+        return false;
+    }
+    let Some(winner_card) = trick
+        .played_cards()
+        .iter()
+        .find(|played| played.id == winner)
+        .and_then(|played| played.cards.first().copied())
+    else {
+        return false;
+    };
+    if !is_apparent_boss(knowledge, pp.trump(), winner_card) {
+        return false;
+    }
+
+    let mut after_actor = trick.player_queue();
+    if after_actor.next() != Some(actor) {
+        return false;
+    }
+    after_actor.any(|player| {
+        !heuristics::same_team(pp, actor, player)
+            && knowledge
+                .voids
+                .get(&player)
+                .is_some_and(|voids| voids.contains(&format.suit()))
+    })
+}
+
 /// Would playing `cards` put `actor` on top of the trick? Simulate on a clone — the
 /// engine is the source of truth for the winner.
 fn wins_with(s: &PlayPhase, actor: PlayerID, cards: &[Card]) -> bool {
@@ -113,11 +235,39 @@ fn fragments_trump_pair(trump: Trump, hand: &HashMap<Card, usize>, cards: &[Card
 
 impl Metrics {
     /// Classify `chosen` (one version's move) on the redacted view `pp`.
-    fn observe(&mut self, pp: &PlayPhase, actor: PlayerID, chosen: &[Card]) {
+    fn observe(&mut self, pp: &PlayPhase, full: &PlayPhase, actor: PlayerID, chosen: &[Card]) {
         self.decisions += 1;
         let tf = match pp.trick().trick_format() {
             Some(tf) => tf.clone(),
-            None => return, // leading — different playbook, not scored here
+            None => {
+                self.leads += 1;
+                let candidates = heuristics::lead_candidates(pp, actor);
+                let trump_set_available = candidates
+                    .iter()
+                    .any(|candidate| is_multi_unit_trump_set(pp, candidate));
+                let atomic_alternative = candidates
+                    .iter()
+                    .any(|candidate| !is_multi_unit_trump_set(pp, candidate));
+                if trump_set_available && atomic_alternative {
+                    self.trump_set_opportunities += 1;
+                    if is_multi_unit_trump_set(pp, chosen) && throw_fails(full, actor, chosen) {
+                        self.failed_trump_set += 1;
+                    }
+                }
+
+                let naked_joker_available =
+                    candidates.iter().any(|candidate| is_naked_joker(candidate));
+                let nonjoker_alternative = candidates
+                    .iter()
+                    .any(|candidate| !candidate.iter().any(|card| card.is_joker()));
+                if naked_joker_available && nonjoker_alternative {
+                    self.naked_joker_opportunities += 1;
+                    if is_naked_joker(chosen) {
+                        self.naked_joker += 1;
+                    }
+                }
+                return;
+            }
         };
         let trump = pp.trick().trump();
         let hand: HashMap<Card, usize> = match pp.hands().get(actor) {
@@ -136,6 +286,19 @@ impl Metrics {
 
         if !can_get_on_top {
             self.lost += 1;
+            let ace_candidate_exists = candidates
+                .iter()
+                .any(|candidate| candidate.iter().any(|&card| is_nontrump_ace(trump, card)));
+            let ace_free_duck_exists = candidates.iter().any(|candidate| {
+                points_of(candidate) == 0
+                    && !candidate.iter().any(|&card| is_nontrump_ace(trump, card))
+            });
+            if ace_candidate_exists && ace_free_duck_exists {
+                self.ace_waste_opportunities += 1;
+                if chosen.iter().any(|&card| is_nontrump_ace(trump, card)) {
+                    self.ace_waste += 1;
+                }
+            }
             let chosen_premium = chosen.iter().any(|&c| is_premium(trump, c));
             // A TRUE-JUNK duck (no premium card AND no points) was available — so
             // spending a premium card is genuine waste, NOT a forced premium-vs-point
@@ -177,6 +340,27 @@ impl Metrics {
                 }
             }
         }
+
+        let knowledge = Knowledge::from_play_view(pp, actor);
+        if ruffable_partner_boss(pp, actor, &knowledge) {
+            let follows_suit = |candidate: &[Card]| {
+                candidate
+                    .iter()
+                    .all(|&card| trump.effective_suit(card) == tf.suit())
+            };
+            let point_feed_exists = candidates
+                .iter()
+                .any(|candidate| follows_suit(candidate) && points_of(candidate) > 0);
+            let zero_point_follow_exists = candidates
+                .iter()
+                .any(|candidate| follows_suit(candidate) && points_of(candidate) == 0);
+            if point_feed_exists && zero_point_follow_exists {
+                self.ruffable_partner_feed_opportunities += 1;
+                if follows_suit(chosen) && points_of(chosen) > 0 {
+                    self.ruffable_partner_feed += 1;
+                }
+            }
+        }
     }
 }
 
@@ -199,6 +383,24 @@ fn report(label: &str, m: &Metrics) {
         pct(m.fragment, m.ruff_singles),
         m.fragment,
         m.ruff_singles,
+    );
+    println!(
+        "  {label:<12}  TRUMP-SET {} ({}/{})   NAKED-JOKER {} ({}/{})   ACE-WASTE {} ({}/{})   RUFFABLE-FEED {} ({}/{})",
+        pct(m.failed_trump_set, m.trump_set_opportunities),
+        m.failed_trump_set,
+        m.trump_set_opportunities,
+        pct(m.naked_joker, m.naked_joker_opportunities),
+        m.naked_joker,
+        m.naked_joker_opportunities,
+        pct(m.ace_waste, m.ace_waste_opportunities),
+        m.ace_waste,
+        m.ace_waste_opportunities,
+        pct(
+            m.ruffable_partner_feed,
+            m.ruffable_partner_feed_opportunities
+        ),
+        m.ruffable_partner_feed,
+        m.ruffable_partner_feed_opportunities,
     );
 }
 
@@ -246,10 +448,10 @@ fn main() {
             let view = GameState::Play(s.clone()).for_player(actor);
             if let GameState::Play(pp) = &view {
                 if let Some(np) = play_of(s, actor, HeuristicVersion::New) {
-                    new_m.observe(pp, actor, &np);
+                    new_m.observe(pp, s, actor, &np);
                 }
                 if let Some(lp) = play_of(s, actor, HeuristicVersion::Legacy) {
-                    legacy_m.observe(pp, actor, &lp);
+                    legacy_m.observe(pp, s, actor, &lp);
                 }
             }
         });

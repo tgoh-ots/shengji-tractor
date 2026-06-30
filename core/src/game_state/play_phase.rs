@@ -375,6 +375,16 @@ impl PlayPhase {
             .map(|s| s as isize)
     }
 
+    /// Exact configured point boundary where the attacking (non-landlord) team
+    /// first wins the hand. This is usually 80 in two-deck Tractor, but bots must
+    /// not hard-code that value because deck/scoring settings are configurable.
+    pub fn bot_non_landlord_turnover_score(&self) -> Option<isize> {
+        self.propagated
+            .game_scoring_parameters
+            .non_landlord_turnover_score(&self.decks)
+            .ok()
+    }
+
     /// The landlord seat.
     pub fn landlord(&self) -> PlayerID {
         self.landlord

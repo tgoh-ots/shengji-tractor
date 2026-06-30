@@ -117,6 +117,17 @@ impl GameScoringParameters {
         }
     }
 
+    /// The first attacking-team point total that takes the contract away from
+    /// the landlord team for this exact scoring configuration.
+    ///
+    /// This deliberately comes from the materialized score bands rather than
+    /// assuming the common two-deck `80` boundary. Bots and analysis tools use
+    /// it to reason about custom deck counts, dead zones, and step adjustments
+    /// without duplicating scoring policy.
+    pub fn non_landlord_turnover_score(&self, decks: &[Deck]) -> Result<isize, Error> {
+        self.materialize(decks)?.non_landlord_turnover_score()
+    }
+
     pub fn materialize(&self, decks: &[Deck]) -> Result<MaterializedScoringParameters, Error> {
         if self.num_steps_to_non_landlord_turnover == 0 {
             bail!("Landlord team must be able to win")
@@ -273,6 +284,14 @@ impl MaterializedScoringParameters {
             }
         }
         bail!("Failed to score game!")
+    }
+
+    /// See [`GameScoringParameters::non_landlord_turnover_score`].
+    pub fn non_landlord_turnover_score(&self) -> Result<isize, Error> {
+        self.landlord_wins
+            .last()
+            .map(|segment| segment.end)
+            .ok_or_else(|| anyhow!("Landlord must be able to win"))
     }
 
     pub fn next_relevant_score(
@@ -433,6 +452,21 @@ mod tests {
     use super::{compute_level_deltas, BonusLevelPolicy, GameScoreResult, GameScoringParameters};
 
     use crate::deck::Deck;
+
+    #[test]
+    fn non_landlord_turnover_comes_from_materialized_score_bands() {
+        let gsp = GameScoringParameters::default();
+        assert_eq!(
+            gsp.non_landlord_turnover_score(&[Deck::default(), Deck::default()])
+                .unwrap(),
+            80
+        );
+        assert_eq!(
+            gsp.non_landlord_turnover_score(&[Deck::default(), Deck::default(), Deck::default(),])
+                .unwrap(),
+            120
+        );
+    }
 
     #[test]
     fn test_level_deltas() {

@@ -1509,7 +1509,17 @@ fn evaluate_position(sim: &PlayPhase, me: PlayerID) -> f64 {
         })
         .unwrap_or(0.0);
 
-    let static_eval = realized + control;
+    // The hand objective is discontinuous at the turnover boundary: securing
+    // the contract (80 in standard two-deck Tractor) matters more than gambling
+    // that win for the next level at 120. `current_game_score` is intentionally
+    // valid provisionally, so use the exact configured win/level band as the
+    // dominant signal at every leaf, with raw points and retained control only
+    // as within-band tie-breakers. This keeps finished and unfinished candidate
+    // rollouts in one unit system and generalizes to custom scoring settings.
+    let provisional_level_utility = level_utility(sim, me);
+    let static_eval = provisional_level_utility
+        .map(|utility| utility * expert::VALUE_NORM + realized * 0.01 + control)
+        .unwrap_or(realized + control);
 
     // A schema-v2 state head predicts the real hand objective (win plus awarded
     // levels). Replace the point-valued leaf wholesale; never multiply it by the
@@ -1518,13 +1528,17 @@ fn evaluate_position(sim: &PlayPhase, me: PlayerID) -> f64 {
     // static proxy so every candidate remains comparable in roughly [-1, 1].
     if level_value_leaf_enabled() {
         if sim.game_finished() {
-            if let Some(value) = terminal_level_utility(sim, me) {
+            if let Some(value) = provisional_level_utility {
                 return value;
             }
         } else if let Some(value) = level_value_estimate(sim, me) {
             return value;
         }
-        return (static_eval / expert::VALUE_NORM).tanh();
+        return provisional_level_utility
+            .map(|utility| {
+                (utility + (realized * 0.01 + control) / expert::VALUE_NORM).clamp(-1.0, 1.0)
+            })
+            .unwrap_or((static_eval / expert::VALUE_NORM).tanh());
     }
 
     // Optional learned-VALUE blend. Default OFF (`SHENGJI_VALUE_WEIGHT` unset → 0),
@@ -1544,17 +1558,38 @@ fn evaluate_position(sim: &PlayPhase, me: PlayerID) -> f64 {
     }
 }
 
-fn terminal_level_utility(sim: &PlayPhase, me: PlayerID) -> Option<f64> {
-    let score = sim.current_game_score().ok()?;
-    let me_is_landlord = sim.landlords_team().contains(&me);
-    let me_won = me_is_landlord == score.landlord_won;
-    let levels = if score.landlord_won {
-        score.landlord_delta
+fn oriented_level_utility(
+    landlord_won: bool,
+    landlord_delta: usize,
+    non_landlord_delta: usize,
+    me_is_landlord: bool,
+) -> f64 {
+    let me_won = me_is_landlord == landlord_won;
+    let levels = if landlord_won {
+        landlord_delta
     } else {
-        score.non_landlord_delta
+        non_landlord_delta
     };
     let magnitude = ((1 + levels) as f64 / expert::LEVEL_UTILITY_NORM as f64).min(1.0);
-    Some(if me_won { magnitude } else { -magnitude })
+    if me_won {
+        magnitude
+    } else {
+        -magnitude
+    }
+}
+
+/// Signed win/level utility under the exact configured score bands. Despite the
+/// historical name of this path, `current_game_score` is valid before terminal
+/// play and provides the crucial provisional "if scoring stopped now" objective.
+fn level_utility(sim: &PlayPhase, me: PlayerID) -> Option<f64> {
+    let score = sim.current_game_score().ok()?;
+    let me_is_landlord = sim.landlords_team().contains(&me);
+    Some(oriented_level_utility(
+        score.landlord_won,
+        score.landlord_delta,
+        score.non_landlord_delta,
+        me_is_landlord,
+    ))
 }
 
 /// Typed schema-v2 state value, oriented from the next actor to the root team.
@@ -1626,8 +1661,8 @@ fn net_value_estimate(sim: &PlayPhase, me: PlayerID) -> Option<f64> {
 mod tests {
     use super::{
         adaptive_fraction_from_signals, canonicalize_ranked_candidates, normalized_entropy,
-        ranked_candidates, ranked_candidates_perfect_information, remove_known_failed_throws,
-        risk_adjusted_value, Policy, RiskConfig, ScoredPlay,
+        oriented_level_utility, ranked_candidates, ranked_candidates_perfect_information,
+        remove_known_failed_throws, risk_adjusted_value, Policy, RiskConfig, ScoredPlay,
     };
     use shengji_mechanics::deck::Deck;
     use shengji_mechanics::hands::Hands;
@@ -1871,6 +1906,26 @@ mod tests {
         assert!(
             risk_adjusted_value(&[-2.0, 2.0], cautious)
                 < risk_adjusted_value(&[0.0, 0.0], cautious)
+        );
+    }
+
+    #[test]
+    fn win_boundary_dominates_gambling_for_the_next_level() {
+        // Attacker perspective: below turnover is a loss; turnover is a win;
+        // the next band is a larger win. A sure basic win must beat a 50/50
+        // gamble between losing and gaining the extra level, even though raw
+        // point expectation would prefer 97.5 over a sure 80.
+        let lose_below_turnover = oriented_level_utility(true, 0, 0, false);
+        let sure_turnover_win = oriented_level_utility(false, 0, 0, false);
+        let next_level_win = oriented_level_utility(false, 0, 1, false);
+        let gamble = (lose_below_turnover + next_level_win) / 2.0;
+        assert!(sure_turnover_win > gamble);
+        assert!(next_level_win > sure_turnover_win);
+
+        // Team orientation is exactly antisymmetric.
+        assert_eq!(
+            sure_turnover_win,
+            -oriented_level_utility(false, 0, 0, true)
         );
     }
 }

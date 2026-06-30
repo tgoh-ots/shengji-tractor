@@ -264,6 +264,9 @@ pub struct EvalCtx {
     /// Points per level-threshold step. `None` ⇒ scoring params invalid for the
     /// current decks; all threshold-bonus terms are then disabled (never crash).
     pub step_size: Option<isize>,
+    /// Exact configured attacking-team win boundary (80 in standard two-deck
+    /// Tractor). Used for late threshold-coverage plays without hard-coding 80.
+    pub non_landlord_turnover_score: Option<isize>,
     /// Total trumps still unseen by `me` (in hidden hands / kitty).
     pub unseen_trumps: usize,
     /// "Enoch mode": when true, the Enoch-specific full-game playbook bonuses are
@@ -401,6 +404,7 @@ impl EvalCtx {
             num_decks,
             non_landlord_points,
             step_size: p.bot_step_size(),
+            non_landlord_turnover_score: p.bot_non_landlord_turnover_score(),
             unseen_trumps,
             enoch,
             my_hand_size,
@@ -1397,6 +1401,44 @@ pub(crate) fn admissible_ranked_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card
     safety.single_unit || safety.whole_play_safe
 }
 
+/// Narrow late-game exception to normal joker conservation: the attacking team
+/// is one small point dump from the exact configured turnover boundary, our
+/// teammate is publicly known void in trump, and our own side has weak remaining
+/// trump control. A boss joker can then cover the teammate's discard and secure
+/// the contract instead of gambling for later/bank points.
+fn threshold_coverage_lead(
+    ctx: &EvalCtx,
+    p: &PlayPhase,
+    lead: Card,
+    is_boss: bool,
+    len: f64,
+) -> bool {
+    let teammate_known_void_in_trump = p
+        .propagated()
+        .players()
+        .iter()
+        .map(|player| player.id)
+        .filter(|player| *player != ctx.me && same_team(p, ctx.me, *player))
+        .any(|player| {
+            ctx.k
+                .voids
+                .get(&player)
+                .is_some_and(|voids| voids.contains(&EffectiveSuit::Trump))
+        });
+    ctx.me_is_attacker
+        && ctx.my_hand_size <= 10
+        && ctx
+            .non_landlord_turnover_score
+            .map(|threshold| threshold - ctx.non_landlord_points)
+            .is_some_and(|needed| (1..=15).contains(&needed))
+        && teammate_known_void_in_trump
+        && ctx.my_trump_count <= 3
+        && ctx.unseen_trumps > ctx.my_trump_count
+        && len < 2.0
+        && matches!(lead, Card::BigJoker | Card::SmallJoker)
+        && is_boss
+}
+
 /// Score a candidate lead (the NEW boss-aware scorer used by all real tiers).
 ///
 /// Encodes leading strategy with honest card-memory:
@@ -1453,6 +1495,8 @@ pub fn score_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
         min_boss_strength
     };
 
+    let threshold_coverage = threshold_coverage_lead(ctx, p, lead, is_boss, len);
+
     let mut score = 0.0;
 
     // Multi-card units (pairs / tractors) pressure opponents.
@@ -1467,8 +1511,11 @@ pub fn score_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
     }
 
     // Modest reward for raw strength. Unsafe compounds use their weakest
-    // component, so attaching a joker cannot manufacture a +50 strength bonus.
-    score += credited_strength as f64 * 0.05;
+    // component, so attaching a joker cannot manufacture a strength bonus.
+    // `boss_strength` uses 997..1000 sentinels for trump-rank cards and jokers;
+    // cap those semantic sentinels because the explicit boss/unit terms below
+    // carry their tactical value.
+    score += credited_strength.min(20) as f64 * 0.05;
 
     // Guaranteed-winner bonuses. Jokers keep their flat floor; a *boss*
     // (uncatchable in its suit) non-trump unit is excellent.
@@ -1481,6 +1528,18 @@ pub fn score_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
     // Boss tractors / pairs dominate; reward extra length.
     if is_boss && len >= 2.0 {
         score += (len - 1.0) * 4.0;
+    }
+
+    // A naked joker should normally cash points, not open an empty trick. Search
+    // may still select it when downstream rollouts justify the line, while the
+    // narrow late attacking exception keeps a boss-joker coverage lead available
+    // when a known-void partner can dump the last 5–15 points needed to win.
+    if cards.len() == 1 && matches!(lead, Card::BigJoker | Card::SmallJoker) {
+        if threshold_coverage {
+            score += 12.0;
+        } else if ctx.my_hand_size > 1 {
+            score -= 20.0;
+        }
     }
 
     // Near-boss: exactly one stronger copy still unseen in this suit. Leading it
@@ -1499,6 +1558,49 @@ pub fn score_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
         score += point_total as f64 * 0.6;
     } else {
         score -= point_total as f64 * 1.2;
+    }
+
+    // Early point-cashing through a known partner void is only "free" when the
+    // public record positively proves every opponent still holds this suit.
+    // Absence of a known void is not proof of a holding. Conversely, a known-void
+    // opponent plus a partner known to hold the suit is a ruff trap, so protect
+    // points unless another scorer/search line can justify the sacrifice.
+    if !trumping && ctx.my_hand_size >= 14 && point_total > 0 {
+        let eff = trump.effective_suit(lead);
+        let mut partner_void = false;
+        let mut partner_positive = false;
+        let mut opponents = 0usize;
+        let mut all_opponents_positive = true;
+        let mut any_opponent_void = false;
+        for player in p.propagated().players() {
+            let pid = player.id;
+            if pid == ctx.me {
+                continue;
+            }
+            let known_void = ctx
+                .k
+                .voids
+                .get(&pid)
+                .is_some_and(|voids| voids.contains(&eff));
+            let known_positive = ctx.k.known_holding.get(&pid).is_some_and(|holding| {
+                holding
+                    .iter()
+                    .any(|(card, count)| *count > 0 && trump.effective_suit(*card) == eff)
+            });
+            if same_team(p, ctx.me, pid) {
+                partner_void |= known_void;
+                partner_positive |= known_positive;
+            } else {
+                opponents += 1;
+                any_opponent_void |= known_void;
+                all_opponents_positive &= known_positive;
+            }
+        }
+        if partner_void && opponents > 0 && all_opponents_positive {
+            score += point_total as f64 * 1.8 + 3.0;
+        } else if partner_positive && any_opponent_void {
+            score -= point_total as f64 * 2.0 + 3.0;
+        }
     }
 
     // Trump leads by role. A joker pair is always a powerful play. Otherwise, the
@@ -1615,7 +1717,8 @@ fn enoch_lead_bonus(
     //  card, or any big trump lead. The ONLY exception is the rare "bleed" line:
     //  when Enoch is sitting on ~15+ trump cards it may open high trump to strip
     //  everyone else of trump. That exception is gated on `my_trump_count >= 15`.
-    let bleed_exception = ctx.my_trump_count >= 15;
+    let threshold_coverage = threshold_coverage_lead(ctx, p, lead, is_boss, len);
+    let bleed_exception = ctx.my_trump_count >= 15 || threshold_coverage;
     if trumping && !bleed_exception {
         let s = boss_strength(trump, lead);
         let is_naked_joker = s >= 999 && len < 2.0;
@@ -2021,6 +2124,17 @@ fn waste_penalty(ctx: &EvalCtx, card: Card) -> f64 {
         } else {
             2.0 + s as f64 * 0.2 // a low trump still has ruffing value
         }
+    } else if matches!(
+        card,
+        Card::Suited {
+            number: Number::Ace,
+            ..
+        }
+    ) {
+        // Keep every side-suit Ace on a mechanically lost trick, even before it
+        // is provably the public boss. It remains a likely future winner and is
+        // far more valuable than ordinary low discard material.
+        7.0
     } else if s >= 13 && is_boss_card(&ctx.k, trump, card) {
         // An uncatchable side-suit card (e.g. an Ace) is a winner to cash later;
         // the `s >= 13` gate keeps the (O(13)) boss scan off the low cards.
@@ -2071,6 +2185,19 @@ pub fn score_follow(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
     }
     let opp_after_me = yet_to_act.iter().any(|pid| !same_team(p, me, *pid));
     let is_last_to_act = yet_to_act.is_empty();
+    let trick_format_suit = trick.trick_format().map(|tf| tf.suit());
+    let remaining_opponent_known_void = trick_format_suit
+        .filter(|suit| *suit != EffectiveSuit::Trump)
+        .is_some_and(|led_suit| {
+            yet_to_act.iter().any(|pid| {
+                !same_team(p, me, *pid)
+                    && ctx
+                        .k
+                        .voids
+                        .get(pid)
+                        .is_some_and(|voids| voids.contains(&led_suit))
+            })
+        });
 
     // The winning card on the table, and whether it is LOCKED (a boss top).
     let winner_top_card = current_winner.and_then(|w| {
@@ -2088,7 +2215,8 @@ pub fn score_follow(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
     let winner_locked = partner_winning
         && winner_top_card
             .map(|c| is_boss_card(&ctx.k, trump, c))
-            .unwrap_or(false);
+            .unwrap_or(false)
+        && !remaining_opponent_known_void;
 
     // Points already committed to the pot.
     let pot_points: i32 = trick
@@ -2098,7 +2226,6 @@ pub fn score_follow(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
         .filter_map(|c| c.points().map(|x| x as i32))
         .sum();
 
-    let trick_format_suit = trick.trick_format().map(|tf| tf.suit());
     let following_suit = trick_format_suit
         .map(|s| cards.iter().all(|c| trump.effective_suit(*c) == s))
         .unwrap_or(false);
@@ -2125,7 +2252,31 @@ pub fn score_follow(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
     let would_beat = candidate_wins_current_trick(p, me, cards);
     // Does MY candidate, if it wins by following suit with a boss top, lock the
     // trick? (Used to allow beating-to-secure over a stealable partner.)
-    let my_card_locks = following_suit && is_boss_card(&ctx.k, trump, my_top);
+    let my_card_locks =
+        following_suit && is_boss_card(&ctx.k, trump, my_top) && !remaining_opponent_known_void;
+    let unseen_point_cards_in_led_suit = trick_format_suit
+        .map(|led_suit| {
+            ctx.k
+                .configured_counts
+                .iter()
+                .filter(|(card, _)| {
+                    card.points().is_some() && trump.effective_suit(**card) == led_suit
+                })
+                .map(|(card, configured)| {
+                    configured.saturating_sub(ctx.k.seen.get(card).copied().unwrap_or(0))
+                })
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    let edge_guard = partner_winning
+        && opp_after_me
+        && following_suit
+        && would_beat
+        && !remaining_opponent_known_void
+        && !is_trump(trump, my_top)
+        && boss_strength(trump, my_top) >= 11
+        && unseen_dominators(&ctx.k, trump, my_top) <= 1
+        && unseen_point_cards_in_led_suit > 0;
 
     // `would_beat` is mechanics-accurate for the current table. It does not claim
     // the trick is safe from seats that have yet to act; the surrounding partner
@@ -2149,7 +2300,19 @@ pub fn score_follow(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
         score += my_point_contribution as f64 * 1.5;
         // Over-ranking partner is wasteful UNLESS doing so LOCKS the trick for us
         // (beating-to-secure is allowed).
-        if would_beat && !my_card_locks {
+        if edge_guard {
+            // Second/third-seat edge guard: spend the cheapest near-boss that
+            // materially secures the lead before the last opponent can dump a
+            // ten/king for free. This is a denial bonus, not a blanket order to
+            // overtake a partner.
+            score += 7.0 + unseen_point_cards_in_led_suit.min(4) as f64;
+        }
+        if remaining_opponent_known_void && my_point_contribution > 0 {
+            // Partner's in-suit boss is not locked when a later opponent is
+            // publicly known void and can ruff it. Do not feed into that trap.
+            score -= my_point_contribution as f64 * 5.0;
+        }
+        if would_beat && !my_card_locks && !edge_guard {
             score -= 15.0;
         }
     } else if partner_winning {
@@ -2343,6 +2506,7 @@ pub(crate) fn ranked_leads_unfiltered(p: &PlayPhase, me: PlayerID) -> Vec<Scored
             let score = score_lead(&ctx, p, &cards);
             ScoredPlay { cards, score }
         })
+        .filter(|play| play.score.is_finite())
         .collect();
     scored.sort_by(|a, b| {
         b.score
@@ -2380,6 +2544,7 @@ pub(crate) fn ranked_leads_for_rollout(p: &PlayPhase, me: PlayerID) -> Vec<Score
             score: score_lead(&ctx, p, &cards),
             cards,
         })
+        .filter(|play| play.score.is_finite())
         .collect();
     scored.sort_by(|a, b| b.score.total_cmp(&a.score));
     scored
@@ -2549,6 +2714,7 @@ pub fn ranked_leads_enoch(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
             let score = score_lead(&ctx, p, &cards);
             ScoredPlay { cards, score }
         })
+        .filter(|play| play.score.is_finite())
         .collect();
     scored.sort_by(|a, b| {
         b.score
@@ -2608,6 +2774,7 @@ pub(crate) fn ranked_leads_enoch_for_rollout(p: &PlayPhase, me: PlayerID) -> Vec
             score: score_lead(&ctx, p, &cards),
             cards,
         })
+        .filter(|play| play.score.is_finite())
         .collect();
     scored.sort_by(|a, b| b.score.total_cmp(&a.score));
     scored
@@ -3862,6 +4029,187 @@ mod tests {
             vec![low_trump],
             "greedy follow should keep the joker"
         );
+    }
+
+    #[test]
+    fn test_mixed_trump_set_throw_is_vetoed() {
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let low_trump = card(Number::Three, Suit::Hearts);
+        let (pp, ids) = make_play_phase_decks(
+            [
+                vec![
+                    Card::BigJoker,
+                    low_trump,
+                    low_trump,
+                    card(Number::Four, Suit::Clubs),
+                ],
+                vec![card(Number::Five, Suit::Clubs)],
+                vec![card(Number::Six, Suit::Clubs)],
+                vec![card(Number::Seven, Suit::Clubs)],
+            ],
+            2,
+            trump,
+        );
+        let ctx = EvalCtx::build(&pp, ids[0]);
+        for unsafe_throw in [
+            vec![Card::BigJoker, low_trump],
+            vec![Card::BigJoker, low_trump, low_trump],
+        ] {
+            assert!(pp.can_play_cards(ids[0], &unsafe_throw).is_ok());
+            assert!(
+                !admissible_ranked_lead(&ctx, &pp, &unsafe_throw),
+                "mixed trump set must be excluded from honest rankings: {:?}",
+                unsafe_throw
+            );
+            assert!(
+                !ranked_leads(&pp, ids[0]).iter().any(|play| Card::count(
+                    play.cards.iter().copied()
+                ) == Card::count(
+                    unsafe_throw.iter().copied()
+                )),
+                "vetoed trump set must not survive into search proposals"
+            );
+        }
+    }
+
+    #[test]
+    fn test_naked_joker_open_loses_to_cashable_side_ace() {
+        let ace_spades = card(Number::Ace, Suit::Spades);
+        let (pp, ids) = make_play_phase([
+            vec![Card::BigJoker, ace_spades, card(Number::Three, Suit::Clubs)],
+            vec![card(Number::Four, Suit::Spades)],
+            vec![card(Number::Five, Suit::Spades)],
+            vec![card(Number::Six, Suit::Spades)],
+        ]);
+        let ctx = EvalCtx::build(&pp, ids[0]);
+        assert!(
+            score_lead(&ctx, &pp, &[ace_spades]) > score_lead(&ctx, &pp, &[Card::BigJoker]),
+            "an empty-pot joker lead must not outrank a cashable side-suit Ace"
+        );
+    }
+
+    #[test]
+    fn test_last_seat_keeps_side_ace_on_lost_trick() {
+        let ace_spades = card(Number::Ace, Suit::Spades);
+        let low_club = card(Number::Three, Suit::Clubs);
+        let (mut pp, ids) = make_play_phase([
+            vec![Card::BigJoker],
+            vec![card(Number::Three, Suit::Hearts)],
+            vec![card(Number::Four, Suit::Hearts)],
+            vec![ace_spades, low_club],
+        ]);
+        pp.play_cards(ids[0], &[Card::BigJoker]).unwrap();
+        pp.play_cards(ids[1], &[card(Number::Three, Suit::Hearts)])
+            .unwrap();
+        pp.play_cards(ids[2], &[card(Number::Four, Suit::Hearts)])
+            .unwrap();
+        let played = choose_play_direct(&pp, ids[3], HeuristicVersion::New).unwrap();
+        assert_eq!(played, vec![low_club]);
+    }
+
+    #[test]
+    fn test_partner_boss_is_not_locked_against_known_void_opponent() {
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let ace_spades = card(Number::Ace, Suit::Spades);
+        let king_spades = card(Number::King, Suit::Spades);
+        let low_spades = card(Number::Three, Suit::Spades);
+        let (mut pp, ids) = make_play_phase_decks(
+            [
+                vec![ace_spades, ace_spades],
+                vec![
+                    card(Number::Four, Suit::Spades),
+                    card(Number::Five, Suit::Spades),
+                ],
+                vec![card(Number::Six, Suit::Spades), king_spades, low_spades],
+                vec![
+                    card(Number::Three, Suit::Clubs),
+                    card(Number::Four, Suit::Clubs),
+                ],
+            ],
+            2,
+            trump,
+        );
+        // First trick publicly proves that the last opponent is void in spades.
+        pp.play_cards(ids[0], &[ace_spades]).unwrap();
+        pp.play_cards(ids[1], &[card(Number::Four, Suit::Spades)])
+            .unwrap();
+        pp.play_cards(ids[2], &[card(Number::Six, Suit::Spades)])
+            .unwrap();
+        pp.play_cards(ids[3], &[card(Number::Three, Suit::Clubs)])
+            .unwrap();
+        pp.finish_trick().unwrap();
+
+        pp.play_cards(ids[0], &[ace_spades]).unwrap();
+        pp.play_cards(ids[1], &[card(Number::Five, Suit::Spades)])
+            .unwrap();
+        let ctx = EvalCtx::build(&pp, ids[2]);
+        assert!(
+            score_follow(&ctx, &pp, &[low_spades]) > score_follow(&ctx, &pp, &[king_spades]),
+            "do not feed a point King when the last opponent is known able to ruff"
+        );
+    }
+
+    #[test]
+    fn test_edge_guard_secures_partner_before_last_opponent() {
+        let ace_spades = card(Number::Ace, Suit::Spades);
+        let low_spades = card(Number::Three, Suit::Spades);
+        let (mut pp, ids) = make_play_phase([
+            vec![card(Number::Nine, Suit::Spades)],
+            vec![card(Number::Four, Suit::Spades)],
+            vec![ace_spades, low_spades],
+            vec![card(Number::King, Suit::Spades)],
+        ]);
+        pp.play_cards(ids[0], &[card(Number::Nine, Suit::Spades)])
+            .unwrap();
+        pp.play_cards(ids[1], &[card(Number::Four, Suit::Spades)])
+            .unwrap();
+        let played = choose_play_direct(&pp, ids[2], HeuristicVersion::New).unwrap();
+        assert_eq!(played, vec![ace_spades]);
+    }
+
+    #[test]
+    fn test_threshold_coverage_uses_configured_turnover_not_hardcoded_80() {
+        let (pp, ids) = make_play_phase_decks(
+            [
+                vec![card(Number::Three, Suit::Clubs)],
+                vec![Card::BigJoker, card(Number::Four, Suit::Clubs)],
+                vec![card(Number::Five, Suit::Clubs)],
+                vec![card(Number::Six, Suit::Clubs)],
+            ],
+            2,
+            Trump::Standard {
+                suit: Suit::Hearts,
+                number: Number::Two,
+            },
+        );
+        let mut ctx = EvalCtx::build(&pp, ids[1]);
+        assert_eq!(ctx.non_landlord_turnover_score, Some(80));
+        ctx.non_landlord_points = 70;
+        ctx.my_hand_size = 8;
+        ctx.my_trump_count = 1;
+        ctx.unseen_trumps = 8;
+        ctx.k.voids.insert(ids[3], vec![EffectiveSuit::Trump]);
+        assert!(threshold_coverage_lead(
+            &ctx,
+            &pp,
+            Card::BigJoker,
+            true,
+            1.0
+        ));
+        ctx.non_landlord_points = 45;
+        assert!(!threshold_coverage_lead(
+            &ctx,
+            &pp,
+            Card::BigJoker,
+            true,
+            1.0
+        ));
     }
 
     #[test]
