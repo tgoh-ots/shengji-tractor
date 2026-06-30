@@ -8,6 +8,7 @@ use shengji_mechanics::types::PlayerID;
 use crate::game_state::GameState;
 use crate::interactive::{Action, BroadcastMessage, InteractiveGame};
 
+pub mod belief;
 pub mod determinize;
 pub mod expert;
 pub mod harness;
@@ -18,12 +19,12 @@ pub mod search;
 #[cfg(test)]
 mod tests;
 
-/// The difficulty of a bot player. The four user-selectable tiers form a
-/// strength ladder `Easy < Expert <= Enoch < Omniscient`:
+/// The difficulty of a bot player. The tiers form a rough strength ladder
+/// `Easy < Expert <= Enoch ~= Grandmaster < Omniscient`:
 ///
 /// * `Easy` — the bare heuristic backbone played noisily (occasional blunders,
-///   warm softmax, no card memory or search). Feels like a casual human; clearly
-///   beatable.
+///   warm softmax, public-history memory but no search). Feels like a casual
+///   human; clearly beatable.
 /// * `Expert` — a learned neural net (a small MLP trained by behavioral cloning /
 ///   distillation of the Omniscient teacher's choices) scores each legal
 ///   candidate from HONEST features only, used as the PRIOR of a time-boxed
@@ -31,7 +32,7 @@ mod tests;
 ///   perfect-info play from the honest observation. If the model fails to
 ///   load/run the search prior transparently falls back to the shared
 ///   hand-written heuristic, so Expert is never illegal/None. Honest.
-/// * `Enoch` — the strongest HONEST tier. It REUSES the same determinized search
+/// * `Enoch` — a strong HONEST tier. It REUSES the same determinized search
 ///   over the improved boss-/partner-aware heuristic and LAYERS ON a full
 ///   competitive playbook (transcribed from a Shengji enthusiast — see
 ///   `docs/strategy/double-holder.txt`) that the other tiers don't model:
@@ -45,9 +46,9 @@ mod tests;
 ///   must be chosen explicitly in the lobby and is surfaced with a cheater badge
 ///   in the UI.
 ///
-/// The three honest tiers (`Easy`/`Expert`/`Enoch`) never receive anything but
-/// their own redacted, per-player view — see [`observed_state`], which is the
-/// single, centralized place where the perfect-information bypass is gated.
+/// The honest tiers (`Easy`/`Expert`/`Enoch`/`Grandmaster`) never receive
+/// anything but their own redacted, per-player view — see [`observed_state`],
+/// the centralized place where the perfect-information bypass is gated.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 pub enum BotDifficulty {
     Easy,
@@ -305,6 +306,41 @@ fn expected_bot_responsibility(
             }
         }
         GameState::Exchange(p) => {
+            if p.kitty_theft_enabled() && p.finalized() {
+                // A finalized theft round can be advanced by a bid from any bot,
+                // a pickup by its winner, or the bot landlord starting play. The
+                // policy decides the concrete actor/action from the snapshot.
+                let bot_with_legal_bid = state.propagated().players().iter().find(|player| {
+                    bot_for(&state, player.id).is_some()
+                        && p.valid_bids(player.id)
+                            .map(|bids| !bids.is_empty())
+                            .unwrap_or(false)
+                });
+                let humans_finished = !respect_human_bid_window || p.all_humans_done_bidding();
+                let bot_winner = humans_finished
+                    .then(|| p.current_epoch_winning_bid())
+                    .flatten()
+                    .and_then(|bid| {
+                        bot_for(&state, bid.id).and_then(|_| {
+                            state
+                                .propagated()
+                                .players()
+                                .iter()
+                                .find(|player| player.id == bid.id)
+                        })
+                    });
+                let bot_landlord = (humans_finished && p.current_epoch_winning_bid().is_none())
+                    .then(|| {
+                        state.propagated().players().iter().find(|player| {
+                            player.id == p.landlord() && bot_for(&state, player.id).is_some()
+                        })
+                    })
+                    .flatten();
+                if let Some(bot) = bot_with_legal_bid.or(bot_winner).or(bot_landlord) {
+                    return Ok(Some((bot.id, BotResponsibility::ResolveExchange)));
+                }
+                return Ok(None);
+            }
             let next_player = p.next_player()?;
             match bot_for(&state, next_player) {
                 Some(_) => Ok(Some((next_player, BotResponsibility::Select))),
@@ -357,6 +393,10 @@ enum BotResponsibility {
     DeclareOrReveal,
     /// The winning bot finishes a completed, bot-won trick.
     EndTrick,
+    /// Resolve a finalized kitty-theft round. The concrete action may be an
+    /// overbid by any bot, pickup by the standing bidder, or the landlord's
+    /// transition toward play, so actor identity is policy-dependent.
+    ResolveExchange,
     /// A policy-selected move (draw, exchange step, or play). The concrete action
     /// is chosen by the policy; `interact` re-validates its legality.
     Select,
@@ -373,6 +413,10 @@ impl BotResponsibility {
                 matches!(action, Action::Bid(..) | Action::RevealCard)
             }
             BotResponsibility::EndTrick => matches!(action, Action::EndTrick),
+            BotResponsibility::ResolveExchange => matches!(
+                action,
+                Action::Bid(..) | Action::PickUpKitty | Action::SetFriends(..) | Action::BeginPlay
+            ),
             // A policy-selected move: any of the per-phase select actions. We do
             // not over-constrain here; `interact` enforces concrete legality.
             BotResponsibility::Select => matches!(
@@ -509,6 +553,37 @@ pub fn apply_planned_bot_action(
             matches!(&s, GameState::Draw(p) if !p.done_drawing() && !p.bid_decided())
                 && bot_for(&s, step.bot_id).is_some()
         }
+        Some((_, BotResponsibility::ResolveExchange)) => {
+            let s = game.dump_state()?;
+            match &s {
+                GameState::Exchange(p) if p.kitty_theft_enabled() && p.finalized() => {
+                    match &step.action {
+                        Action::Bid(card, count) => {
+                            bot_for(&s, step.bot_id).is_some()
+                                && p.valid_bids(step.bot_id)
+                                    .map(|bids| {
+                                        bids.into_iter()
+                                            .any(|bid| bid.card == *card && bid.count == *count)
+                                    })
+                                    .unwrap_or(false)
+                        }
+                        Action::PickUpKitty => {
+                            p.current_epoch_winning_bid()
+                                .map(|bid| bid.id == step.bot_id)
+                                .unwrap_or(false)
+                                && bot_for(&s, step.bot_id).is_some()
+                        }
+                        Action::SetFriends(..) | Action::BeginPlay => {
+                            p.current_epoch_winning_bid().is_none()
+                                && p.landlord() == step.bot_id
+                                && bot_for(&s, step.bot_id).is_some()
+                        }
+                        _ => false,
+                    }
+                }
+                _ => false,
+            }
+        }
         Some((bot_id, responsibility)) => {
             bot_id == step.bot_id && responsibility.matches_action(&step.action)
         }
@@ -541,6 +616,7 @@ fn is_unpaced_burst_responsibility(state: &GameState, kind: BotResponsibility) -
         BotResponsibility::Select => matches!(state, GameState::Draw(_)),
         BotResponsibility::PickUpKitty
         | BotResponsibility::DeclareOrReveal
+        | BotResponsibility::ResolveExchange
         | BotResponsibility::EndTrick => false,
     }
 }
@@ -1064,6 +1140,54 @@ fn next_bot_action(
             }
         }
         GameState::Exchange(p) => {
+            if p.kitty_theft_enabled() && p.finalized() {
+                // Bidding is not turn-based. Give every bot an honest chance to
+                // overbid before the standing winner picks up the kitty. Legal
+                // bids strictly ascend a finite lattice, so repeated driver calls
+                // cannot loop indefinitely.
+                for player in state.propagated().players() {
+                    if let Some(difficulty) = bot_for(&state, player.id) {
+                        let view = observed_state(game, player.id, difficulty)?;
+                        let exchange = match &view {
+                            GameState::Exchange(exchange) => exchange,
+                            _ => continue,
+                        };
+                        if let Some(bid) =
+                            policy::choose_exchange_bid(exchange, player.id, difficulty)
+                        {
+                            return Ok(Some((player.id, Action::Bid(bid.card, bid.count))));
+                        }
+                    }
+                }
+
+                // Strategic bot overbids above are still allowed while humans
+                // consider the standing bid. Resolving the window is not: wait
+                // for every non-resolver human to explicitly pass.
+                if respect_human_bid_window && !p.all_humans_done_bidding() {
+                    return Ok(None);
+                }
+
+                // A bid made in this epoch must be claimed before another seat
+                // can exchange. Park for a human winner; drive a bot winner.
+                if let Some(winning) = p.current_epoch_winning_bid() {
+                    return match bot_for(&state, winning.id) {
+                        Some(_) => Ok(Some((winning.id, Action::PickUpKitty))),
+                        None => Ok(None),
+                    };
+                }
+
+                // Nobody stole the kitty. The landlord may now set friends and
+                // begin play via the normal policy path.
+                let landlord = p.landlord();
+                return match bot_for(&state, landlord) {
+                    Some(difficulty) => {
+                        let view = observed_state(game, landlord, difficulty)?;
+                        Ok(policy::select_action(&view, landlord, difficulty)?
+                            .map(|action| (landlord, action)))
+                    }
+                    None => Ok(None),
+                };
+            }
             let next_player = p.next_player()?;
             match bot_for(&state, next_player) {
                 Some(difficulty) => {
@@ -1208,8 +1332,11 @@ fn enoch_flip_bid(
         if seat == standing_winner {
             continue; // never flip our own standing bid
         }
-        if !matches!(bot_for(state, seat), Some(BotDifficulty::Enoch)) {
-            continue; // only Enoch flips
+        if !matches!(
+            bot_for(state, seat),
+            Some(BotDifficulty::Enoch | BotDifficulty::Grandmaster | BotDifficulty::Omniscient)
+        ) {
+            continue; // advanced tiers inherit Enoch's pair-aware flip policy
         }
         let level = pinned_level.unwrap_or_else(|| player.rank());
         let hand: Vec<Card> = match p.hands().get(seat) {

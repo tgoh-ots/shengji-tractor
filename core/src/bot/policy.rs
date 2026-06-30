@@ -9,9 +9,9 @@
 //!
 //! | tier       | card memory  | blunder ε | softmax temp | determinized search          |
 //! |------------|--------------|-----------|--------------|------------------------------|
-//! | Easy       | none         | ~6%       | warm         | no                           |
-//! | Expert     | yes (voids)  | ~0%       | greedy       | learned-net prior            |
-//! | Enoch      | yes (voids)  | ~0%       | greedy       | playbook heuristic           |
+//! | Easy       | full public  | ~6%       | warm         | no                           |
+//! | Expert     | full public  | ~0%       | greedy       | learned-net prior            |
+//! | Enoch      | full public  | ~0%       | greedy       | playbook heuristic           |
 //! | Grandmaster| full history | 0%        | greedy       | playbook + full-hand rollout |
 //! | Omniscient | (cheats)     | 0%        | greedy       | perfect-info search          |
 //!
@@ -32,8 +32,8 @@ use anyhow::Error;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-use shengji_mechanics::trick::{TractorRequirements, TrickUnit};
-use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Rank, Suit, Trump};
+use shengji_mechanics::trick::TrickUnit;
+use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Rank, Trump};
 
 use crate::bot::heuristics::{self, ScoredPlay};
 use crate::bot::search::{search_play, search_play_perfect_info, Policy, SearchConfig};
@@ -41,7 +41,6 @@ use crate::bot::BotDifficulty;
 use crate::game_state::play_phase::PlayPhase;
 use crate::game_state::GameState;
 use crate::interactive::Action;
-use crate::settings::FriendSelection;
 
 /// Per-tier behavioural knobs.
 #[derive(Clone, Copy, Debug)]
@@ -66,7 +65,8 @@ impl Knobs {
     fn for_difficulty(d: BotDifficulty) -> Self {
         match d {
             // Beginner: occasional blunders, a warm (but no longer scalding)
-            // softmax over the top moves, and NO card memory / search. Still
+            // softmax over the top moves, and no look-ahead search. It retains
+            // public history like every honest tier, but remains
             // clearly the weakest, beatable tier — it just makes fewer obvious
             // blunders than before. The blunder rate and softmax temperature are
             // the two knobs that gate its strength; both were nudged DOWN
@@ -184,6 +184,28 @@ pub fn select_action(
     me: PlayerID,
     difficulty: BotDifficulty,
 ) -> Result<Option<Action>, Error> {
+    select_action_impl(view, me, difficulty, None)
+}
+
+/// Training/evaluation entry point with an explicit FINAL play-search budget.
+/// Unlike the process-wide environment knob, this is per call: Omniscient does
+/// not apply its production multiplier, and concurrent behavior/Q policies can
+/// use independent budgets without mutating global state.
+pub fn select_action_with_search_budget(
+    view: &GameState,
+    me: PlayerID,
+    difficulty: BotDifficulty,
+    search_budget_ms: u64,
+) -> Result<Option<Action>, Error> {
+    select_action_impl(view, me, difficulty, Some(search_budget_ms.max(1)))
+}
+
+fn select_action_impl(
+    view: &GameState,
+    me: PlayerID,
+    difficulty: BotDifficulty,
+    search_budget_override_ms: Option<u64>,
+) -> Result<Option<Action>, Error> {
     match view {
         // Lobby configuration is a human concern.
         GameState::Initialize(_) => Ok(None),
@@ -203,7 +225,7 @@ pub fn select_action(
             }
             match p.trick().next_player() {
                 Some(next) if next == me => {
-                    let cards = choose_play(p, me, difficulty);
+                    let cards = choose_play(p, me, difficulty, search_budget_override_ms);
                     Ok(Some(Action::PlayCards(cards)))
                 }
                 _ => Ok(None),
@@ -268,26 +290,241 @@ fn env_policy(name: &str, default: Policy) -> Policy {
     }
 }
 
-/// Seed an RNG deterministically from the (redacted) play state so that, given
-/// the same observable position, a bot behaves reproducibly. We derive the seed
-/// from the player id, their hand size, and the number of cards on the table —
-/// all things visible in the redacted view.
+fn seed_bytes(state: &mut u64, bytes: &[u8]) {
+    // FNV-1a is intentionally simple and stable across processes/toolchains;
+    // unlike HashMap iteration or RandomState, it gives repeatable eval seeds.
+    for byte in bytes {
+        *state ^= u64::from(*byte);
+        *state = state.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+}
+
+fn seed_u64(state: &mut u64, value: u64) {
+    seed_bytes(state, &value.to_le_bytes());
+}
+
+fn seed_cards(state: &mut u64, cards: impl IntoIterator<Item = Card>) {
+    let cards: Vec<Card> = cards.into_iter().collect();
+    seed_u64(state, cards.len() as u64);
+    for card in cards {
+        seed_u64(state, card.as_char() as u32 as u64);
+    }
+}
+
+/// A canonical hash of exactly what an honest player can observe. It includes
+/// card identities/counts, attributed public history, score/role, trump, and
+/// public configuration; it deliberately never walks another seat's hand or a
+/// hidden kitty, even when called with Omniscient's unredacted state.
+pub(crate) fn observation_seed(p: &PlayPhase, me: PlayerID) -> u64 {
+    let mut seed = 0xCBF2_9CE4_8422_2325u64;
+    seed_u64(&mut seed, me.0 as u64);
+    seed_u64(&mut seed, p.num_decks() as u64);
+    seed_bytes(&mut seed, format!("{:?}", p.trump()).as_bytes());
+
+    // Own hand only, in mechanics-canonical order.
+    if let Ok(hand) = p.hands().get(me) {
+        let mut entries: Vec<(Card, usize)> =
+            hand.iter().map(|(&card, &count)| (card, count)).collect();
+        entries.sort_by(|(a, _), (b, _)| {
+            p.trump()
+                .compare(*a, *b)
+                .then_with(|| a.as_char().cmp(&b.as_char()))
+        });
+        seed_u64(&mut seed, entries.len() as u64);
+        for (card, count) in entries {
+            seed_u64(&mut seed, card.as_char() as u32 as u64);
+            seed_u64(&mut seed, count as u64);
+        }
+    }
+
+    // Completed history retains trick boundaries and seat attribution.
+    seed_u64(&mut seed, p.public_play_history().len() as u64);
+    for completed in p.public_play_history() {
+        seed_u64(&mut seed, completed.len() as u64);
+        for played in completed {
+            seed_u64(&mut seed, played.id.0 as u64);
+            seed_cards(&mut seed, played.cards.iter().copied());
+            seed_cards(&mut seed, played.bad_throw_cards.iter().copied());
+            seed_u64(
+                &mut seed,
+                played.better_player.map(|id| id.0 as u64 + 1).unwrap_or(0),
+            );
+        }
+    }
+
+    // Old persisted states may have only the aggregate history, so include its
+    // canonical multiset too. Current trick order/attribution is hashed directly.
+    let mut played_counts: Vec<(Card, usize)> = p
+        .played_this_hand()
+        .iter()
+        .map(|(&card, &count)| (card, count))
+        .collect();
+    played_counts.sort_by(|(a, _), (b, _)| {
+        p.trump()
+            .compare(*a, *b)
+            .then_with(|| a.as_char().cmp(&b.as_char()))
+    });
+    for (card, count) in played_counts {
+        seed_u64(&mut seed, card.as_char() as u32 as u64);
+        seed_u64(&mut seed, count as u64);
+    }
+    for played in p.trick().played_cards() {
+        seed_u64(&mut seed, played.id.0 as u64);
+        seed_cards(&mut seed, played.cards.iter().copied());
+        seed_cards(&mut seed, played.bad_throw_cards.iter().copied());
+    }
+    for player in p.trick().player_queue() {
+        seed_u64(&mut seed, player.0 as u64);
+    }
+    seed_u64(
+        &mut seed,
+        p.trick()
+            .winner_so_far()
+            .map(|id| id.0 as u64 + 1)
+            .unwrap_or(0),
+    );
+
+    // Hard public voids, score orientation, role, and all public rule settings.
+    let mut voids: Vec<_> = p.voids_this_hand().iter().collect();
+    voids.sort_by_key(|(player, _)| player.0);
+    for (player, suits) in voids {
+        seed_u64(&mut seed, player.0 as u64);
+        let mut suits = suits.clone();
+        suits.sort_unstable();
+        seed_bytes(&mut seed, format!("{:?}", suits).as_bytes());
+    }
+    let (non_landlord_points, observed_points) = p.calculate_points();
+    seed_u64(&mut seed, non_landlord_points as i64 as u64);
+    seed_u64(&mut seed, observed_points as i64 as u64);
+    seed_u64(&mut seed, u64::from(p.landlords_team().contains(&me)));
+
+    // Hash public gameplay configuration, but scrub room metadata which cannot
+    // affect a card decision.  Serialising PropagatedState wholesale used to
+    // make the bot's random choices change when somebody joined as an observer,
+    // renamed a player, changed the chat link, or edited the bot registry.
+    if let Ok(mut config) = serde_json::to_value(p.propagated()) {
+        if let Some(object) = config.as_object_mut() {
+            for key in [
+                "observers",
+                "max_player_id",
+                "num_games_finished",
+                "landlord_emoji",
+                "chat_link",
+                "special_decks",
+                "bots",
+            ] {
+                object.remove(key);
+            }
+            if let Some(players) = object.get_mut("players").and_then(|v| v.as_array_mut()) {
+                for player in players {
+                    if let Some(player) = player.as_object_mut() {
+                        player.remove("name");
+                    }
+                }
+            }
+        }
+        if let Ok(config) = serde_json::to_vec(&config) {
+            seed_bytes(&mut seed, &config);
+        }
+    }
+
+    // Special-deck ordering is not semantic. Hash the exact configured card
+    // multiset instead, so equivalent deck configurations receive one seed.
+    if let Some(mut configured) = p.configured_cards_for_determinization() {
+        configured.sort_by_key(|card| card.as_char());
+        seed_cards(&mut seed, configured);
+    }
+
+    // Public seat order and remaining hand sizes matter, but hidden identities
+    // never do. This is identical for full and per-player-redacted states.
+    for player in p.propagated().players() {
+        seed_u64(&mut seed, player.id.0 as u64);
+        let hand_size = p
+            .hands()
+            .get(player.id)
+            .map(|hand| hand.values().sum::<usize>())
+            .unwrap_or(0);
+        seed_u64(&mut seed, hand_size as u64);
+    }
+    let mut team = p.landlords_team().to_vec();
+    team.sort_by_key(|id| id.0);
+    for id in team {
+        seed_u64(&mut seed, id.0 as u64);
+    }
+    seed_u64(&mut seed, p.landlord().0 as u64);
+    seed_u64(&mut seed, p.exchanger().0 as u64);
+    for bid in p.public_bids() {
+        seed_u64(&mut seed, bid.id.0 as u64);
+        seed_u64(&mut seed, bid.card.as_char() as u32 as u64);
+        seed_u64(&mut seed, bid.count as u64);
+        seed_u64(&mut seed, bid.epoch as u64);
+    }
+
+    let (kitty, removed) = p.piles_for_determinization();
+    seed_u64(&mut seed, kitty.len() as u64);
+    // Only the exchanger observed the buried identities. Full-state callers do
+    // not get to smuggle them into an honest tier's seed.
+    if me == p.exchanger() {
+        let mut kitty = kitty.to_vec();
+        kitty.sort_by_key(|card| card.as_char());
+        seed_cards(&mut seed, kitty);
+    }
+    let mut removed = removed.to_vec();
+    removed.sort_by_key(|card| card.as_char());
+    seed_cards(&mut seed, removed);
+
+    // Friend declarations are a set, but they originate in a HashSet. Sort a
+    // canonical representation so insertion/random iteration order is ignored.
+    match p.game_mode() {
+        crate::settings::GameMode::Tractor => seed_u64(&mut seed, 0),
+        crate::settings::GameMode::FindingFriends {
+            num_friends,
+            friends,
+        } => {
+            seed_u64(&mut seed, 1);
+            seed_u64(&mut seed, *num_friends as u64);
+            let mut friends = friends.clone();
+            friends.sort_by_key(|friend| {
+                (
+                    friend.card.as_char(),
+                    friend.initial_skip,
+                    friend.skip,
+                    friend.player_id.map(|id| id.0),
+                )
+            });
+            for friend in friends {
+                seed_u64(&mut seed, friend.card.as_char() as u32 as u64);
+                seed_u64(&mut seed, friend.initial_skip as u64);
+                seed_u64(&mut seed, friend.skip as u64);
+                seed_u64(
+                    &mut seed,
+                    friend.player_id.map(|id| id.0 as u64 + 1).unwrap_or(0),
+                );
+            }
+        }
+    }
+
+    // SplitMix64 finalizer improves diffusion for nearby observations.
+    seed ^= seed >> 30;
+    seed = seed.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    seed ^= seed >> 27;
+    seed = seed.wrapping_mul(0x94D0_49BB_1331_11EB);
+    seed ^ (seed >> 31)
+}
+
+/// Seed an RNG deterministically from the canonical honest observation.
 fn rng_for(p: &PlayPhase, me: PlayerID) -> StdRng {
-    let hand_size = p
-        .hands()
-        .get(me)
-        .map(|h| h.values().sum::<usize>())
-        .unwrap_or(0);
-    let on_table = p.trick().played_cards().len();
-    let seed = (me.0 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ (hand_size as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9)
-        ^ (on_table as u64).wrapping_mul(0x94D0_49BB_1331_11EB);
-    StdRng::seed_from_u64(seed)
+    StdRng::seed_from_u64(observation_seed(p, me))
 }
 
 /// Choose the cards to play in the current trick for the given difficulty.
 /// Always returns a legal play (falling back to the dumb policy on any failure).
-fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Card> {
+fn choose_play(
+    p: &PlayPhase,
+    me: PlayerID,
+    difficulty: BotDifficulty,
+    search_budget_override_ms: Option<u64>,
+) -> Vec<Card> {
     let knobs = Knobs::for_difficulty(difficulty);
     let mut rng = rng_for(p, me);
     let leading = p.trick().played_cards().is_empty();
@@ -317,8 +554,9 @@ fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Ca
         // every seat plays well. The cheater is also allowed to think the longest
         // of any tier: `OMNI_BUDGET_MULT` (default 5×) scales its budget, capped at
         // ~15s, run OFF the game lock by the non-blocking driver.
-        let omni_budget_ms =
-            ((search_budget_ms() as f64 * env_f64("OMNI_BUDGET_MULT", 5.0)) as u64).min(14_500);
+        let omni_budget_ms = search_budget_override_ms.unwrap_or_else(|| {
+            ((search_budget_ms() as f64 * env_f64("OMNI_BUDGET_MULT", 5.0)) as u64).min(14_500)
+        });
         let config = SearchConfig {
             time_budget: Duration::from_millis(omni_budget_ms),
             max_worlds: knobs.search_worlds.max(1),
@@ -362,27 +600,23 @@ fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Ca
     if knobs.search_worlds > 0 {
         // Enoch shapes BOTH the prior AND the rollout plies with its full-game
         // playbook; Expert uses the learned-net prior (which itself falls back to
-        // the bare hand-written heuristic if the net can't run). Grandmaster reuses
-        // the Enoch playbook policy — so it inherits Enoch's perfect-memory
-        // determinization for free (`search_play` keys full memory off the
-        // `EnochHeuristic` policy) — but searches DEEPER: full-hand rollouts, a
-        // wider candidate root, more worlds, and a larger time budget.
+        // the bare hand-written heuristic if the net can't run). Grandmaster
+        // reuses the Enoch proposal policy but searches deeper: full-hand
+        // rollouts, a wider candidate root, more worlds, and a larger budget.
         let enoch = matches!(difficulty, BotDifficulty::Enoch);
         let grandmaster = matches!(difficulty, BotDifficulty::Grandmaster);
         // Grandmaster deliberately plays a DIFFERENT style from Enoch at equal
         // strength. Its prior and rollout policy are independently selectable
         // (`GM_PRIOR` / `GM_ROLLOUT_POLICY`: heuristic | net | enoch). The chosen
         // identity is: Enoch-playbook PRIOR (so it proposes the same sensible
-        // candidate moves — no naked-joker opens, tractor-first, etc. — and keeps
-        // the perfect-memory determinization, which `search_play` keys off the
-        // Enoch prior) but NEUTRAL plain-heuristic ROLLOUTS for the leaf value. The
+        // candidate moves — no naked-joker opens, tractor-first, etc.) but NEUTRAL
+        // plain-heuristic ROLLOUTS for the leaf value. The
         // effect: Enoch greedily obeys its hand-coded defensive playbook, whereas
         // Grandmaster commits to whatever its full-hand SIMULATIONS value highest —
         // a calculation-driven player that will break the playbook's instincts when
         // the deep rollout disagrees. Self-play (n=1200, paired): statistically
         // TIED with Enoch on win-rate (~50–52%) — equal strength, different
-        // decisions. (A non-Enoch *prior* loses full-memory determinization and
-        // tested clearly worse — `GM_PRIOR=net` ⇒ ~38% — so the prior stays Enoch.)
+        // decisions. The Enoch prior remains the measured stronger proposal set.
         let prior = if matches!(difficulty, BotDifficulty::Expert) {
             Policy::Net
         } else if grandmaster {
@@ -418,11 +652,13 @@ fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Ca
         // non-blocking bot driver and masked by the visible pacing, so it never
         // lags chat/UI; lower `GM_BUDGET_MULT` (or `SHENGJI_BOT_BUDGET_MS`) to trade
         // strength for speed.
-        let budget_ms = if grandmaster {
-            (search_budget_ms() as f64 * env_f64("GM_BUDGET_MULT", 3.0)) as u64
-        } else {
-            search_budget_ms()
-        };
+        let budget_ms = search_budget_override_ms.unwrap_or_else(|| {
+            if grandmaster {
+                (search_budget_ms() as f64 * env_f64("GM_BUDGET_MULT", 3.0)) as u64
+            } else {
+                search_budget_ms()
+            }
+        });
         let config = SearchConfig {
             time_budget: Duration::from_millis(budget_ms),
             max_worlds: knobs.search_worlds,
@@ -442,11 +678,11 @@ fn choose_play(p: &PlayPhase, me: PlayerID, difficulty: BotDifficulty) -> Vec<Ca
         }
     }
 
-    // Heuristic backbone (Easy, and the search tiers' fallback). Enoch /
-    // Grandmaster fall back to the playbook-enabled greedy ranking.
+    // Heuristic backbone (Easy, and the search tiers' fallback). Every tier at
+    // or above Enoch inherits the playbook-enabled greedy fallback.
     let enoch = matches!(
         difficulty,
-        BotDifficulty::Enoch | BotDifficulty::Grandmaster
+        BotDifficulty::Enoch | BotDifficulty::Grandmaster | BotDifficulty::Omniscient
     );
     let ranked: Vec<ScoredPlay> = if leading {
         if enoch {
@@ -530,8 +766,16 @@ fn exchange_action(
     me: PlayerID,
     difficulty: BotDifficulty,
 ) -> Result<Option<Action>, Error> {
-    if p.next_player()? != me || p.landlord() != me {
-        // Only the landlord exchanges; nobody else acts during exchange.
+    if p.next_player()? != me {
+        return Ok(None);
+    }
+
+    // With kitty theft enabled, a successful overbid makes a non-landlord the
+    // exchanger. That seat must bury/finalize just like the original landlord.
+    // Once an exchange is finalized, only the landlord performs friend selection
+    // and starts play; overbid/pickup resolution is coordinated by the driver.
+    let arranging_kitty = !p.finalized();
+    if !arranging_kitty && p.landlord() != me {
         return Ok(None);
     }
 
@@ -542,46 +786,47 @@ fn exchange_action(
     // cards we must first move some out and move our chosen ones in. Simpler and
     // robust: figure out our chosen burial set and reconcile one card at a time.
     let hand = p.hands().get(me).ok();
-    if let Some(hand) = hand {
-        let hand_cards: Vec<Card> = Card::cards(hand.iter()).copied().collect();
-        // The kitty size equals however many cards are currently buried; we keep
-        // it constant. We compute a desired burial from the *hand* and swap.
-        // Count current kitty contents we can see (we're the exchanger, so the
-        // kitty is visible to us in the unredacted-for-exchanger view).
-        // The redacted view hides the kitty unless we're the exchanger, which we
-        // are here, so it should be visible. We compute desired buries from the
-        // combined hand+kitty pool to make the best choice.
-        // To keep within the validated API, we only ever swap one card per call:
-        // move a sub-optimal kitty card to hand, or move a good-to-bury hand card
-        // to the kitty. The driver calls us repeatedly until we BeginPlay.
-        if let Some(action) = reconcile_kitty(p, me, &hand_cards, trump, difficulty) {
-            return Ok(Some(action));
+    if arranging_kitty {
+        if let Some(hand) = hand {
+            let hand_cards: Vec<Card> = Card::cards(hand.iter()).copied().collect();
+            // The kitty size equals however many cards are currently buried; we keep
+            // it constant. We compute a desired burial from the *hand* and swap.
+            // Count current kitty contents we can see (we're the exchanger, so the
+            // kitty is visible to us in the unredacted-for-exchanger view).
+            // The redacted view hides the kitty unless we're the exchanger, which we
+            // are here, so it should be visible. We compute desired buries from the
+            // combined hand+kitty pool to make the best choice.
+            // To keep within the validated API, we only ever swap one card per call:
+            // move a sub-optimal kitty card to hand, or move a good-to-bury hand card
+            // to the kitty. The driver calls us repeatedly until we BeginPlay.
+            if let Some(action) = reconcile_kitty(p, me, &hand_cards, trump, difficulty) {
+                return Ok(Some(action));
+            }
+        }
+
+        // Theft mode has an explicit finalization/overbid round. Starting play
+        // directly here is illegal; put the kitty down and let the driver offer
+        // legal overbids (or let the landlord start when nobody bids).
+        if p.kitty_theft_enabled() {
+            return Ok(Some(Action::PutDownKitty));
         }
     }
 
-    // Friends (FindingFriends only; UI is Tractor-only but support it).
+    // Friends (FindingFriends only). Do this once: repeatedly sending SetFriends
+    // prevented a bot landlord from ever reaching BeginPlay.
     let num_friends = p.num_friends();
-    if num_friends > 0 {
-        let friends = heuristics::choose_friends(trump, num_friends);
-        if friends.len() == num_friends {
-            return Ok(Some(Action::SetFriends(friends)));
-        }
-        // Fall back to legal side-suit aces if the heuristic came up short.
-        let mut viable = vec![];
-        for suit in &[Suit::Clubs, Suit::Diamonds, Suit::Hearts, Suit::Spades] {
-            let c = Card::Suited {
-                number: Number::Ace,
-                suit: *suit,
-            };
-            if trump.effective_suit(c) != EffectiveSuit::Trump {
-                viable.push(FriendSelection {
-                    card: c,
-                    initial_skip: 0,
-                });
-            }
-        }
-        if viable.len() >= num_friends {
-            return Ok(Some(Action::SetFriends(viable[0..num_friends].to_vec())));
+    if num_friends > 0 && !p.friends_selected() {
+        let mut viable = p.valid_friend_selections();
+        viable.sort_by_key(|friend| {
+            std::cmp::Reverse((
+                trump.effective_suit(friend.card) != EffectiveSuit::Trump,
+                heuristics::card_strength(trump, friend.card),
+                std::cmp::Reverse(friend.initial_skip),
+            ))
+        });
+        viable.truncate(num_friends);
+        if viable.len() == num_friends {
+            return Ok(Some(Action::SetFriends(viable)));
         }
     }
 
@@ -625,7 +870,7 @@ fn reconcile_kitty(
     pool.extend_from_slice(kitty);
     let desired = if matches!(
         difficulty,
-        BotDifficulty::Enoch | BotDifficulty::Grandmaster
+        BotDifficulty::Enoch | BotDifficulty::Grandmaster | BotDifficulty::Omniscient
     ) {
         heuristics::choose_kitty_enoch(&pool, trump, kitty_size)
     } else {
@@ -700,9 +945,10 @@ fn keep_value(trump: Trump, card: Card) -> i32 {
     if trump.effective_suit(card) == EffectiveSuit::Trump {
         v += 60;
     }
-    if let Some(n) = card.number() {
-        v += n.as_u32() as i32;
-    }
+    // Use the live Ace-high ordering. `Number::as_u32()` is a serialization-ish
+    // value where Ace is 1, which previously made the reconciliation logic evict
+    // Aces as if they were low trash.
+    v += heuristics::card_strength(trump, card).clamp(0, 20);
     v
 }
 
@@ -745,12 +991,12 @@ pub fn choose_bid(
         .map(|h| Card::cards(h.iter()).copied().collect())
         .unwrap_or_default();
 
-    // Enoch / Grandmaster prioritize the suit they hold the most PAIRS in (a trump
-    // pair is worth ~3-4 single trumps), per the playbook; the other tiers use the
+    // Enoch and every higher tier inherit the pair-aware playbook: a trump pair
+    // is worth roughly 3-4 single trumps. Lower tiers use the simpler
     // length-/strength-weighted backbone.
     let enoch = matches!(
         difficulty,
-        BotDifficulty::Enoch | BotDifficulty::Grandmaster
+        BotDifficulty::Enoch | BotDifficulty::Grandmaster | BotDifficulty::Omniscient
     );
 
     // Score each candidate bid by the trump it would establish.
@@ -775,14 +1021,14 @@ pub fn choose_bid(
         }
     }
 
-    // Enoch "don't declare too early": before most of the hand has been dealt you
+    // Advanced-tier "don't declare too early": before most of the hand has been dealt you
     // can't tell how long the suit will be, so a premature declaration "can make
     // or break your game." Require Enoch to have drawn most of its cards before it
     // commits to a trump, UNLESS its holding is already overwhelming.
     if enoch {
         let drawn = hand.len();
         // Final per-player hand size = (all cards − kitty) / players.
-        let total_cards = p.propagated().num_decks().max(1) * 54;
+        let total_cards = p.cards_in_play();
         let players = p.propagated().players().len().max(1);
         let kitty = p.kitty().len();
         let full_hand = total_cards.saturating_sub(kitty) / players;
@@ -827,6 +1073,55 @@ pub fn choose_bid(
     })
 }
 
+/// Choose a legal overbid during a kitty-theft exchange round. This mirrors the
+/// draw-phase strength model but operates on the exchange phase's current epoch;
+/// it is intentionally conservative so a bot steals only with a genuinely good
+/// resulting trump holding.
+pub fn choose_exchange_bid(
+    p: &crate::game_state::exchange_phase::ExchangePhase,
+    me: PlayerID,
+    difficulty: BotDifficulty,
+) -> Option<shengji_mechanics::bidding::Bid> {
+    let valid = p.valid_bids(me).ok()?;
+    if valid.is_empty() {
+        return None;
+    }
+    let level = p
+        .trump()
+        .number()
+        .map(Rank::Number)
+        .unwrap_or(Rank::NoTrump);
+    let hand: Vec<Card> = p
+        .hands()
+        .get(me)
+        .ok()
+        .map(|h| Card::cards(h.iter()).copied().collect())
+        .unwrap_or_default();
+    let advanced = matches!(
+        difficulty,
+        BotDifficulty::Enoch | BotDifficulty::Grandmaster | BotDifficulty::Omniscient
+    );
+
+    valid
+        .into_iter()
+        .filter_map(|bid| {
+            let candidate_trump = match bid.card {
+                Card::SmallJoker | Card::BigJoker => heuristics::trump_for(level, None),
+                Card::Suited { suit, .. } => heuristics::trump_for(level, Some(suit)),
+                Card::Unknown => return None,
+            };
+            let mut strength = if advanced {
+                heuristics::bid_strength_enoch(&hand, candidate_trump)
+            } else {
+                heuristics::bid_strength(&hand, candidate_trump)
+            };
+            strength -= bid.count as f64 * 0.5;
+            (strength >= 10.0).then_some((strength, bid))
+        })
+        .max_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(_, bid)| bid)
+}
+
 // ===========================================================================
 // Always-legal fallback (the original dumb-but-legal policy)
 // ===========================================================================
@@ -834,11 +1129,30 @@ pub fn choose_bid(
 /// The original always-legal play used as a last-resort fallback so the bot
 /// never produces an illegal / empty move when it must act.
 fn dumb_play(p: &PlayPhase, me: PlayerID) -> Option<Vec<Card>> {
-    if p.trick().played_cards().is_empty() {
+    let leading = p.trick().played_cards().is_empty();
+    let proposed = if leading {
         dumb_lead(p, me)
     } else {
         dumb_follow(p, me)
+    };
+    if proposed
+        .as_ref()
+        .is_some_and(|cards| p.can_play_cards(me, cards).is_ok())
+    {
+        return proposed;
     }
+
+    // This path should be vanishingly rare. Reuse the mechanics-validated
+    // generator as the final guard so unusual tuple/bomb settings cannot turn a
+    // fallback into an illegal bot action.
+    let candidates = if leading {
+        heuristics::lead_candidates(p, me)
+    } else {
+        heuristics::follow_candidates(p, me)
+    };
+    candidates
+        .into_iter()
+        .find(|cards| p.can_play_cards(me, cards).is_ok())
 }
 
 fn dumb_lead(p: &PlayPhase, me: PlayerID) -> Option<Vec<Card>> {
@@ -857,10 +1171,10 @@ fn dumb_lead(p: &PlayPhase, me: PlayerID) -> Option<Vec<Card>> {
 
     let mut best_play: Option<Vec<Card>> = None;
     for (_, suit_cards) in cards_by_suit.into_iter() {
-        let results = TrickUnit::find_plays(trump, TractorRequirements::default(), suit_cards);
+        let results = TrickUnit::find_plays(trump, p.propagated().tractor_requirements, suit_cards);
         let play = results
             .into_iter()
-            .map(|play| play.into_iter().max_by_key(|u| u.size()).unwrap())
+            .filter_map(|play| play.into_iter().max_by_key(|u| u.size()))
             .max_by_key(|u| u.size());
         if let Some(play) = play {
             let play_cards = play.cards();
@@ -889,7 +1203,7 @@ fn dumb_follow(p: &PlayPhase, me: PlayerID) -> Option<Vec<Card>> {
     .collect();
 
     let matching_play = trick_format
-        .decomposition(Default::default())
+        .decomposition(p.propagated().trick_draw_policy())
         .filter_map(|format| {
             let mut playable = UnitLike::check_play(
                 OrderedCard::make_map(available_cards.iter().copied(), trick_format.trump()),

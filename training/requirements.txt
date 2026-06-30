@@ -1,5 +1,3 @@
-# Python deps for training the Expert tier's candidate-scoring MLP.
-# Install with:  pip install -r requirements.txt
-torch>=2.0
-onnx>=1.14
-numpy>=1.24
+# Human-facing entry point. Production/pipeline installs use the exact lock;
+# update and validate that file (including Rust/tract parity) as one change.
+-r requirements.lock.txt

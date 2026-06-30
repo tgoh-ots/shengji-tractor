@@ -1,6 +1,9 @@
 # Bot Training Improvement Roadmap
 
-> **Status:** the **1-day** and **1-week** plans are IMPLEMENTED (2026-06-29); the **1-month** plan is the remaining work. · **Drafted:** 2026-06-28
+> **Status:** historical 2026-06-29 roadmap. The 2026-06-30 implementation
+> supersedes several details below; see [bot-overhaul-2026-06-30.md](bot-overhaul-2026-06-30.md)
+> for the current architecture, completed work, remaining risks, and alternative
+> training bets. · **Drafted:** 2026-06-28
 > **Scope:** how to make the Shengji bot models *stronger*, and how to *prove* they got stronger.
 > Grounded in the current code (file:line references throughout). Companion to `PROGRESS.md` and the committed eval baseline `docs/bot-eval-baseline.md`.
 

@@ -10,8 +10,10 @@
 //! 2. In each world, apply the candidate move on a *cloned* engine play-phase,
 //!    then play the trick out (and a short greedy continuation) using the
 //!    [`Policy`] as the rollout policy for every seat.
-//! 3. Score the resulting position from the acting player's team's perspective
-//!    (points captured + a positional bonus) and average over worlds.
+//! 3. Score the resulting position from the acting player's team's perspective.
+//!    A schema-v2 model supplies signed level-utility V when available; otherwise
+//!    the mechanics-aware static evaluator is used. Candidate Q can also blend
+//!    into the root prior/final estimate behind calibration gates.
 //!
 //! We then pick the candidate with the best average value. The whole thing is
 //! time-boxed with [`std::time::Instant`]: when the budget is exhausted we stop
@@ -38,12 +40,13 @@
 //! heuristic drives the many rollout plies. Either [`Policy::Net`] use falls back
 //! to the heuristic whenever the net can't score a position.
 //!
-//! The leaf value is still the static [`evaluate_position`] (the net is a policy,
-//! not a value net), so this is "search + a learned policy prior" — AlphaZero-
-//! lite. Both tiers share the determinizer, world sampling, rollout machinery,
-//! and leaf evaluator below; only the prior differs, so Expert (search + learned
-//! prior) can beat the heuristic-prior search on the same compute.
+//! Schema-v2 artifacts may expose separate policy, signed level-V, and action-Q
+//! semantics. Each head is shape/manifest checked and independently gated; a
+//! legacy policy-only artifact continues to use the static leaf and heuristic Q
+//! fallback. An optional default-off belief proposal biases only hard-legal
+//! hidden-card assignments.
 
+use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -52,10 +55,14 @@ use rand::{Rng, SeedableRng};
 
 use shengji_mechanics::types::{Card, PlayerID};
 
-use crate::bot::determinize::sample_hidden_hands;
+use crate::bot::determinize::{sample_hidden_hands_with_proposal, DeterminizedWorld};
 use crate::bot::expert;
 use crate::bot::heuristics::{self, ScoredPlay};
 use crate::game_state::play_phase::PlayPhase;
+
+fn sample_world<R: Rng>(p: &PlayPhase, me: PlayerID, rng: &mut R) -> Option<DeterminizedWorld> {
+    sample_hidden_hands_with_proposal(p, me, rng, crate::bot::belief::loaded_proposal())
+}
 
 /// The policy source that supplies the candidate prior (for pruning) and the
 /// rollout moves inside the determinized search.
@@ -161,6 +168,42 @@ fn value_weight() -> f64 {
     })
 }
 
+/// Schema-v2 models predict the actual normalized hand objective (win plus level
+/// advancement), not point margin. When such a typed model is loaded, use its
+/// state-V as a replacement leaf objective instead of mixing incompatible units.
+/// The opt-out is useful for ablations; legacy/embedded models are unaffected.
+fn level_value_leaf_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled = std::env::var("SHENGJI_LEVEL_VALUE_LEAF")
+            .map(|value| !value.is_empty() && value != "0")
+            .unwrap_or(true);
+        enabled
+            && matches!(
+                expert::loaded_model_semantics(),
+                Some(
+                    expert::ExpertModelSemantics::V2LevelValue
+                        | expert::ExpertModelSemantics::V2LevelQ
+                )
+            )
+    })
+}
+
+/// Weight of a calibrated schema-v2 Q(o,a) prediction in the final root choice.
+/// Both rollout means and Q are min-max normalized across the same candidate set,
+/// so no point/level units are mixed. Constant Q is ignored rather than allowing
+/// card-key tie order to replace the established policy/search signal.
+fn q_blend_weight() -> f64 {
+    static WEIGHT: OnceLock<f64> = OnceLock::new();
+    *WEIGHT.get_or_init(|| {
+        std::env::var("SHENGJI_Q_BLEND")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .map(|value| value.clamp(0.0, 1.0))
+            .unwrap_or(0.35)
+    })
+}
+
 /// Whether the determinized search uses PUCT/UCB simulation allocation instead of
 /// flat per-world averaging (env `SHENGJI_SEARCH_PUCT`, non-empty & != "0"; default
 /// OFF). Read ONCE and cached, so the flat path pays nothing when it's off.
@@ -173,10 +216,63 @@ fn puct_enabled() -> bool {
     })
 }
 
+fn minmax_normalize(values: &[f64]) -> Option<Vec<f64>> {
+    if values.is_empty() || values.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let low = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let high = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let span = high - low;
+    (span > 1e-6 && span.is_finite())
+        .then(|| values.iter().map(|value| (value - low) / span).collect())
+}
+
+fn normalize_level_q(values: &[f64]) -> Option<Vec<f64>> {
+    static MIN_SPAN: OnceLock<f64> = OnceLock::new();
+    let min_span = *MIN_SPAN.get_or_init(|| {
+        std::env::var("SHENGJI_Q_MIN_SPAN")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .unwrap_or(0.05)
+    });
+    if values.is_empty() || values.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    let low = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let high = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let span = high - low;
+    (span >= min_span && span > 1e-6)
+        .then(|| values.iter().map(|value| (value - low) / span).collect())
+}
+
+fn root_level_q(p: &PlayPhase, me: PlayerID, candidates: &[ScoredPlay]) -> Option<Vec<f64>> {
+    let cards: Vec<Vec<Card>> = candidates
+        .iter()
+        .map(|candidate| candidate.cards.clone())
+        .collect();
+    let values = expert::action_q_candidates_net(p, me, &cards)?;
+    (values.len() == candidates.len())
+        .then(|| values.into_iter().map(f64::from).collect::<Vec<_>>())
+}
+
+fn argmax_earliest(values: &[f64]) -> usize {
+    let mut best_index = 0;
+    let mut best_value = f64::NEG_INFINITY;
+    for (index, value) in values.iter().copied().enumerate() {
+        if value > best_value {
+            best_value = value;
+            best_index = index;
+        }
+    }
+    best_index
+}
+
 /// Run the determinized search and return the chosen cards, or `None` if no
 /// candidate could be produced (caller should fall back to the heuristic /
 /// dumb policy).
-pub fn search_play(p: &PlayPhase, me: PlayerID, config: SearchConfig) -> Option<Vec<Card>> {
+pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Option<Vec<Card>> {
+    let decision_start = Instant::now();
     // Candidate generation + policy pruning: rank by the configured policy (net
     // prior for Expert, playbook/heuristic for Enoch) and take the top-K.
     let mut candidates: Vec<ScoredPlay> = ranked_candidates(p, me, config.policy);
@@ -189,6 +285,19 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, config: SearchConfig) -> Option<
     if candidates.len() == 1 {
         return Some(candidates.remove(0).cards);
     }
+    // Cache the typed Q values once for final blending / PUCT. Candidate ranking
+    // may already have consulted Q while assembling top-K, but serving should not
+    // run another uncharged inference after the timed search.
+    let root_q_values = (config.policy == Policy::Net)
+        .then(|| root_level_q(p, me, &candidates))
+        .flatten();
+
+    // Candidate construction/ranking is part of decision latency too. Charge it
+    // to the configured wall budget before any world simulation begins.
+    config.time_budget = config.time_budget.saturating_sub(decision_start.elapsed());
+    if config.time_budget.is_zero() {
+        return Some(candidates[0].cards.clone());
+    }
 
     let mut rng = StdRng::seed_from_u64(config.seed);
 
@@ -199,66 +308,69 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, config: SearchConfig) -> Option<
     // byte-unchanged in production. See `docs/bot-training-roadmap.md` (pays off
     // most once the leaf is a learned value net, not the crude static eval).
     if puct_enabled() {
-        return puct_search(p, me, &candidates, &config, &mut rng);
+        return puct_search(
+            p,
+            me,
+            &candidates,
+            root_q_values.as_deref(),
+            &config,
+            &mut rng,
+        );
     }
 
     let mut totals = vec![0.0f64; candidates.len()];
     let mut counts = vec![0u32; candidates.len()];
 
     let start = Instant::now();
-    let mut worlds_done = 0;
+    let mut worlds_attempted = 0usize;
+    let mut paired_worlds_done = 0usize;
 
-    'outer: while worlds_done < config.max_worlds {
+    while worlds_attempted < config.max_worlds {
         if start.elapsed() >= config.time_budget {
             break;
         }
-        // Sample one world; reuse it across all candidates for a fair, paired
-        // comparison (variance reduction).
-        // Enoch samples worlds with PERFECT memory (no already-played card is
-        // re-dealt to an opponent, voids inferred over the full hand); Expert keeps
-        // the limited last-trick memory its net prior was trained against.
-        let full_memory = config.policy == Policy::EnochHeuristic;
-        let world = match sample_hidden_hands(p, me, full_memory, &mut rng) {
+        worlds_attempted += 1;
+
+        // Full public memory is part of every honest observation and is therefore
+        // independent of the root policy. Reuse one world and one rollout-random
+        // stream across all candidates (common random numbers) for a paired,
+        // lower-variance comparison.
+        let world = match sample_world(p, me, &mut rng) {
             Some(w) => w,
-            None => {
-                worlds_done += 1;
-                continue;
-            }
+            None => continue,
         };
 
-        for (idx, cand) in candidates.iter().enumerate() {
-            // Periodically re-check the time budget so a heavy world can't blow
-            // the cap.
-            if start.elapsed() >= config.time_budget {
-                break 'outer;
-            }
-            let value = evaluate_candidate(
-                &world.play,
-                me,
-                &cand.cards,
-                config.rollout_tricks,
-                config.rollout_policy,
-                &mut rng,
-            );
-            if let Some(v) = value {
-                totals[idx] += v;
-                counts[idx] += 1;
-            }
+        let rollout_seed = rng.gen::<u64>();
+        let Some(values) = evaluate_paired_candidates(
+            &world.play,
+            me,
+            &candidates,
+            config.rollout_tricks,
+            config.rollout_policy,
+            rollout_seed,
+            Some(start + config.time_budget),
+        ) else {
+            continue;
+        };
+        // Commit a world only after every candidate completed. We deliberately do
+        // not stop halfway through a round: a timer expiring mid-round used to
+        // give early candidates more samples and make strength depend on order.
+        for (idx, value) in values.into_iter().enumerate() {
+            totals[idx] += value;
+            counts[idx] += 1;
         }
-        worlds_done += 1;
+        paired_worlds_done += 1;
     }
 
     if search_trace_enabled() {
         let elapsed = start.elapsed();
-        // `worlds_done` counts both fully-simulated and skipped (unsatisfiable)
-        // samples; both consume the budget, so it is the right denominator for
-        // "did we run out of TIME or out of the WORLDS cap?".
         let time_bound = elapsed >= config.time_budget;
         eprintln!(
-            "[search] seat={} cands={} worlds={}/{} elapsed={:.1}ms budget={}ms bound={}",
+            "[search] seat={} cands={} paired_worlds={} attempts={}/{} elapsed={:.1}ms budget={}ms bound={}",
             me.0,
             candidates.len(),
-            worlds_done,
+            paired_worlds_done,
+            worlds_attempted,
             config.max_worlds,
             elapsed.as_secs_f64() * 1000.0,
             config.time_budget.as_millis(),
@@ -266,16 +378,16 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, config: SearchConfig) -> Option<
         );
     }
 
-    // Per-candidate mean leaf value (a candidate that never got simulated falls
-    // back to its heuristic score so it isn't unfairly ignored).
-    let avgs: Vec<f64> = (0..candidates.len())
-        .map(|idx| {
-            if counts[idx] > 0 {
-                totals[idx] / counts[idx] as f64
-            } else {
-                candidates[idx].score
-            }
-        })
+    // A zero-sample search falls back to the policy prior as a whole. Never mix
+    // heuristic-prior units with rollout-point units in one argmax.
+    if paired_worlds_done == 0 {
+        return Some(candidates[0].cards.clone());
+    }
+    debug_assert!(counts.windows(2).all(|pair| pair[0] == pair[1]));
+    let avgs: Vec<f64> = totals
+        .iter()
+        .zip(&counts)
+        .map(|(&total, &count)| total / count as f64)
         .collect();
 
     // Pick the best candidate. Candidates are heuristic-sorted, so the earliest
@@ -312,6 +424,20 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, config: SearchConfig) -> Option<
             }
         }
         bi
+    } else if config.policy == Policy::Net {
+        let search_norm = minmax_normalize(&avgs);
+        let q_norm = root_q_values.as_deref().and_then(normalize_level_q);
+        match (search_norm, q_norm) {
+            (Some(search_norm), Some(q_norm)) => {
+                let weight = q_blend_weight();
+                let combined: Vec<f64> = (0..candidates.len())
+                    .map(|idx| (1.0 - weight) * search_norm[idx] + weight * q_norm[idx])
+                    .collect();
+                argmax_earliest(&combined)
+            }
+            (None, Some(q_norm)) => argmax_earliest(&q_norm),
+            _ => argmax_earliest(&avgs),
+        }
     } else {
         let mut bi = 0;
         let mut best = f64::NEG_INFINITY;
@@ -325,6 +451,37 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, config: SearchConfig) -> Option<
     };
 
     Some(candidates[best_idx].cards.clone())
+}
+
+/// Evaluate a complete candidate round against one world with common random
+/// numbers. A round is all-or-nothing so callers never compare means based on
+/// different world sets merely because the wall clock expired between candidates.
+fn evaluate_paired_candidates(
+    world: &PlayPhase,
+    me: PlayerID,
+    candidates: &[ScoredPlay],
+    rollout_tricks: usize,
+    rollout_policy: Policy,
+    rollout_seed: u64,
+    deadline: Option<Instant>,
+) -> Option<Vec<f64>> {
+    let mut values = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        // Re-seeding every candidate gives each hypothetical action the same
+        // rollout-random stream. The paths may consume it differently after they
+        // diverge, but candidate iteration order cannot change its random draws.
+        let mut candidate_rng = StdRng::seed_from_u64(rollout_seed);
+        values.push(evaluate_candidate(
+            world,
+            me,
+            &candidate.cards,
+            rollout_tricks,
+            rollout_policy,
+            &mut candidate_rng,
+            deadline,
+        )?);
+    }
+    Some(values)
 }
 
 /// PUCT/UCB simulation allocation over the (already policy-pruned) candidate set,
@@ -350,21 +507,68 @@ fn puct_search(
     p: &PlayPhase,
     me: PlayerID,
     candidates: &[ScoredPlay],
+    root_q: Option<&[f64]>,
     config: &SearchConfig,
     rng: &mut StdRng,
 ) -> Option<Vec<Card>> {
     const C_PUCT: f64 = 1.5;
     let n = candidates.len();
-    let full_memory = config.policy == Policy::EnochHeuristic;
-    let prior = 1.0 / n as f64; // uniform over the already-pruned top-K
+    let uniform = vec![1.0 / n as f64; n];
+    let prior = root_q
+        .and_then(|values| {
+            let normalized = normalize_level_q(values)?;
+            // A modest temperature keeps a sparse/noisy pilot head from
+            // starving alternatives while still directing visits toward its
+            // calibrated action-value preference.
+            Some(softmax(
+                &normalized
+                    .into_iter()
+                    .map(|value| value * 2.0)
+                    .collect::<Vec<_>>(),
+            ))
+        })
+        .filter(|values| values.len() == n)
+        .unwrap_or(uniform);
     let mut q_sum = vec![0.0f64; n];
     let mut counts = vec![0u32; n];
 
     // Match the flat path's rollout budget: it does `max_worlds` worlds × `n`
     // candidate rollouts; here each pull is one rollout, so allow `max_worlds·n`.
-    let pulls = config.max_worlds.saturating_mul(n).max(1);
+    let pulls = config.max_worlds.saturating_mul(n);
     let start = Instant::now();
-    for _ in 0..pulls {
+
+    // Mandatory paired warm-up: when there is enough budget to begin one world,
+    // every candidate gets the same world and random stream before UCB may focus
+    // on a subset. This removes the old zero-as-Q bias and guarantees at least one
+    // comparable sample per candidate when any simulation is possible.
+    if pulls >= n && start.elapsed() < config.time_budget {
+        if let Some(world) = sample_world(p, me, rng) {
+            let rollout_seed = rng.gen::<u64>();
+            if let Some(values) = evaluate_paired_candidates(
+                &world.play,
+                me,
+                candidates,
+                config.rollout_tricks,
+                config.rollout_policy,
+                rollout_seed,
+                Some(start + config.time_budget),
+            ) {
+                for (idx, value) in values.into_iter().enumerate() {
+                    q_sum[idx] += value;
+                    counts[idx] += 1;
+                }
+            }
+        }
+    }
+
+    // Selective allocation is meaningful only after the common baseline exists.
+    // If the world/candidate set could not complete that baseline, use the prior
+    // rather than manufacturing an order-dependent partially visited search.
+    if counts.iter().all(|&count| count == 0) {
+        return Some(candidates[0].cards.clone());
+    }
+
+    for _ in n..pulls {
         if start.elapsed() >= config.time_budget {
             break;
         }
@@ -389,14 +593,14 @@ fn puct_search(
         let mut best_u = f64::NEG_INFINITY;
         for i in 0..n {
             let q_norm = (means[i] - lo) / span;
-            let u = q_norm + C_PUCT * prior * sqrt_total / (1.0 + counts[i] as f64);
+            let u = q_norm + C_PUCT * prior[i] * sqrt_total / (1.0 + counts[i] as f64);
             if u > best_u {
                 best_u = u;
                 best_i = i;
             }
         }
 
-        let world = match sample_hidden_hands(p, me, full_memory, rng) {
+        let world = match sample_world(p, me, rng) {
             Some(w) => w,
             None => continue,
         };
@@ -407,6 +611,7 @@ fn puct_search(
             config.rollout_tricks,
             config.rollout_policy,
             rng,
+            Some(start + config.time_budget),
         ) {
             q_sum[best_i] += v;
             counts[best_i] += 1;
@@ -466,8 +671,9 @@ fn puct_search(
 pub fn search_play_perfect_info(
     p: &PlayPhase,
     me: PlayerID,
-    config: SearchConfig,
+    mut config: SearchConfig,
 ) -> Option<Vec<Card>> {
+    let decision_start = Instant::now();
     let mut candidates: Vec<ScoredPlay> = ranked_candidates(p, me, config.policy);
     if candidates.is_empty() {
         return None;
@@ -477,39 +683,49 @@ pub fn search_play_perfect_info(
         return Some(candidates.remove(0).cards);
     }
 
+    config.time_budget = config.time_budget.saturating_sub(decision_start.elapsed());
+    if config.time_budget.is_zero() {
+        return Some(candidates[0].cards.clone());
+    }
+
     let mut rng = StdRng::seed_from_u64(config.seed);
 
-    // Evaluate each candidate against the SINGLE true world `p`. We can run a few
-    // rollouts per candidate (the rollout policy carries a little noise, so
-    // averaging a handful reduces variance) within the time budget, then pick the
-    // best mean value greedily (no ε, no temperature).
+    // Evaluate complete rounds against the SINGLE true world `p`. Every candidate
+    // in a round gets the same rollout-random stream, and a started round always
+    // finishes, so wall-clock expiry cannot privilege candidates earlier in the
+    // ranking.
     let start = Instant::now();
-    let mut best_idx = 0;
-    let mut best_avg = f64::NEG_INFINITY;
-    for (idx, cand) in candidates.iter().enumerate() {
-        let mut total = 0.0f64;
-        let mut count = 0u32;
-        for _ in 0..config.max_worlds.max(1) {
-            if start.elapsed() >= config.time_budget {
-                break;
-            }
-            if let Some(v) = evaluate_candidate(
-                p,
-                me,
-                &cand.cards,
-                config.rollout_tricks,
-                config.rollout_policy,
-                &mut rng,
-            ) {
-                total += v;
-                count += 1;
-            }
+    let mut totals = vec![0.0f64; candidates.len()];
+    let mut rounds = 0u32;
+    for _ in 0..config.max_worlds {
+        if start.elapsed() >= config.time_budget {
+            break;
         }
-        let avg = if count > 0 {
-            total / count as f64
-        } else {
-            cand.score
+        let rollout_seed = rng.gen::<u64>();
+        let Some(values) = evaluate_paired_candidates(
+            p,
+            me,
+            &candidates,
+            config.rollout_tricks,
+            config.rollout_policy,
+            rollout_seed,
+            Some(start + config.time_budget),
+        ) else {
+            continue;
         };
+        for (idx, value) in values.into_iter().enumerate() {
+            totals[idx] += value;
+        }
+        rounds += 1;
+    }
+
+    if rounds == 0 {
+        return Some(candidates[0].cards.clone());
+    }
+    let mut best_idx = 0usize;
+    let mut best_avg = f64::NEG_INFINITY;
+    for (idx, total) in totals.into_iter().enumerate() {
+        let avg = total / rounds as f64;
         if avg > best_avg {
             best_avg = avg;
             best_idx = idx;
@@ -529,6 +745,47 @@ pub fn search_play_perfect_info(
 /// candidates), we transparently fall back to the heuristic ranking, so the
 /// search is never starved of candidates.
 fn ranked_candidates(p: &PlayPhase, me: PlayerID, policy: Policy) -> Vec<ScoredPlay> {
+    canonicalize_ranked_candidates(ranked_candidates_raw(p, me, policy))
+}
+
+fn canonicalize_ranked_candidates(candidates: Vec<ScoredPlay>) -> Vec<ScoredPlay> {
+    let mut keyed = candidates
+        .into_iter()
+        .map(|candidate| {
+            let mut key = candidate
+                .cards
+                .iter()
+                .map(|card| card.as_char())
+                .collect::<Vec<_>>();
+            key.sort_unstable();
+            (candidate, key)
+        })
+        .collect::<Vec<_>>();
+
+    // Preserve policy score as the primary ranking, but make every tie independent
+    // of HashMap iteration order. Equivalent multisets are one physical action and
+    // are deduplicated after sorting.
+    keyed.sort_by(|(a, a_key), (b, b_key)| {
+        let a_score = if a.score.is_finite() {
+            a.score
+        } else {
+            f64::NEG_INFINITY
+        };
+        let b_score = if b.score.is_finite() {
+            b.score
+        } else {
+            f64::NEG_INFINITY
+        };
+        b_score.total_cmp(&a_score).then_with(|| a_key.cmp(b_key))
+    });
+    let mut seen = HashSet::new();
+    keyed
+        .into_iter()
+        .filter_map(|(candidate, key)| seen.insert(key).then_some(candidate))
+        .collect()
+}
+
+fn ranked_candidates_raw(p: &PlayPhase, me: PlayerID, policy: Policy) -> Vec<ScoredPlay> {
     let leading = p.trick().played_cards().is_empty();
 
     let heuristic_ranked = || -> Vec<ScoredPlay> {
@@ -560,6 +817,22 @@ fn ranked_candidates(p: &PlayPhase, me: PlayerID, policy: Policy) -> Vec<ScoredP
                 // the heuristic ranking (which also handles its own fallbacks).
                 return heuristic_ranked();
             }
+            // A sparse schema-v2 Q head is an additional calibrated signal, not
+            // a wholesale replacement for the established policy+heuristic prior.
+            // Near-constant Q is ignored by `normalize_level_q`.
+            let q_prior = expert::action_q_candidates_net(p, me, &cands)
+                .filter(|values| values.len() == cands.len())
+                .map(|values| values.into_iter().map(f64::from).collect::<Vec<_>>())
+                .as_deref()
+                .and_then(normalize_level_q)
+                .map(|values| {
+                    softmax(
+                        &values
+                            .into_iter()
+                            .map(|value| value * 2.0)
+                            .collect::<Vec<_>>(),
+                    )
+                });
             let net_scores = match expert::score_candidates_net(p, me, &cands) {
                 Some(s) => s,
                 // Net unavailable: fall back to the heuristic prior.
@@ -596,7 +869,13 @@ fn ranked_candidates(p: &PlayPhase, me: PlayerID, policy: Policy) -> Vec<ScoredP
                 .enumerate()
                 .map(|(i, cards)| ScoredPlay {
                     cards,
-                    score: NET_W * net_probs[i] + HEUR_W * heur_probs[i],
+                    score: {
+                        let base = NET_W * net_probs[i] + HEUR_W * heur_probs[i];
+                        q_prior
+                            .as_ref()
+                            .map(|q| (1.0 - q_blend_weight()) * base + q_blend_weight() * q[i])
+                            .unwrap_or(base)
+                    },
                 })
                 .collect();
             scored.sort_by(|a, b| {
@@ -644,6 +923,7 @@ fn evaluate_candidate(
     rollout_tricks: usize,
     policy: Policy,
     rng: &mut StdRng,
+    deadline: Option<Instant>,
 ) -> Option<f64> {
     let mut sim = world.clone();
     // Play our candidate.
@@ -661,7 +941,9 @@ fn evaluate_candidate(
     // "roll out the whole hand" sentinel) caps at `usize::MAX` plies instead of
     // overflowing; the rollout loop terminates anyway once the hand is finished.
     let max_plies = players.saturating_mul(rollout_tricks.max(1));
-    rollout(&mut sim, max_plies, policy, rng);
+    if !rollout(&mut sim, max_plies, policy, rng, deadline) {
+        return None;
+    }
 
     Some(evaluate_position(&sim, me))
 }
@@ -679,11 +961,16 @@ fn rollout_ranked(
     leading: bool,
     policy: Policy,
 ) -> Vec<Vec<Card>> {
+    // Knowledge/feature construction is observer-aware even on a materialized
+    // sampled world: it uses only `actor`'s hand identities, public history and
+    // public pile sizes. We can therefore borrow the simulation directly without
+    // deep-cloning/redacting its growing history on every rollout ply.
+    let view = sim;
     let heuristic_cards = || -> Vec<Vec<Card>> {
         let ranked = if leading {
-            heuristics::ranked_leads(sim, actor)
+            heuristics::ranked_leads_for_rollout(view, actor)
         } else {
-            heuristics::ranked_follows(sim, actor)
+            heuristics::ranked_follows_for_rollout(view, actor)
         };
         ranked.into_iter().map(|s| s.cards).collect()
     };
@@ -692,22 +979,22 @@ fn rollout_ranked(
         Policy::Heuristic => heuristic_cards(),
         Policy::EnochHeuristic => {
             let ranked = if leading {
-                heuristics::ranked_leads_enoch(sim, actor)
+                heuristics::ranked_leads_enoch_for_rollout(view, actor)
             } else {
-                heuristics::ranked_follows_enoch(sim, actor)
+                heuristics::ranked_follows_enoch_for_rollout(view, actor)
             };
             ranked.into_iter().map(|s| s.cards).collect()
         }
         Policy::Net => {
             let cands: Vec<Vec<Card>> = if leading {
-                heuristics::lead_candidates(sim, actor)
+                heuristics::rollout_lead_candidates(view, actor)
             } else {
-                heuristics::follow_candidates(sim, actor)
+                heuristics::rollout_follow_candidates(view, actor)
             };
             if cands.len() < 2 {
                 return heuristic_cards();
             }
-            match expert::score_candidates_net(sim, actor, &cands) {
+            match expert::score_candidates_net(view, actor, &cands) {
                 Some(scores) => {
                     let mut idx: Vec<usize> = (0..cands.len()).collect();
                     idx.sort_by(|&a, &b| {
@@ -726,11 +1013,20 @@ fn rollout_ranked(
 /// Greedily roll the play-phase forward using `policy` for whichever seat is to
 /// act, finishing tricks as needed, for up to `max_plies` card plays. Mutates
 /// `sim` in place.
-fn rollout(sim: &mut PlayPhase, max_plies: usize, policy: Policy, rng: &mut StdRng) {
+fn rollout(
+    sim: &mut PlayPhase,
+    max_plies: usize,
+    policy: Policy,
+    rng: &mut StdRng,
+    deadline: Option<Instant>,
+) -> bool {
     use rand::seq::SliceRandom;
 
     let mut plies = 0;
     while plies < max_plies {
+        if deadline.map(|end| Instant::now() >= end).unwrap_or(false) {
+            return false;
+        }
         if sim.game_finished() {
             break;
         }
@@ -761,9 +1057,9 @@ fn rollout(sim: &mut PlayPhase, max_plies: usize, policy: Policy, rng: &mut StdR
                 if sim.play_cards(actor, &cards).is_err() {
                     // Try other candidates.
                     let alts = if leading {
-                        heuristics::lead_candidates(sim, actor)
+                        heuristics::rollout_lead_candidates(sim, actor)
                     } else {
-                        heuristics::follow_candidates(sim, actor)
+                        heuristics::rollout_follow_candidates(sim, actor)
                     };
                     let mut ok = false;
                     let mut alts = alts;
@@ -784,6 +1080,15 @@ fn rollout(sim: &mut PlayPhase, max_plies: usize, policy: Policy, rng: &mut StdR
             }
         }
     }
+
+    // If the cutoff landed exactly on the last follower, settle that completed
+    // trick before the leaf evaluation. Otherwise its points (and, on the final
+    // trick, the kitty multiplier) remain on the table and are omitted from
+    // `calculate_points`, creating a seat/cutoff-dependent evaluation bias.
+    if sim.trick().next_player().is_none() {
+        let _ = sim.finish_trick();
+    }
+    true
 }
 
 /// Static evaluation of a play-phase position from `me`'s team's perspective.
@@ -844,6 +1149,22 @@ fn evaluate_position(sim: &PlayPhase, me: PlayerID) -> f64 {
 
     let static_eval = realized + control;
 
+    // A schema-v2 state head predicts the real hand objective (win plus awarded
+    // levels). Replace the point-valued leaf wholesale; never multiply it by the
+    // legacy point normalizer or blend incompatible units. Finished simulations
+    // use exact engine scoring, while an inference failure falls back to a bounded
+    // static proxy so every candidate remains comparable in roughly [-1, 1].
+    if level_value_leaf_enabled() {
+        if sim.game_finished() {
+            if let Some(value) = terminal_level_utility(sim, me) {
+                return value;
+            }
+        } else if let Some(value) = level_value_estimate(sim, me) {
+            return value;
+        }
+        return (static_eval / expert::VALUE_NORM).tanh();
+    }
+
     // Optional learned-VALUE blend. Default OFF (`SHENGJI_VALUE_WEIGHT` unset → 0),
     // so this is EXACTLY the static eval above and production behavior is
     // byte-unchanged until a value-head model is trained AND the knob is set. When
@@ -859,6 +1180,43 @@ fn evaluate_position(sim: &PlayPhase, me: PlayerID) -> f64 {
         // fall back to the static eval so the search never stalls or misbehaves.
         None => static_eval,
     }
+}
+
+fn terminal_level_utility(sim: &PlayPhase, me: PlayerID) -> Option<f64> {
+    let score = sim.current_game_score().ok()?;
+    let me_is_landlord = sim.landlords_team().contains(&me);
+    let me_won = me_is_landlord == score.landlord_won;
+    let levels = if score.landlord_won {
+        score.landlord_delta
+    } else {
+        score.non_landlord_delta
+    };
+    let magnitude = ((1 + levels) as f64 / expert::LEVEL_UTILITY_NORM as f64).min(1.0);
+    Some(if me_won { magnitude } else { -magnitude })
+}
+
+/// Typed schema-v2 state value, oriented from the next actor to the root team.
+/// The state head masks every action-dependent feature, so one legal probe
+/// candidate is sufficient and avoids repeating identical V inference rows.
+fn level_value_estimate(sim: &PlayPhase, me: PlayerID) -> Option<f64> {
+    let actor = sim.trick().next_player()?;
+    let leading = sim.trick().played_cards().is_empty();
+    let probe = if leading {
+        heuristics::rollout_lead_candidates(sim, actor)
+    } else {
+        heuristics::rollout_follow_candidates(sim, actor)
+    }
+    .into_iter()
+    .next()?;
+    let value = expert::level_value_candidates_net(sim, actor, &[probe])?
+        .into_iter()
+        .next()? as f64;
+    if !value.is_finite() {
+        return None;
+    }
+    let actor_on_my_team =
+        sim.landlords_team().contains(&actor) == sim.landlords_team().contains(&me);
+    Some(if actor_on_my_team { value } else { -value })
 }
 
 /// The learned VALUE-head estimate of leaf position `sim`, oriented for `me`'s
@@ -880,14 +1238,17 @@ fn net_value_estimate(sim: &PlayPhase, me: PlayerID) -> Option<f64> {
     let actor = sim.trick().next_player()?;
     let leading = sim.trick().played_cards().is_empty();
     let cands = if leading {
-        heuristics::lead_candidates(sim, actor)
+        heuristics::rollout_lead_candidates(sim, actor)
     } else {
-        heuristics::follow_candidates(sim, actor)
+        heuristics::rollout_follow_candidates(sim, actor)
     };
     if cands.is_empty() {
         return None;
     }
-    let values = expert::value_candidates_net(sim, actor, &cands)?;
+    // Typed API accepts only a legacy `normalized_point_margin` head. A schema-v2
+    // level-utility V is intentionally rejected rather than multiplied by the
+    // legacy point scale and blended into an incompatible static leaf.
+    let values = expert::point_value_candidates_net(sim, actor, &cands)?;
     let best = values.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
     if !best.is_finite() {
         return None;
@@ -897,4 +1258,64 @@ fn net_value_estimate(sim: &PlayPhase, me: PlayerID) -> Option<f64> {
     let actor_on_my_team = team.contains(&me) == team.contains(&actor);
     let v_for_me = if actor_on_my_team { best } else { -best };
     Some(v_for_me * expert::VALUE_NORM)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{canonicalize_ranked_candidates, ScoredPlay};
+    use shengji_mechanics::types::{Card, Number, Suit};
+
+    fn card(suit: Suit, number: Number) -> Card {
+        Card::Suited { suit, number }
+    }
+
+    fn keys(candidates: &[ScoredPlay]) -> Vec<Vec<char>> {
+        candidates
+            .iter()
+            .map(|candidate| {
+                let mut key = candidate
+                    .cards
+                    .iter()
+                    .map(|card| card.as_char())
+                    .collect::<Vec<_>>();
+                key.sort_unstable();
+                key
+            })
+            .collect()
+    }
+
+    #[test]
+    fn root_candidate_order_is_canonical_and_deduplicated() {
+        let club_three = card(Suit::Clubs, Number::Three);
+        let heart_four = card(Suit::Hearts, Number::Four);
+        let spade_five = card(Suit::Spades, Number::Five);
+        let input = vec![
+            ScoredPlay {
+                cards: vec![heart_four],
+                score: 1.0,
+            },
+            ScoredPlay {
+                cards: vec![club_three],
+                score: 1.0,
+            },
+            // Same physical multiset in another order and at a lower score.
+            ScoredPlay {
+                cards: vec![spade_five, club_three],
+                score: 0.5,
+            },
+            ScoredPlay {
+                cards: vec![club_three, spade_five],
+                score: 0.25,
+            },
+        ];
+
+        let mut reversed = input.clone();
+        reversed.reverse();
+        let first = canonicalize_ranked_candidates(input);
+        let second = canonicalize_ranked_candidates(reversed);
+        assert_eq!(keys(&first), keys(&second));
+        assert_eq!(first.len(), 3, "equivalent card multisets are one action");
+        assert!(first[0].score >= first[1].score);
+        assert!(first[1].score >= first[2].score);
+    }
 }

@@ -68,6 +68,224 @@ fn setup_all_bot_game(logger: &Logger) -> (InteractiveGame, Vec<PlayerID>) {
 }
 
 #[test]
+fn test_finding_friends_bot_sets_legal_friends_once_then_begins() {
+    use crate::settings::{FriendSelectionPolicy, GameModeSettings};
+    use shengji_mechanics::types::cards::S_7;
+    use shengji_mechanics::types::Rank;
+
+    let mut init = InitializePhase::new();
+    init.set_game_mode(GameModeSettings::FindingFriends {
+        num_friends: Some(1),
+    })
+    .unwrap();
+    init.set_friend_selection_policy(FriendSelectionPolicy::HighestCardNotAllowed)
+        .unwrap();
+    let p1 = init.add_player("p1".into()).unwrap().0;
+    let landlord = init.add_player("landlord".into()).unwrap().0;
+    let _p3 = init.add_player("p3".into()).unwrap().0;
+    let _p4 = init.add_player("p4".into()).unwrap().0;
+    init.set_landlord(Some(landlord)).unwrap();
+    init.set_rank(landlord, Rank::Number(S_7.number().unwrap()))
+        .unwrap();
+
+    let mut draw = init.start(landlord).unwrap();
+    *draw.deck_mut() = vec![S_7, S_7, S_7, S_7];
+    *draw.position_mut() = 0;
+    for _ in 0..4 {
+        let id = draw.next_player().unwrap();
+        draw.draw_card(id).unwrap();
+    }
+    assert!(draw.bid(p1, S_7, 1));
+    let mut exchange = draw.advance(landlord).unwrap();
+
+    let mut set_friends_count = 0usize;
+    for _ in 0..100 {
+        let view = GameState::Exchange(exchange.clone()).for_player(landlord);
+        match policy::select_action(&view, landlord, BotDifficulty::Easy)
+            .unwrap()
+            .expect("bot landlord must make exchange progress")
+        {
+            Action::MoveCardToKitty(card) => exchange.move_card_to_kitty(landlord, card).unwrap(),
+            Action::MoveCardToHand(card) => exchange.move_card_to_hand(landlord, card).unwrap(),
+            Action::SetFriends(friends) => {
+                set_friends_count += 1;
+                assert_eq!(friends.len(), 1);
+                assert_ne!(
+                    friends[0].card.number(),
+                    Some(shengji_mechanics::types::Number::Ace),
+                    "HighestCardNotAllowed must never receive the old Ace fallback"
+                );
+                exchange.set_friends(landlord, friends).unwrap();
+            }
+            Action::BeginPlay => {
+                assert_eq!(
+                    set_friends_count, 1,
+                    "friends must be selected exactly once"
+                );
+                exchange.advance(landlord).unwrap();
+                return;
+            }
+            action => panic!("unexpected exchange action: {:?}", action),
+        }
+    }
+    panic!("Finding Friends bot never reached BeginPlay");
+}
+
+#[test]
+fn test_all_bot_kitty_theft_exchange_reaches_play() {
+    use crate::settings::KittyTheftPolicy;
+
+    let logger = null_logger();
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".into()).unwrap();
+    let mut bots = vec![];
+    for _ in 0..4 {
+        let messages = game
+            .interact(
+                Action::AddAIPlayer {
+                    difficulty: BotDifficulty::Easy,
+                },
+                host,
+                &logger,
+            )
+            .unwrap();
+        bots.push(added_bot_id(&messages));
+    }
+    game.interact(
+        Action::SetKittyTheftPolicy(KittyTheftPolicy::AllowKittyTheft),
+        host,
+        &logger,
+    )
+    .unwrap();
+    game.interact(Action::MakeObserver(host), host, &logger)
+        .unwrap();
+    game.interact(Action::StartGame, bots[0], &logger).unwrap();
+
+    let mut saw_finalize = false;
+    for _ in 0..10_000 {
+        if matches!(game.dump_state().unwrap(), GameState::Play(_)) {
+            assert!(
+                saw_finalize,
+                "kitty-theft exchange must explicitly finalize before play"
+            );
+            return;
+        }
+        let (actor, action) = next_bot_action(&game, false)
+            .unwrap()
+            .expect("all-bot kitty-theft game must not wedge");
+        saw_finalize |= matches!(action, Action::PutDownKitty);
+        game.interact(action, actor, &logger).unwrap();
+    }
+    panic!("kitty-theft exchange did not reach play");
+}
+
+#[test]
+fn test_kitty_theft_exchange_waits_for_human_passes() {
+    use crate::settings::KittyTheftPolicy;
+
+    let logger = null_logger();
+    let mut game = InteractiveGame::new();
+    let (host, _) = game.register("host".into()).unwrap();
+    let (other_human, _) = game.register("other".into()).unwrap();
+    for _ in 0..2 {
+        game.interact(
+            Action::AddAIPlayer {
+                difficulty: BotDifficulty::Easy,
+            },
+            host,
+            &logger,
+        )
+        .unwrap();
+    }
+    game.interact(
+        Action::SetKittyTheftPolicy(KittyTheftPolicy::AllowKittyTheft),
+        host,
+        &logger,
+    )
+    .unwrap();
+    game.interact(Action::StartGame, host, &logger).unwrap();
+
+    // Deal deterministically through the public actions, make the first legal
+    // declaration, and let its winner pick up the kitty.
+    for _ in 0..1_000 {
+        let state = game.dump_state().unwrap();
+        let GameState::Draw(draw) = state else {
+            break;
+        };
+        if !draw.done_drawing() {
+            let actor = draw.next_player().unwrap();
+            game.interact(Action::DrawCard, actor, &logger).unwrap();
+        } else if !draw.bid_decided() {
+            let bid = draw
+                .propagated()
+                .players()
+                .iter()
+                .find_map(|player| {
+                    draw.valid_bids(player.id)
+                        .ok()?
+                        .into_iter()
+                        .min_by_key(|bid| bid.count)
+                })
+                .expect("a fully dealt standard hand has a legal level bid");
+            game.interact(Action::Bid(bid.card, bid.count), bid.id, &logger)
+                .unwrap();
+        } else {
+            let winner = draw.next_player().unwrap();
+            game.interact(Action::PickUpKitty, winner, &logger).unwrap();
+        }
+    }
+
+    // Use the policy to arrange the kitty, but drive it synchronously so the
+    // test can inspect the freshly opened human response window.
+    for _ in 0..200 {
+        let state = game.dump_state().unwrap();
+        let GameState::Exchange(exchange) = &state else {
+            panic!("expected kitty-theft Exchange phase, got {:?}", state);
+        };
+        if exchange.finalized() {
+            break;
+        }
+        let actor = exchange.exchanger();
+        let view = state.for_player(actor);
+        let action = policy::select_action(&view, actor, BotDifficulty::Easy)
+            .unwrap()
+            .expect("exchanger policy must make progress");
+        game.interact(action, actor, &logger).unwrap();
+    }
+
+    match game.dump_state().unwrap() {
+        GameState::Exchange(exchange) => {
+            assert!(exchange.finalized());
+            assert!(
+                !exchange.all_humans_done_bidding(),
+                "a finalized kitty must not silently treat non-resolver humans as done"
+            );
+        }
+        state => panic!("expected finalized Exchange phase, got {:?}", state),
+    }
+
+    // Mark every human except the current resolver. The resolver (standing bid
+    // winner, or landlord when no bid exists) advances through its own action.
+    let resolver = match game.dump_state().unwrap() {
+        GameState::Exchange(exchange) => exchange
+            .current_epoch_winning_bid()
+            .map(|bid| bid.id)
+            .unwrap_or(exchange.landlord()),
+        _ => unreachable!(),
+    };
+    for human in [host, other_human] {
+        if human != resolver {
+            game.interact(Action::MarkBiddingDone { ready: true }, human, &logger)
+                .unwrap();
+        }
+    }
+    match game.dump_state().unwrap() {
+        GameState::Exchange(exchange) => assert!(exchange.all_humans_done_bidding()),
+        state => panic!("expected Exchange phase, got {:?}", state),
+    }
+}
+
+#[test]
 fn test_bot_self_play_runs_to_finished_hand() {
     let logger = null_logger();
 
@@ -163,9 +381,38 @@ fn test_bot_view_hides_other_seats_cards() {
 
     // The honesty boundary: take the redacted view the policy would see for `me`,
     // and assert that no other seat's real cards are visible.
+    let full_seed = match game.dump_state().unwrap() {
+        GameState::Play(ref p) => policy::observation_seed(p, me),
+        ref other => panic!("expected full Play view, got {:?}", other),
+    };
+    let metadata_seed = match game.dump_state().unwrap() {
+        GameState::Play(mut p) => {
+            for player in &mut p.propagated_mut().players {
+                player.name = format!("renamed-{}", player.id.0);
+            }
+            p.propagated_mut()
+                .add_observer("spectator-metadata".into())
+                .unwrap();
+            p.propagated_mut()
+                .set_chat_link(Some("https://example.com/room".into()))
+                .unwrap();
+            p.propagated_mut().bots.reverse();
+            policy::observation_seed(&p, me)
+        }
+        other => panic!("expected full Play view, got {:?}", other),
+    };
+    assert_eq!(
+        full_seed, metadata_seed,
+        "room names, observers, chat metadata, and bot registry ordering must not perturb gameplay RNG"
+    );
     let view = game.dump_state_for_player(me).unwrap();
     match view {
         GameState::Play(p) => {
+            assert_eq!(
+                full_seed,
+                policy::observation_seed(&p, me),
+                "canonical bot RNG seed must ignore hidden hands and kitty"
+            );
             for &pid in &bot_ids {
                 let hand = p.hands().get(pid).unwrap();
                 if pid == me {
@@ -540,8 +787,7 @@ fn test_determinizer_respects_counts_and_seen_cards() {
     };
 
     let mut rng = StdRng::seed_from_u64(7);
-    let world =
-        sample_hidden_hands(view_play, me, false, &mut rng).expect("sampling should succeed");
+    let world = sample_hidden_hands(view_play, me, &mut rng).expect("sampling should succeed");
 
     // My sampled hand must match my real hand exactly.
     let my_real: std::collections::HashMap<Card, usize> =
@@ -566,14 +812,14 @@ fn test_determinizer_respects_counts_and_seen_cards() {
     }
 }
 
-/// Enoch's full-memory determinizer must NEVER re-deal a card that has already
+/// Every honest tier's full-memory determinizer must NEVER re-deal a card that has already
 /// been played this hand. We step several tricks deep (so the public history
 /// exceeds the single `last_trick` the limited-memory sampler remembers), sample
 /// a full-memory world, and assert GLOBAL card conservation: across my real hand,
 /// every opponent's sampled hand, the cards resting in the current trick, and the
 /// full `played_this_hand` history, no card exceeds `num_decks` copies. Under the
-/// old limited-memory sampler a card played before the last trick could be dealt
-/// to an opponent a second time, violating this; full memory fixes it.
+/// old policy-coupled sampler a card played before the last trick could be dealt
+/// to an opponent a second time, violating this; universal public memory fixes it.
 #[test]
 fn test_determinizer_full_memory_conserves_played_cards() {
     use crate::bot::determinize::sample_hidden_hands;
@@ -614,8 +860,8 @@ fn test_determinizer_full_memory_conserves_played_cards() {
     let num_decks = view_play.num_decks();
 
     let mut rng = StdRng::seed_from_u64(99);
-    let world = sample_hidden_hands(view_play, me, /* full_memory */ true, &mut rng)
-        .expect("full-memory sampling should succeed");
+    let world =
+        sample_hidden_hands(view_play, me, &mut rng).expect("full-memory sampling should succeed");
 
     // Tally every copy of every card that is accounted for in the sampled world.
     let mut totals: HashMap<Card, usize> = HashMap::new();
@@ -651,6 +897,271 @@ fn test_determinizer_full_memory_conserves_played_cards() {
             num_decks,
         );
     }
+}
+
+/// Hidden locations are part of the sampled world, not discarded leftovers.
+/// Exercise a short/joker-less configured deck with both a hidden kitty and a
+/// public removed card, then require exact physical-card conservation.
+#[test]
+fn test_determinizer_uses_configured_decks_and_materializes_kitty() {
+    use crate::bot::determinize::sample_hidden_hands;
+    use crate::game_state::play_phase::PlayPhase;
+    use crate::settings::{GameMode, PropagatedState};
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use shengji_mechanics::deck::Deck;
+    use shengji_mechanics::hands::Hands;
+    use shengji_mechanics::types::{Number, Trump};
+    use std::collections::HashMap;
+
+    let mut propagated = PropagatedState::default();
+    let ids = (0..4)
+        .map(|idx| propagated.add_player(format!("p{idx}")).unwrap().0)
+        .collect::<Vec<_>>();
+    propagated.set_num_decks(Some(2)).unwrap();
+    let short = Deck {
+        exclude_small_joker: true,
+        exclude_big_joker: true,
+        min: Number::Jack,
+    };
+    propagated
+        .set_special_decks(vec![short.clone(), short.clone()])
+        .unwrap();
+    let decks = propagated.decks().unwrap();
+    let configured = decks.iter().flat_map(Deck::cards).collect::<Vec<Card>>();
+    assert_eq!(configured.len(), 32);
+
+    let removed = vec![configured[0]];
+    let kitty = configured[1..4].to_vec();
+    let trump = Trump::NoTrump {
+        number: Some(Number::Jack),
+    };
+    let mut hands = Hands::new(ids.iter().copied());
+    hands.set_trump(trump);
+    for (idx, cards) in configured[4..].chunks_exact(7).enumerate() {
+        hands.add(ids[idx], cards.iter().copied()).unwrap();
+    }
+    let real = PlayPhase::new(
+        propagated,
+        2,
+        GameMode::Tractor,
+        hands,
+        kitty,
+        trump,
+        ids[0],
+        ids[0],
+        vec![ids[0], ids[2]],
+        removed,
+        decks,
+        vec![],
+    )
+    .unwrap();
+
+    // A non-exchanger sees only kitty capacity, never its true contents.
+    let me = ids[1];
+    let mut view = real.clone();
+    view.destructively_redact_for_player(me);
+    assert!(view.visible_kitty().is_none());
+
+    let mut rng = StdRng::seed_from_u64(0x51_0A_7E);
+    let world = sample_hidden_hands(&view, me, &mut rng).expect("short-deck world is satisfiable");
+    let sampled_kitty = world
+        .play
+        .visible_kitty()
+        .expect("a determinized rollout must have a materialized kitty");
+    assert_eq!(sampled_kitty.len(), 3);
+    assert!(sampled_kitty.iter().all(|card| *card != Card::Unknown));
+
+    let mut actual = Vec::new();
+    for id in &ids {
+        actual.extend(Card::cards(world.play.hands().get(*id).unwrap().iter()).copied());
+    }
+    let (sampled_kitty, sampled_removed) = world.play.piles_for_determinization();
+    actual.extend_from_slice(sampled_kitty);
+    actual.extend_from_slice(sampled_removed);
+    assert_eq!(
+        Card::count(actual),
+        Card::count(configured.iter().copied()),
+        "sampled hands + kitty + removed cards must exactly equal the configured special decks"
+    );
+
+    // No standard-deck card excluded by this configuration may leak in.
+    let counts: HashMap<Card, usize> = Card::count(
+        ids.iter()
+            .flat_map(|id| Card::cards(world.play.hands().get(*id).unwrap().iter()).copied())
+            .chain(sampled_kitty.iter().copied())
+            .chain(sampled_removed.iter().copied()),
+    );
+    assert_eq!(counts, Card::count(configured.iter().copied()));
+}
+
+/// Off-suit follows are hard public facts. Once a live hand establishes one,
+/// every sampled world must honor it; serialization must not erase it either.
+#[test]
+fn test_determinizer_never_relaxes_persisted_voids() {
+    use crate::bot::determinize::{
+        sample_hidden_hands_with_proposal, AssignmentProposalContext, HiddenAssignmentProposal,
+        HiddenCardLocation,
+    };
+    use crate::game_state::play_phase::PlayPhase;
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+    use shengji_mechanics::types::EffectiveSuit;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct AdversarialProposal {
+        target: PlayerID,
+        forbidden: Vec<EffectiveSuit>,
+        saw_attributed_history: AtomicBool,
+        saw_forbidden_edge: AtomicBool,
+    }
+
+    impl HiddenAssignmentProposal for AdversarialProposal {
+        fn log_weight(
+            &self,
+            context: &AssignmentProposalContext<'_>,
+            card: Card,
+            location: HiddenCardLocation,
+        ) -> f64 {
+            if !context.public_play_history.is_empty() {
+                self.saw_attributed_history.store(true, Ordering::Relaxed);
+            }
+            if location == HiddenCardLocation::Player(self.target)
+                && self.forbidden.contains(&context.trump.effective_suit(card))
+            {
+                self.saw_forbidden_edge.store(true, Ordering::Relaxed);
+            }
+            if location == HiddenCardLocation::Player(self.target) {
+                1.0e9
+            } else {
+                -1.0e9
+            }
+        }
+    }
+
+    let logger = null_logger();
+    let (mut game, bot_ids) = setup_all_bot_game(&logger);
+    let mut witness: Option<(
+        PlayPhase,
+        PlayerID,
+        Vec<shengji_mechanics::types::EffectiveSuit>,
+    )> = None;
+
+    for _ in 0..5000 {
+        if let GameState::Play(play) = game.dump_state().unwrap() {
+            if let Some((&void_player, suits)) =
+                play.voids_this_hand().iter().find(|(pid, suits)| {
+                    !suits.is_empty()
+                        && play
+                            .hands()
+                            .get(**pid)
+                            .map(|hand| hand.values().sum::<usize>() > 0)
+                            .unwrap_or(false)
+                })
+            {
+                let me = *bot_ids
+                    .iter()
+                    .find(|&&candidate| candidate != void_player)
+                    .unwrap();
+                let view = match game.dump_state_for_player(me).unwrap() {
+                    GameState::Play(view) => view,
+                    _ => unreachable!(),
+                };
+                witness = Some((view, void_player, suits.clone()));
+                break;
+            }
+            if play.game_finished() {
+                break;
+            }
+        }
+        let Some((id, action)) = next_bot_action(&game, false).unwrap() else {
+            break;
+        };
+        game.interact(action, id, &logger).unwrap();
+    }
+
+    let (view, void_player, suits) = witness.expect("expected a live public void during the hand");
+    assert!(
+        !view.public_play_history().is_empty(),
+        "a completed-trick void witness must have attributed history"
+    );
+    let attributed_counts = Card::count(
+        view.public_play_history()
+            .iter()
+            .flatten()
+            .flat_map(|play| play.cards.iter().copied()),
+    );
+    assert_eq!(
+        attributed_counts,
+        view.played_this_hand().clone(),
+        "attributed history and the compatibility multiset must index the same plays"
+    );
+    let encoded = serde_json::to_string(&view).unwrap();
+    let reloaded: PlayPhase = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        reloaded.public_play_history().len(),
+        view.public_play_history().len(),
+        "save/reload must retain trick boundaries"
+    );
+    for (before, after) in view
+        .public_play_history()
+        .iter()
+        .zip(reloaded.public_play_history())
+    {
+        assert_eq!(before.len(), after.len());
+        for (before_play, after_play) in before.iter().zip(after) {
+            assert_eq!(before_play.id, after_play.id);
+            assert_eq!(before_play.cards, after_play.cards);
+        }
+    }
+    for suit in &suits {
+        assert!(
+            reloaded
+                .voids_this_hand()
+                .get(&void_player)
+                .map(|known| known.contains(suit))
+                .unwrap_or(false),
+            "save/reload must retain the public {:?} void for {:?}",
+            suit,
+            void_player
+        );
+    }
+
+    let me = *bot_ids
+        .iter()
+        .find(|&&candidate| candidate != void_player)
+        .unwrap();
+    let proposal = AdversarialProposal {
+        target: void_player,
+        forbidden: suits.clone(),
+        saw_attributed_history: AtomicBool::new(false),
+        saw_forbidden_edge: AtomicBool::new(false),
+    };
+    for seed in 0..16u64 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let world = sample_hidden_hands_with_proposal(&reloaded, me, &mut rng, Some(&proposal))
+            .expect("an established void must be satisfiable without relaxation");
+        let hand = world.play.hands().get(void_player).unwrap();
+        for (&card, &count) in hand {
+            if count > 0 {
+                assert!(
+                    !suits.contains(&world.play.trump().effective_suit(card)),
+                    "sampled {:?} into {:?}'s proven-void suit(s) {:?}",
+                    card,
+                    void_player,
+                    suits
+                );
+            }
+        }
+    }
+    assert!(
+        proposal.saw_attributed_history.load(Ordering::Relaxed),
+        "proposal context must expose attributed public history"
+    );
+    assert!(
+        !proposal.saw_forbidden_edge.load(Ordering::Relaxed),
+        "proposal models must never be offered hard-illegal void edges"
+    );
 }
 
 // ===========================================================================
@@ -3828,9 +4339,9 @@ fn legacy_hard_difficulty_deserializes_as_expert() {
 }
 
 // ===========================================================================
-// Enoch PERFECT MEMORY: full-hand card recall for exact boss-card detection.
+// UNIVERSAL PUBLIC MEMORY: full-hand card recall for exact boss-card detection.
 //
-// Enoch's `Knowledge` is seeded from the FULL public play history
+// Every honest policy's `Knowledge` is seeded from the FULL public play history
 // (`PlayPhase::played_this_hand`), not just the last completed trick. These
 // tests assert (1) that the full-memory `seen` set includes a card from a trick
 // EARLIER than the last completed one, and (2) that `is_guaranteed_top` becomes
@@ -3839,7 +4350,7 @@ fn legacy_hard_difficulty_deserializes_as_expert() {
 // no honesty boundary is crossed.
 // ===========================================================================
 #[test]
-fn test_enoch_full_memory_recalls_earlier_tricks_and_exact_boss() {
+fn test_all_honest_knowledge_recalls_earlier_tricks_and_exact_boss() {
     use crate::bot::determinize::Knowledge;
     use crate::bot::heuristics::{is_guaranteed_top, stronger_cards_in_suit};
     use crate::game_state::play_phase::PlayPhase;
@@ -3914,7 +4425,8 @@ fn test_enoch_full_memory_recalls_earlier_tricks_and_exact_boss() {
         completed_trick_cards.len()
     );
 
-    // Build Enoch's full-memory Knowledge from the redacted view for `me`.
+    // Build Knowledge through both legacy entry points. They are deliberately
+    // identical now: selecting a root policy cannot change public memory.
     let view = game.dump_state_for_player(me).unwrap();
     let view_play = match view {
         GameState::Play(p) => p,
@@ -3924,10 +4436,10 @@ fn test_enoch_full_memory_recalls_earlier_tricks_and_exact_boss() {
     let k_last = Knowledge::from_play_view(&view_play, me);
     let trump = view_play.trick().trump();
 
-    // (1) The full-memory `seen` must include a card from an EARLIER trick (NOT
+    // (1) The universal-memory `seen` must include a card from an EARLIER trick (NOT
     //     the last completed one). Take a card that appears in the FIRST
     //     completed trick but is not in the LAST completed trick, and confirm
-    //     full memory accounts for it while the last-trick-only memory may not.
+    //     every honest entry point accounts for it.
     let last_idx = completed_trick_cards.len() - 1;
     let last_trick_cards = &completed_trick_cards[last_idx];
     let mut earlier_card: Option<Card> = None;
@@ -3946,38 +4458,17 @@ fn test_enoch_full_memory_recalls_earlier_tricks_and_exact_boss() {
 
     assert!(
         k_full.seen.get(&earlier_card).copied().unwrap_or(0) >= 1,
-        "Enoch full memory must recall earlier-trick card {:?} in `seen`",
+        "honest memory must recall earlier-trick card {:?} in `seen`",
         earlier_card
     );
-    // And the limited last-trick memory genuinely forgot it (proving the two
-    // constructors differ and that full memory is strictly more informed). This
-    // can only be relied upon if `me` does not hold the card and it is not on the
-    // current table; guard against those cases so the assertion is meaningful.
-    let on_table_now: usize = view_play
-        .trick()
-        .played_cards()
-        .iter()
-        .flat_map(|pc| pc.cards.iter())
-        .filter(|c| **c == earlier_card)
-        .count();
-    let in_my_hand = view_play
-        .hands()
-        .get(me)
-        .ok()
-        .and_then(|h| h.get(&earlier_card).copied())
-        .unwrap_or(0);
-    let in_last_trick = last_trick_cards
-        .iter()
-        .filter(|c| **c == earlier_card)
-        .count();
-    if on_table_now == 0 && in_my_hand == 0 && in_last_trick == 0 {
-        assert!(
-            k_last.seen.get(&earlier_card).copied().unwrap_or(0)
-                < k_full.seen.get(&earlier_card).copied().unwrap_or(0),
-            "limited memory should know strictly fewer copies of {:?} than full memory",
-            earlier_card
-        );
-    }
+    assert_eq!(
+        k_last.seen, k_full.seen,
+        "legacy Knowledge entry points must expose the same full public memory"
+    );
+    assert_eq!(
+        k_last.voids, k_full.voids,
+        "root-policy selection must not alter hard public void constraints"
+    );
 
     // (2) `is_guaranteed_top` is EXACT under full memory: a card is the boss of
     //     its effective suit iff every stronger same-suit card has been seen.
@@ -4006,7 +4497,7 @@ fn test_enoch_full_memory_recalls_earlier_tricks_and_exact_boss() {
     ];
     for card in sample {
         let eff = trump.effective_suit(card);
-        let s = crate::bot::heuristics::card_strength(trump, card);
+        let s = crate::bot::heuristics::legacy_card_strength(trump, card);
         // Manual ground-truth: are all stronger same-suit copies accounted for?
         let all_higher_seen = stronger_cards_in_suit(trump, eff, s)
             .iter()
@@ -4035,7 +4526,7 @@ fn test_full_memory_guaranteed_top_after_higher_cards_played_across_tricks() {
     };
     let decks = 1usize;
 
-    // Target: Queen of Hearts. Under the `card_strength` ordering that
+    // Target: Queen of Hearts. Under the frozen `legacy_card_strength` ordering that
     // `is_guaranteed_top` uses (side-suit Ace is LOW), the only stronger same-suit
     // (Hearts, non-trump) cards are the King and the Ace... but the Ace ranks LOW
     // (1), so the single stronger card is the King of Hearts. (Two is the trump
@@ -4051,7 +4542,7 @@ fn test_full_memory_guaranteed_top_after_higher_cards_played_across_tricks() {
 
     let eff = trump.effective_suit(queen_h);
     assert_eq!(eff, EffectiveSuit::Hearts);
-    let s = crate::bot::heuristics::card_strength(trump, queen_h);
+    let s = crate::bot::heuristics::legacy_card_strength(trump, queen_h);
     let higher = stronger_cards_in_suit(trump, eff, s);
     assert_eq!(
         higher,
@@ -4062,11 +4553,16 @@ fn test_full_memory_guaranteed_top_after_higher_cards_played_across_tricks() {
     // Before the King is seen, the Queen is NOT guaranteed top.
     let mut seen: std::collections::HashMap<Card, usize> = std::collections::HashMap::new();
     let mk = |seen: std::collections::HashMap<Card, usize>| Knowledge {
+        configured_counts: Card::count(shengji_mechanics::deck::Deck::default().cards()),
         seen,
         voids: std::collections::HashMap::new(),
         hidden_counts: std::collections::HashMap::new(),
+        known_holding: std::collections::HashMap::new(),
         trump,
         num_decks: decks,
+        total_cards: 54,
+        total_points: 100,
+        total_trumps: 18,
     };
     assert!(
         !is_guaranteed_top(&mk(seen.clone()), trump, queen_h),

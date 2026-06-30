@@ -412,6 +412,11 @@ impl InteractiveGame {
                 state.take_back_bid(id)?;
                 vec![MessageVariant::TookBackBid]
             }
+            (Action::MarkBiddingDone { ready }, GameState::Exchange(ref mut state)) => {
+                debug!(logger, "Marking exchange bidding done"; "ready" => ready);
+                state.set_done_bidding(id, ready);
+                vec![]
+            }
             (Action::PickUpKitty, GameState::Exchange(ref mut state)) => {
                 info!(logger, "Picking up cards after over-bid");
                 state.pick_up_cards(id)?;
@@ -557,11 +562,9 @@ pub enum Action {
     DrawCard,
     RevealCard,
     Bid(Card, usize),
-    /// Explicitly mark (or un-mark) the caller as "done bidding" during the draw
-    /// phase. The landlord is only finalized once EVERY human seat is done; bots
-    /// are implicitly done. A new bid re-opens bidding (clearing every "done"
-    /// flag), so players re-confirm against the new standing bid. Replaces the old
-    /// time-based counter-bid grace window.
+    /// Explicitly mark (or un-mark) the caller as "done bidding" during a draw or
+    /// kitty-theft exchange window. The resolver advances only once every other
+    /// human seat is done; bots are implicit. A new bid re-opens bidding.
     MarkBiddingDone {
         ready: bool,
     },

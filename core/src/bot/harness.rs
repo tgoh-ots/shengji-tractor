@@ -37,7 +37,7 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
 use shengji_mechanics::deck::Deck;
-use shengji_mechanics::types::{Card, PlayerID};
+use shengji_mechanics::types::{Card, PlayerID, Rank};
 
 use crate::bot::heuristics::{self, HeuristicVersion, ScoredPlay};
 use crate::bot::search::{search_play, SearchConfig};
@@ -47,7 +47,7 @@ use crate::game_state::initialize_phase::InitializePhase;
 use crate::game_state::play_phase::PlayPhase;
 use crate::game_state::GameState;
 use crate::interactive::Action;
-use crate::settings::GameModeSettings;
+use crate::settings::{GameMode, GameModeSettings};
 
 /// How a seat plays the PLAY phase. Covers every variant the `core/examples`
 /// benchmarks need (the production tiers, plus the search-less / explicit-config
@@ -119,6 +119,28 @@ impl Contestant {
     }
 }
 
+/// Rules/deck configuration for a reproducible harness hand.  The legacy
+/// helpers remain standard four-player/two-deck Tractor wrappers, while this
+/// type lets regression and cross-play suites exercise production variants.
+#[derive(Clone, Debug)]
+pub struct HarnessConfig {
+    pub num_players: usize,
+    pub decks: Vec<Deck>,
+    pub game_mode: GameModeSettings,
+    pub rank: Rank,
+}
+
+impl Default for HarnessConfig {
+    fn default() -> Self {
+        Self {
+            num_players: 4,
+            decks: vec![Deck::default(), Deck::default()],
+            game_mode: GameModeSettings::Tractor,
+            rank: Rank::Number(shengji_mechanics::types::Number::Two),
+        }
+    }
+}
+
 /// The outcome of one finished hand, in seat-relative terms. Seat 0 is always the
 /// landlord, so the landlord TEAM is seats 0 & 2 and the attacking team is 1 & 3.
 #[derive(Clone, Copy, Debug)]
@@ -127,6 +149,8 @@ pub struct HandResult {
     pub landlord_seat: PlayerID,
     /// The attacking (non-landlord) team's captured points — the margin signal.
     pub non_landlord_points: isize,
+    pub landlord_level_delta: usize,
+    pub non_landlord_level_delta: usize,
 }
 
 impl HandResult {
@@ -143,6 +167,19 @@ impl HandResult {
         };
         (won, margin)
     }
+
+    /// Signed level utility from the subject partnership's perspective.  This is
+    /// the actual hand objective: the winning side's advancement is positive and
+    /// the opposing side's advancement is negative.
+    pub fn subject_level_utility(&self, subject_is_landlord_team: bool) -> isize {
+        let landlord = self.landlord_level_delta as isize;
+        let attackers = self.non_landlord_level_delta as isize;
+        if subject_is_landlord_team {
+            landlord - attackers
+        } else {
+            attackers - landlord
+        }
+    }
 }
 
 /// Build a fully-seeded 4-player, 2-deck Tractor Draw phase with seat 0
@@ -151,10 +188,20 @@ impl HandResult {
 /// `InitializePhase::start` uses `thread_rng`, which we cannot seed). This is the
 /// shared deal every seeded benchmark uses.
 pub fn seeded_draw_phase(decks: &[Deck], rng: &mut StdRng) -> DrawPhase {
-    let mut deck: Vec<_> = decks.iter().flat_map(|d| d.cards()).collect();
+    let mut config = HarnessConfig::default();
+    config.decks = decks.to_vec();
+    seeded_draw_phase_with_config(&config, rng)
+}
+
+/// Configurable counterpart to [`seeded_draw_phase`].  It deliberately builds
+/// `DrawPhase` directly so no internal `thread_rng` can perturb the deal.
+pub fn seeded_draw_phase_with_config(config: &HarnessConfig, rng: &mut StdRng) -> DrawPhase {
+    assert!(config.num_players >= 2, "need at least two players");
+    assert!(!config.decks.is_empty(), "need at least one deck");
+    let mut deck: Vec<_> = config.decks.iter().flat_map(|d| d.cards()).collect();
     deck.shuffle(rng);
 
-    let num_players = 4;
+    let num_players = config.num_players;
     let mut kitty_size = deck.len() % num_players;
     if kitty_size == 0 {
         kitty_size = num_players;
@@ -167,9 +214,12 @@ pub fn seeded_draw_phase(decks: &[Deck], rng: &mut StdRng) -> DrawPhase {
     for i in 0..num_players {
         init.add_player(format!("seat{i}")).unwrap();
     }
-    init.set_num_decks(Some(decks.len())).unwrap();
-    init.set_game_mode(GameModeSettings::Tractor).unwrap();
+    init.set_num_decks(Some(config.decks.len())).unwrap();
+    init.set_game_mode(config.game_mode).unwrap();
     let real_seats: Vec<PlayerID> = init.players().iter().map(|p| p.id).collect();
+    for &seat in &real_seats {
+        init.set_rank(seat, config.rank).unwrap();
+    }
     init.set_landlord(Some(real_seats[0])).unwrap();
     let propagated = (*init).clone();
 
@@ -177,15 +227,23 @@ pub fn seeded_draw_phase(decks: &[Deck], rng: &mut StdRng) -> DrawPhase {
     let hands_deck = deck[0..deck.len() - kitty_size].to_vec();
     let kitty = deck[deck.len() - kitty_size..].to_vec();
 
+    let game_mode = match config.game_mode {
+        GameModeSettings::Tractor => GameMode::Tractor,
+        GameModeSettings::FindingFriends { num_friends } => GameMode::FindingFriends {
+            num_friends: num_friends.unwrap_or_else(|| (num_players / 2).saturating_sub(1)),
+            friends: vec![],
+        },
+    };
+
     DrawPhase::new(
         propagated,
         0,
         hands_deck,
         kitty,
-        decks.len(),
-        crate::settings::GameMode::Tractor,
+        config.decks.len(),
+        game_mode,
         level,
-        decks.to_vec(),
+        config.decks.clone(),
         vec![],
     )
 }
@@ -322,8 +380,22 @@ pub fn play_cards_for(s: &PlayPhase, actor: PlayerID, brain: &PlayBrain) -> Opti
 /// Returns `None` only on an unexpected engine error (which would itself be a bug)
 /// or if the iteration cap is hit.
 pub fn play_one_hand(seats: &[Seat; 4], rng: &mut StdRng) -> Option<HandResult> {
-    let decks = vec![Deck::default(), Deck::default()];
-    let draw = seeded_draw_phase(&decks, rng);
+    play_one_hand_with_config(seats, &HarnessConfig::default(), rng)
+}
+
+/// Drive one seeded hand under an explicit player/deck/mode configuration.
+/// This is intentionally the same phase loop as [`play_one_hand`]; the wrapper
+/// exists so strength and legality suites can cover Finding Friends, nonstandard
+/// decks, and different table sizes instead of silently testing one ruleset.
+pub fn play_one_hand_with_config(
+    seats: &[Seat],
+    config: &HarnessConfig,
+    rng: &mut StdRng,
+) -> Option<HandResult> {
+    if seats.len() != config.num_players {
+        return None;
+    }
+    let draw = seeded_draw_phase_with_config(config, rng);
     let seat_ids: Vec<PlayerID> = draw.propagated().players().iter().map(|p| p.id).collect();
     let seat_idx = |pid: PlayerID| -> Option<usize> { seat_ids.iter().position(|x| *x == pid) };
 
@@ -369,25 +441,34 @@ pub fn play_one_hand(seats: &[Seat; 4], rng: &mut StdRng) -> Option<HandResult> 
                 }
             }
             GameState::Exchange(s) => {
-                let landlord = s.landlord();
-                let d = seats[seat_idx(landlord)?].kitty;
-                let view = GameState::Exchange(s.clone()).for_player(landlord);
-                match policy::select_action(&view, landlord, d).ok()? {
-                    Some(Action::MoveCardToKitty(c)) => s.move_card_to_kitty(landlord, c).ok()?,
-                    Some(Action::MoveCardToHand(c)) => s.move_card_to_hand(landlord, c).ok()?,
-                    Some(Action::SetFriends(f)) => s.set_friends(landlord, f).ok()?,
-                    _ => state = GameState::Play(s.advance(landlord).ok()?),
+                let actor = s.next_player().ok()?;
+                let d = seats[seat_idx(actor)?].kitty;
+                let view = GameState::Exchange(s.clone()).for_player(actor);
+                match policy::select_action(&view, actor, d).ok()? {
+                    Some(Action::MoveCardToKitty(c)) => s.move_card_to_kitty(actor, c).ok()?,
+                    Some(Action::MoveCardToHand(c)) => s.move_card_to_hand(actor, c).ok()?,
+                    Some(Action::SetFriends(f)) => s.set_friends(actor, f).ok()?,
+                    Some(Action::Bid(card, count)) if s.bid(actor, card, count) => {}
+                    Some(Action::PickUpKitty) => s.pick_up_cards(actor).ok()?,
+                    Some(Action::PutDownKitty) => s.finalize(actor).ok()?,
+                    Some(Action::BeginPlay) => {
+                        state = GameState::Play(s.advance(actor).ok()?);
+                    }
+                    _ => return None,
                 }
             }
             GameState::Play(s) => {
                 if s.game_finished() {
                     let landlord_seat = s.landlord();
                     let (non_landlord_points, _) = s.calculate_points();
+                    let score = s.current_game_score().ok()?;
                     let (_init, landlord_won, _msgs) = s.finish_game().ok()?;
                     return Some(HandResult {
                         landlord_won,
                         landlord_seat,
                         non_landlord_points,
+                        landlord_level_delta: score.landlord_delta,
+                        non_landlord_level_delta: score.non_landlord_delta,
                     });
                 }
                 match s.trick().next_player() {
@@ -430,6 +511,8 @@ pub struct PairedABResult {
     pub per_deck_winrate: Vec<f64>,
     /// Per-deck mean point margin for A across its two orientations.
     pub per_deck_margin: Vec<f64>,
+    /// Per-deck mean signed level delta for A across its two orientations.
+    pub per_deck_level_utility: Vec<f64>,
 }
 
 impl PairedABResult {
@@ -453,6 +536,10 @@ impl PairedABResult {
         mean(&self.per_deck_margin)
     }
 
+    pub fn paired_level_utility(&self) -> f64 {
+        mean(&self.per_deck_level_utility)
+    }
+
     /// Percentile bootstrap 95% CI for A's paired win-rate, resampling over DECKS
     /// (the paired units), so the interval respects the pairing.
     pub fn winrate_bootstrap_ci(&self) -> (f64, f64) {
@@ -465,11 +552,25 @@ impl PairedABResult {
         wilson_interval(self.a_wins, self.a_wins + self.b_wins, 1.96)
     }
 
-    /// The 95% minimum detectable effect on A's paired win-rate: the half-width of
-    /// the normal CI of the per-deck mean. An observed |win-rate − 0.5| below this
-    /// is NOT resolvable at this sample size ("underpowered", not "no difference").
+    /// Approximate two-sided 5%-alpha, 80%-power minimum detectable effect on the
+    /// paired win-rate.  Unlike a confidence-interval half-width, a power MDE
+    /// includes both the significance and desired-power quantiles.
     pub fn winrate_mde(&self) -> f64 {
+        minimum_detectable_effect(&self.per_deck_winrate, 1.96, 0.84)
+    }
+
+    pub fn winrate_ci_half_width(&self) -> f64 {
         ci_half_width(&self.per_deck_winrate, 1.96)
+    }
+
+    pub fn failed_hands(&self) -> usize {
+        self.pairs
+            .saturating_mul(2)
+            .saturating_sub(self.completed_hands)
+    }
+
+    pub fn incomplete_pairs(&self) -> usize {
+        self.pairs.saturating_sub(self.complete_pairs)
     }
 }
 
@@ -482,26 +583,66 @@ pub fn run_paired_ab(
     pairs: usize,
     base_seed: u64,
 ) -> PairedABResult {
+    run_paired_seat_arrays(
+        &a.label,
+        &b.label,
+        [a.seat, b.seat, a.seat, b.seat],
+        [b.seat, a.seat, b.seat, a.seat],
+        pairs,
+        base_seed,
+    )
+}
+
+/// Evaluate a focal policy with a potentially different partner against a
+/// homogeneous opposing partnership.  This detects self-play conventions that
+/// look strong only when both teammates run identical code.
+pub fn run_paired_crossplay(
+    focal: &Contestant,
+    partner: &Contestant,
+    opponent: &Contestant,
+    pairs: usize,
+    base_seed: u64,
+) -> PairedABResult {
+    run_paired_seat_arrays(
+        &format!("{} + {}", focal.label, partner.label),
+        &format!("{} + {}", opponent.label, opponent.label),
+        [focal.seat, opponent.seat, partner.seat, opponent.seat],
+        [opponent.seat, focal.seat, opponent.seat, partner.seat],
+        pairs,
+        base_seed,
+    )
+}
+
+/// Lowest-level standard-Tractor paired evaluator.  In `a_landlord`, the focal
+/// partnership occupies seats 0/2; in `b_landlord`, it occupies seats 1/3.
+pub fn run_paired_seat_arrays(
+    label_a: &str,
+    label_b: &str,
+    a_landlord: [Seat; 4],
+    b_landlord: [Seat; 4],
+    pairs: usize,
+    base_seed: u64,
+) -> PairedABResult {
     let mut a_wins = 0usize;
     let mut b_wins = 0usize;
     let mut completed_hands = 0usize;
     let mut complete_pairs = 0usize;
     let mut per_deck_winrate = Vec::with_capacity(pairs);
     let mut per_deck_margin = Vec::with_capacity(pairs);
+    let mut per_deck_level_utility = Vec::with_capacity(pairs);
 
     for d in 0..pairs {
         let seed = base_seed.wrapping_add(d as u64);
         // Orientation 1: A is the landlord team (seats 0,2); B attacks (1,3).
         let mut rng1 = StdRng::seed_from_u64(seed);
-        let seats1 = [a.seat, b.seat, a.seat, b.seat];
-        let r1 = play_one_hand(&seats1, &mut rng1);
+        let r1 = play_one_hand(&a_landlord, &mut rng1);
         // Orientation 2: SAME deal (same seed), roles swapped — B is landlord.
         let mut rng2 = StdRng::seed_from_u64(seed);
-        let seats2 = [b.seat, a.seat, b.seat, a.seat];
-        let r2 = play_one_hand(&seats2, &mut rng2);
+        let r2 = play_one_hand(&b_landlord, &mut rng2);
 
         let mut wins = Vec::with_capacity(2);
         let mut margins = Vec::with_capacity(2);
+        let mut levels = Vec::with_capacity(2);
         if let Some(r1) = r1 {
             // A is the landlord team in orientation 1.
             let (won, margin) = r1.subject_outcome(true);
@@ -513,6 +654,7 @@ pub fn run_paired_ab(
             completed_hands += 1;
             wins.push(if won { 1.0 } else { 0.0 });
             margins.push(margin as f64);
+            levels.push(r1.subject_level_utility(true) as f64);
         }
         if let Some(r2) = r2 {
             // A is the ATTACKER team in orientation 2.
@@ -525,6 +667,7 @@ pub fn run_paired_ab(
             completed_hands += 1;
             wins.push(if won { 1.0 } else { 0.0 });
             margins.push(margin as f64);
+            levels.push(r2.subject_level_utility(false) as f64);
         }
         // Only fully-paired decks (both orientations completed) become bootstrap
         // units, so the pairing is exact.
@@ -532,12 +675,13 @@ pub fn run_paired_ab(
             complete_pairs += 1;
             per_deck_winrate.push((wins[0] + wins[1]) / 2.0);
             per_deck_margin.push((margins[0] + margins[1]) / 2.0);
+            per_deck_level_utility.push((levels[0] + levels[1]) / 2.0);
         }
     }
 
     PairedABResult {
-        label_a: a.label.clone(),
-        label_b: b.label.clone(),
+        label_a: label_a.to_owned(),
+        label_b: label_b.to_owned(),
         pairs,
         completed_hands,
         complete_pairs,
@@ -545,6 +689,7 @@ pub fn run_paired_ab(
         b_wins,
         per_deck_winrate,
         per_deck_margin,
+        per_deck_level_utility,
     }
 }
 
@@ -566,11 +711,24 @@ pub fn print_paired_ab(r: &PairedABResult) {
         bhi * 100.0,
     );
     println!(
-        "  {} paired margin: {:+.2} pts/hand   95% MDE on win-rate: ±{:.1}pp",
+        "  {} paired margin: {:+.2} pts/hand   CI half-width: ±{:.1}pp   80%-power MDE: ±{:.1}pp",
         r.label_a,
         r.paired_margin(),
+        r.winrate_ci_half_width() * 100.0,
         r.winrate_mde() * 100.0,
     );
+    println!(
+        "  {} paired level utility: {:+.3} levels/hand",
+        r.label_a,
+        r.paired_level_utility(),
+    );
+    if r.failed_hands() > 0 {
+        println!(
+            "  WARNING: {} hands failed to complete across {} incomplete deck-pairs; inspect engine errors before interpreting this result",
+            r.failed_hands(),
+            r.incomplete_pairs(),
+        );
+    }
 }
 
 /// Mean of a slice (0.0 for empty).
@@ -599,6 +757,16 @@ pub fn ci_half_width(xs: &[f64], z: f64) -> f64 {
         return f64::INFINITY;
     }
     z * std_dev(xs) / (xs.len() as f64).sqrt()
+}
+
+/// Normal-approximation minimum detectable absolute shift in a paired mean for
+/// a two-sided test. `z_alpha=1.96` and `z_power=0.84` correspond to 5% alpha
+/// and 80% power.
+pub fn minimum_detectable_effect(xs: &[f64], z_alpha: f64, z_power: f64) -> f64 {
+    if xs.len() < 2 {
+        return f64::INFINITY;
+    }
+    (z_alpha + z_power) * std_dev(xs) / (xs.len() as f64).sqrt()
 }
 
 /// Wilson score interval for a binomial proportion `wins / n` at the given `z`
@@ -639,4 +807,41 @@ pub fn bootstrap_mean_ci(xs: &[f64], iters: usize, seed: u64) -> (f64, f64) {
     let lo = means[((iters as f64) * 0.025) as usize];
     let hi = means[(((iters as f64) * 0.975) as usize).min(iters - 1)];
     (lo, hi)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configurable_seeded_deal_is_reproducible() {
+        let config = HarnessConfig {
+            num_players: 5,
+            decks: vec![Deck::default(), Deck::default(), Deck::default()],
+            game_mode: GameModeSettings::FindingFriends { num_friends: None },
+            rank: Rank::Number(shengji_mechanics::types::Number::Seven),
+        };
+        let mut a = StdRng::seed_from_u64(0xC0FFEE);
+        let mut b = StdRng::seed_from_u64(0xC0FFEE);
+        let draw_a = seeded_draw_phase_with_config(&config, &mut a);
+        let draw_b = seeded_draw_phase_with_config(&config, &mut b);
+
+        assert_eq!(draw_a.propagated().players().len(), 5);
+        assert_eq!(draw_a.deck(), draw_b.deck());
+        assert_eq!(draw_a.kitty(), draw_b.kitty());
+        assert!(draw_a
+            .propagated()
+            .players()
+            .iter()
+            .all(|p| p.rank() == config.rank));
+    }
+
+    #[test]
+    fn mde_includes_the_power_quantile() {
+        let observations = [0.0, 0.5, 1.0, 0.5, 1.0, 0.0];
+        let half_width = ci_half_width(&observations, 1.96);
+        let mde = minimum_detectable_effect(&observations, 1.96, 0.84);
+        assert!(mde > half_width);
+        assert!((mde / half_width - (2.8 / 1.96)).abs() < 1e-12);
+    }
 }

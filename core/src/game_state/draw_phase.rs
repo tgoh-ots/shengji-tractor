@@ -101,6 +101,20 @@ impl DrawPhase {
         &self.kitty
     }
 
+    /// Exact number of physical cards participating in this hand (excluding
+    /// publicly removed cards), independent of standard/special deck shape.
+    pub fn cards_in_play(&self) -> usize {
+        self.deck.len()
+            + self.kitty.len()
+            + self
+                .propagated
+                .players
+                .iter()
+                .filter_map(|player| self.hands.get(player.id).ok())
+                .map(|hand| hand.values().sum::<usize>())
+                .sum::<usize>()
+    }
+
     #[cfg(test)]
     pub fn deck_mut(&mut self) -> &mut Vec<Card> {
         &mut self.deck

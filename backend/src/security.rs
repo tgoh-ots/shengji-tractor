@@ -61,6 +61,11 @@ pub struct ResourceLimits {
     pub msg_rate_per_sec: f64,
     /// Inbound message rate limit: burst capacity (bucket size).
     pub msg_burst: f64,
+    /// Maximum number of CPU-heavy bot planners allowed to run concurrently
+    /// across the process.  Search is deliberately wall-clock bounded, so
+    /// oversubscribing a small VM both weakens every bot and can starve request
+    /// handling.  Keep this at one on the production single-vCPU machine.
+    pub max_parallel_bot_searches: usize,
 }
 
 impl Default for ResourceLimits {
@@ -74,6 +79,7 @@ impl Default for ResourceLimits {
             max_total_rooms: env_usize("MAX_TOTAL_ROOMS", 1000),
             msg_rate_per_sec: env_f64("WS_MSG_RATE_PER_SEC", 40.0),
             msg_burst: env_f64("WS_MSG_BURST", 60.0),
+            max_parallel_bot_searches: env_usize("MAX_PARALLEL_BOT_SEARCHES", 1).max(1),
         }
     }
 }

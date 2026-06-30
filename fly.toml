@@ -24,6 +24,10 @@ primary_region = "iad"   # pick one near your players: https://fly.io/docs/refer
   # if you add a Vercel frontend (Path B), set it to the Vercel origin instead.
   # Comma-separate multiple origins. NEVER use "*" in production.
   CORS_ALLOWED_ORIGINS = "https://shengji-tractor.fly.dev"
+  # Search is CPU-bound and this deployment has one shared vCPU.  Serializing
+  # planners keeps per-move wall-clock budgets meaningful and prevents multiple
+  # rooms from starving WebSocket handling. Increase only with `vm.cpus`.
+  MAX_PARALLEL_BOT_SEARCHES = "1"
   # WEBSOCKET_HOST: leave UNSET for the single-service deploy (same-origin
   # works). Only set it (e.g. "wss://shengji-CHANGE-ME.fly.dev/api") when a
   # standalone Vercel frontend points at this backend. Set via `fly secrets`

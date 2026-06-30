@@ -1,15 +1,17 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Error};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use shengji_mechanics::bidding::Bid;
 use shengji_mechanics::deck::Deck;
 use shengji_mechanics::hands::Hands;
 use shengji_mechanics::player::Player;
 use shengji_mechanics::scoring::{compute_level_deltas, next_threshold_reachable, GameScoreResult};
 use shengji_mechanics::trick::{
-    PlayCards, PlayCardsMessage, PlayedCards, Trick, TrickEnded, TrickUnit,
+    BombPolicy, PlayCards, PlayCardsMessage, PlayedCards, Trick, TrickEnded, TrickUnit,
 };
 use shengji_mechanics::types::{Card, EffectiveSuit, PlayerID, Rank, Trump};
 
@@ -29,6 +31,118 @@ macro_rules! bail_unwrap {
             None => return Err(anyhow!("option was none")),
         }
     };
+}
+
+/// Whether an observed follow is hard proof that the seat has exhausted the led
+/// effective suit. Ordinary off-suit follows prove a void, but two supported rule
+/// exceptions do not: rainbows have no single-suit following obligation, and a
+/// bomb may legally override suit following (all bombs under `AllowBombs`, or a
+/// trump bomb under `AllowBombsSuitFollowing`). Keeping this predicate shared by
+/// persisted history and the in-progress-trick determinizer prevents a legal
+/// exotic play from becoming an impossible-world constraint.
+pub(crate) fn follow_proves_void(
+    played: &PlayedCards,
+    trump: Trump,
+    led_suit: EffectiveSuit,
+    rainbow: bool,
+    bomb_policy: BombPolicy,
+) -> bool {
+    if rainbow || played.cards.is_empty() {
+        return false;
+    }
+    let played_off_suit = played
+        .cards
+        .iter()
+        .any(|card| *card != Card::Unknown && trump.effective_suit(*card) != led_suit);
+    if !played_off_suit {
+        return false;
+    }
+
+    let first = played.cards[0];
+    let is_bomb = played.cards.len() >= 4 && played.cards.iter().all(|card| *card == first);
+    let bomb_bypasses_following = is_bomb
+        && match bomb_policy {
+            BombPolicy::AllowBombs => true,
+            BombPolicy::AllowBombsSuitFollowing => {
+                trump.effective_suit(first) == EffectiveSuit::Trump
+            }
+            BombPolicy::NoBombs => false,
+        };
+    !bomb_bypasses_following
+}
+
+#[cfg(test)]
+mod void_evidence_tests {
+    use super::follow_proves_void;
+    use shengji_mechanics::trick::{BombPolicy, PlayedCards};
+    use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Suit, Trump};
+
+    fn played(cards: Vec<Card>) -> PlayedCards {
+        PlayedCards {
+            id: PlayerID(1),
+            cards,
+            bad_throw_cards: vec![],
+            better_player: None,
+        }
+    }
+
+    fn card(suit: Suit, number: Number) -> Card {
+        Card::Suited { suit, number }
+    }
+
+    #[test]
+    fn exotic_legal_follows_do_not_create_false_voids() {
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let off = card(Suit::Clubs, Number::Nine);
+        assert!(!follow_proves_void(
+            &played(vec![off]),
+            trump,
+            EffectiveSuit::Spades,
+            true,
+            BombPolicy::NoBombs,
+        ));
+        assert!(!follow_proves_void(
+            &played(vec![off; 4]),
+            trump,
+            EffectiveSuit::Spades,
+            false,
+            BombPolicy::AllowBombs,
+        ));
+        let trump_bomb = card(Suit::Hearts, Number::Nine);
+        assert!(!follow_proves_void(
+            &played(vec![trump_bomb; 4]),
+            trump,
+            EffectiveSuit::Spades,
+            false,
+            BombPolicy::AllowBombsSuitFollowing,
+        ));
+    }
+
+    #[test]
+    fn ordinary_and_restricted_offsuit_follows_still_prove_void() {
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let off = card(Suit::Clubs, Number::Nine);
+        assert!(follow_proves_void(
+            &played(vec![off]),
+            trump,
+            EffectiveSuit::Spades,
+            false,
+            BombPolicy::NoBombs,
+        ));
+        assert!(follow_proves_void(
+            &played(vec![off; 4]),
+            trump,
+            EffectiveSuit::Spades,
+            false,
+            BombPolicy::AllowBombsSuitFollowing,
+        ));
+    }
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
@@ -58,21 +172,35 @@ pub struct PlayPhase {
     last_trick: Option<Trick>,
     /// Every card that has been played in a COMPLETED trick this hand, as a
     /// multiset (card -> count). This is HONEST/public: every seat watched these
-    /// cards hit the table. Used by the Enoch bot's full-memory boss-card
-    /// detection so it never "forgets" cards from tricks earlier than the last.
+    /// cards hit the table. Used by every honest bot's full-memory world model
+    /// and boss-card detection so no tier "forgets" earlier tricks.
     /// `#[serde(default)]` so older serialized states (which lack this field)
     /// still deserialize without breaking wasm state-sync.
     #[serde(default)]
     played_this_hand: HashMap<Card, usize>,
+    /// Completed public play history with trick boundaries and seat attribution.
+    /// The multiset above remains a compact compatibility/indexing aid; this log
+    /// is the belief-model-ready record needed to condition hidden-card proposals
+    /// on *who* played *what* and in which trick. `PlayedCards` also retains throw
+    /// metadata. The current in-progress trick remains in [`PlayPhase::trick`].
+    #[serde(default)]
+    public_play_history: Arc<Vec<Vec<PlayedCards>>>,
+    /// False only for a mid-hand snapshot written by an older server that had an
+    /// aggregate played-card multiset but no attributed history. Belief models can
+    /// then degrade conservatively instead of treating missing history as evidence.
+    #[serde(default)]
+    public_history_complete: bool,
+    /// Public declaration history retained into play for belief proposals.
+    #[serde(default)]
+    public_bids: Vec<Bid>,
     /// Per-seat suit voids established this hand: a seat is recorded void in the
     /// led effective suit of a completed trick when it could not follow (it played
     /// an off-suit card). HONEST/public — off-suit follows are watched by every
-    /// seat. A runtime-only aid for the Enoch bot's FULL-history void inference
-    /// (the engine otherwise retains only `last_trick`). `#[serde(skip)]` keeps it
-    /// off the wire and out of the serialized state schema (so it never touches the
-    /// frontend types); it rebuilds trick-by-trick, so the only cost is a reset
-    /// across a serialized dump/reload — which self-heals as the hand continues.
-    #[serde(skip, default)]
+    /// seat. Persist this alongside the played-card multiset: dropping it during a
+    /// room save/reload used to make an honest bot forget hard constraints learned
+    /// earlier in the hand and sample impossible worlds until those voids happened
+    /// to be observed again.
+    #[serde(default)]
     voids_this_hand: HashMap<PlayerID, Vec<EffectiveSuit>>,
     game_ended_early: bool,
     #[serde(default)]
@@ -96,6 +224,7 @@ impl PlayPhase {
         landlords_team: Vec<PlayerID>,
         removed_cards: Vec<Card>,
         decks: Vec<Deck>,
+        public_bids: Vec<Bid>,
     ) -> Result<Self, Error> {
         let landlord_idx = bail_unwrap!(propagated.players.iter().position(|p| p.id == landlord));
         Ok(PlayPhase {
@@ -127,6 +256,9 @@ impl PlayPhase {
             game_ended_early: false,
             last_trick: None,
             played_this_hand: HashMap::new(),
+            public_play_history: Arc::new(Vec::new()),
+            public_history_complete: true,
+            public_bids,
             voids_this_hand: HashMap::new(),
             player_requested_reset: None,
         })
@@ -160,9 +292,8 @@ impl PlayPhase {
         &self.hands
     }
 
-    /// The most recently completed trick, if any. Used by the bot's card /
-    /// void tracker to reconstruct the (limited) public play history available
-    /// from the redacted view.
+    /// The most recently completed trick, if any. Full-memory bot code uses the
+    /// accumulated public fields below; this remains useful for display and rules.
     pub fn last_trick(&self) -> Option<&Trick> {
         self.last_trick.as_ref()
     }
@@ -171,18 +302,32 @@ impl PlayPhase {
     /// a multiset (card -> count). HONEST: every seat saw these cards played, so
     /// this leaks nothing and is included unchanged in the redacted per-player
     /// view. Cards still on the table in the *current* trick are NOT here yet
-    /// (read [`PlayPhase::trick`] for those). Used by the Enoch bot for exact
-    /// boss-card / guaranteed-winner detection across the whole hand.
+    /// (read [`PlayPhase::trick`] for those). Used by honest bots for exact card
+    /// conservation and boss-card reasoning across the whole hand.
     pub fn played_this_hand(&self) -> &HashMap<Card, usize> {
         &self.played_this_hand
+    }
+
+    /// Completed plays grouped by trick, in original seating/action order.
+    /// This is honest observation history: it contains only cards/actions that
+    /// have already occurred, never cards remaining in a hidden hand or kitty.
+    pub fn public_play_history(&self) -> &[Vec<PlayedCards>] {
+        self.public_play_history.as_slice()
+    }
+
+    pub fn public_history_complete(&self) -> bool {
+        self.public_history_complete
+    }
+
+    pub fn public_bids(&self) -> &[Bid] {
+        &self.public_bids
     }
 
     /// Per-seat suit voids established across ALL completed tricks this hand (a
     /// seat that played off the led suit is void in it). HONEST/public — off-suit
     /// follows are watched by every seat, so this is included unchanged in the
-    /// redacted per-player view. Used by the Enoch bot for full-history void
-    /// inference (partner-ruff / trump-drain leads, tighter world sampling) since
-    /// the engine itself only retains `last_trick`.
+    /// redacted per-player view. Used by every honest determinization to enforce
+    /// hard full-history constraints rather than sample impossible hands.
     pub fn voids_this_hand(&self) -> &HashMap<PlayerID, Vec<EffectiveSuit>> {
         &self.voids_this_hand
     }
@@ -226,19 +371,56 @@ impl PlayPhase {
         self.landlord
     }
 
+    /// Seat that actually handled and therefore observed the buried kitty. This
+    /// can differ from the landlord when kitty theft is enabled.
+    pub fn exchanger(&self) -> PlayerID {
+        self.exchanger
+    }
+
     /// The trump for this hand.
     pub fn trump(&self) -> Trump {
         self.trump
     }
 
-    /// Build a copy of this play phase with the hands replaced by a fully
-    /// determinized assignment. Used by the bot's determinized search so that
-    /// rollouts can run on the real engine APIs. The trick state, points,
-    /// kitty, team assignment and all settings are preserved; only the cards
-    /// in each seat's hand are swapped for the sampled world.
-    pub fn clone_with_hands(&self, hands: Hands) -> PlayPhase {
+    /// Exact configured card multiset for this hand. The stored `decks` are the
+    /// materialized configuration used when the hand was dealt (including short
+    /// or joker-less special decks), rather than an assumed standard deck.
+    ///
+    /// `pub(crate)` intentionally keeps this as a simulation API. Bot callers must
+    /// still receive a per-player redacted [`PlayPhase`]; the central observation
+    /// boundary is what prevents access to hidden hands and the hidden kitty.
+    pub(crate) fn configured_cards_for_determinization(&self) -> Option<Vec<Card>> {
+        let decks = if self.decks.is_empty() {
+            // Backwards compatibility for a room serialized before `decks` was
+            // persisted on PlayPhase. Re-materialize the public configuration.
+            self.propagated.decks().ok()?
+        } else {
+            self.decks.clone()
+        };
+        Some(decks.iter().flat_map(Deck::cards).collect())
+    }
+
+    /// The (possibly redacted) physical piles that are outside players' hands.
+    /// Unknown placeholders communicate only pile size. Removed cards are public
+    /// in the game UI today, but treating unknown placeholders generically keeps
+    /// the determinizer correct if that visibility rule changes later.
+    pub(crate) fn piles_for_determinization(&self) -> (&[Card], &[Card]) {
+        (&self.kitty, &self.removed_cards)
+    }
+
+    /// Build a fully materialized sampled world for bot rollouts. Hands and both
+    /// out-of-hand piles are replaced together, so terminal scoring sees the
+    /// sampled buried kitty rather than the redacted `Card::Unknown` placeholders.
+    pub(crate) fn clone_with_determinized_cards(
+        &self,
+        hands: Hands,
+        kitty: Vec<Card>,
+        removed_cards: Vec<Card>,
+    ) -> PlayPhase {
         let mut clone = self.clone();
         clone.hands = hands;
+        clone.kitty = kitty;
+        clone.removed_cards = removed_cards;
         clone
     }
 
@@ -469,10 +651,11 @@ impl PlayPhase {
             self.propagated.bomb_policy,
         );
         let completed = std::mem::replace(&mut self.trick, new_trick);
+        Arc::make_mut(&mut self.public_play_history).push(completed.played_cards().to_vec());
         // Accumulate every card from the just-completed trick into the honest,
         // public full-hand play history. Tally even `Card::Unknown` plays (when
-        // `hide_played_cards` is on) consistently; the Enoch full-memory
-        // Knowledge ignores `Card::Unknown` entries, so this never leaks.
+        // `hide_played_cards` is on) consistently; honest Knowledge ignores
+        // Unknown entries, so this never leaks.
         for pc in completed.played_cards() {
             for card in &pc.cards {
                 *self.played_this_hand.entry(*card).or_insert(0) += 1;
@@ -483,20 +666,20 @@ impl PlayPhase {
         // HONEST: off-suit follows are public. This is the same off-suit signal
         // the determinizer's `infer_voids` uses, but accumulated across every
         // completed trick (the engine keeps only `last_trick`).
-        {
+        if let Some(format) = completed.trick_format() {
             let played = completed.played_cards();
-            if let Some(lead_card) = played.first().and_then(|pc| pc.cards.first()).copied() {
-                let led_suit = self.trump.effective_suit(lead_card);
-                for pc in played.iter().skip(1) {
-                    let played_off_suit = pc
-                        .cards
-                        .iter()
-                        .any(|c| *c != Card::Unknown && self.trump.effective_suit(*c) != led_suit);
-                    if played_off_suit {
-                        let entry = self.voids_this_hand.entry(pc.id).or_default();
-                        if !entry.contains(&led_suit) {
-                            entry.push(led_suit);
-                        }
+            let led_suit = format.suit();
+            for pc in played.iter().skip(1) {
+                if follow_proves_void(
+                    pc,
+                    self.trump,
+                    led_suit,
+                    format.is_rainbow(),
+                    self.propagated.bomb_policy,
+                ) {
+                    let entry = self.voids_this_hand.entry(pc.id).or_default();
+                    if !entry.contains(&led_suit) {
+                        entry.push(led_suit);
                     }
                 }
             }
@@ -706,6 +889,38 @@ impl PlayPhase {
         }
     }
 
+    /// Score the currently accumulated non-landlord points under this hand's
+    /// exact configured decks, thresholds, and Finding Friends team-size bonus.
+    ///
+    /// On a finished hand this is the authoritative terminal result used by
+    /// [`PlayPhase::finish_game`], including level deltas and any bonus level. It
+    /// is also intentionally usable before the hand ends as a provisional
+    /// "if scoring stopped now" result for bot training/evaluation. Callers that
+    /// require a terminal target should first check [`PlayPhase::game_finished`].
+    pub fn current_game_score(&self) -> Result<GameScoreResult, Error> {
+        let (non_landlords_points, _) = self.calculate_points();
+        let smaller_landlord_team = match &self.game_mode {
+            GameMode::FindingFriends { num_friends, .. } => {
+                self.landlords_team.len() < *num_friends + 1
+            }
+            GameMode::Tractor => false,
+        };
+        let fallback_decks;
+        let decks = if self.decks.is_empty() {
+            // Older serialized rooms predate the materialized `decks` field.
+            fallback_decks = self.propagated.decks()?;
+            fallback_decks.as_slice()
+        } else {
+            self.decks.as_slice()
+        };
+        compute_level_deltas(
+            &self.propagated.game_scoring_parameters,
+            decks,
+            non_landlords_points,
+            smaller_landlord_team,
+        )
+    }
+
     pub fn finish_game(&self) -> Result<(InitializePhase, bool, Vec<MessageVariant>), Error> {
         let mut msgs = vec![];
         if !self.game_finished() {
@@ -714,19 +929,6 @@ impl PlayPhase {
 
         let (non_landlords_points, _) = self.calculate_points();
 
-        let mut smaller_landlord_team = false;
-
-        if let GameMode::FindingFriends {
-            num_friends,
-            friends: _,
-        } = &self.game_mode
-        {
-            let setting_team_size = *num_friends + 1;
-
-            let actual_team_size = self.landlords_team.len();
-            smaller_landlord_team = actual_team_size < setting_team_size;
-        }
-
         let mut propagated = self.propagated.clone();
 
         let GameScoreResult {
@@ -734,12 +936,7 @@ impl PlayPhase {
             landlord_delta: landlord_level_bump,
             landlord_won,
             landlord_bonus: bonus_level_earned,
-        } = compute_level_deltas(
-            &propagated.game_scoring_parameters,
-            &self.decks,
-            non_landlords_points,
-            smaller_landlord_team,
-        )?;
+        } = self.current_game_score()?;
 
         msgs.push(MessageVariant::EndOfGameSummary {
             landlord_won,

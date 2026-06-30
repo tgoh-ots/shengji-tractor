@@ -191,14 +191,18 @@ export type Action =
       PlayCardsWithHint: [Card[], TrickUnit[]];
     };
 /**
- * The difficulty of a bot player. The four user-selectable tiers form a strength ladder `Easy < Expert <= Enoch < Omniscient`:
+ * The difficulty of a bot player. The tiers form a rough strength ladder `Easy < Expert <= Enoch ~= Grandmaster < Omniscient`:
  *
- * * `Easy` — the bare heuristic backbone played noisily (occasional blunders, warm softmax, no card memory or search). Feels like a casual human; clearly beatable. * `Expert` — a learned neural net (a small MLP trained by behavioral cloning / distillation of the Omniscient teacher's choices) scores each legal candidate from HONEST features only, used as the PRIOR of a time-boxed determinized (ISMCTS-style) search over sampled worlds. It approximates perfect-info play from the honest observation. If the model fails to load/run the search prior transparently falls back to the shared hand-written heuristic, so Expert is never illegal/None. Honest. * `Enoch` — the strongest HONEST tier. It REUSES the same determinized search over the improved boss-/partner-aware heuristic and LAYERS ON a full competitive playbook (transcribed from a Shengji enthusiast — see `docs/strategy/double-holder.txt`) that the other tiers don't model: pair-prioritized trump declaration, disciplined point-scaled kitty burial, tractor-first leading, long-suit running, a defender low-trump hand-off, and endgame kitty protection. Like the other honest tiers it consults ONLY its own redacted, per-player view — it never sees a hidden hand. * `Omniscient` — a DELIBERATE, clearly-labeled, opt-in CHEATING tier that plays with PERFECT INFORMATION (it is allowed to see every opponent's hand). It exists for testing and for an "impossible" practice opponent; it must be chosen explicitly in the lobby and is surfaced with a cheater badge in the UI.
+ * * `Easy` — the bare heuristic backbone played noisily (occasional blunders, warm softmax, public-history memory but no search). Feels like a casual human; clearly beatable. * `Expert` — a learned neural net (a small MLP trained by behavioral cloning / distillation of the Omniscient teacher's choices) scores each legal candidate from HONEST features only, used as the PRIOR of a time-boxed determinized (ISMCTS-style) search over sampled worlds. It approximates perfect-info play from the honest observation. If the model fails to load/run the search prior transparently falls back to the shared hand-written heuristic, so Expert is never illegal/None. Honest. * `Enoch` — a strong HONEST tier. It REUSES the same determinized search over the improved boss-/partner-aware heuristic and LAYERS ON a full competitive playbook (transcribed from a Shengji enthusiast — see `docs/strategy/double-holder.txt`) that the other tiers don't model: pair-prioritized trump declaration, disciplined point-scaled kitty burial, tractor-first leading, long-suit running, a defender low-trump hand-off, and endgame kitty protection. Like the other honest tiers it consults ONLY its own redacted, per-player view — it never sees a hidden hand. * `Omniscient` — a DELIBERATE, clearly-labeled, opt-in CHEATING tier that plays with PERFECT INFORMATION (it is allowed to see every opponent's hand). It exists for testing and for an "impossible" practice opponent; it must be chosen explicitly in the lobby and is surfaced with a cheater badge in the UI.
  *
- * The three honest tiers (`Easy`/`Expert`/`Enoch`) never receive anything but their own redacted, per-player view — see [`observed_state`], which is the single, centralized place where the perfect-information bypass is gated.
+ * The honest tiers (`Easy`/`Expert`/`Enoch`/`Grandmaster`) never receive anything but their own redacted, per-player view — see [`observed_state`], the centralized place where the perfect-information bypass is gated.
  */
 export type BotDifficulty =
-  "Easy" | "Expert" | "Enoch" | "Grandmaster" | "Omniscient";
+  | "Easy"
+  | "Expert"
+  | "Enoch"
+  | "Grandmaster"
+  | "Omniscient";
 export type Number = string;
 export type FriendSelectionPolicy =
   | "Unrestricted"
@@ -208,13 +212,18 @@ export type FriendSelectionPolicy =
 export type MultipleJoinPolicy = "Unrestricted" | "NoDoubleJoin";
 export type FirstLandlordSelectionPolicy = "ByWinningBid" | "ByFirstBid";
 export type BidPolicy =
-  "JokerOrHigherSuit" | "JokerOrGreaterLength" | "GreaterLength";
+  | "JokerOrHigherSuit"
+  | "JokerOrGreaterLength"
+  | "GreaterLength";
 export type BidReinforcementPolicy =
   | "ReinforceWhileWinning"
   | "OverturnOrReinforceWhileWinning"
   | "ReinforceWhileEquivalent";
 export type JokerBidPolicy =
-  "BothTwoOrMore" | "BothNumDecks" | "LJNumDecksHJNumDecksLessOne" | "Disabled";
+  | "BothTwoOrMore"
+  | "BothNumDecks"
+  | "LJNumDecksHJNumDecksLessOne"
+  | "Disabled";
 export type MaxRank = string;
 export type GameModeSettings =
   | "Tractor"
@@ -225,9 +234,12 @@ export type GameModeSettings =
       };
     };
 export type AdvancementPolicy =
-  "Unrestricted" | "FullyUnrestricted" | "DefendPoints";
+  | "Unrestricted"
+  | "FullyUnrestricted"
+  | "DefendPoints";
 export type BonusLevelPolicy =
-  "NoBonusLevel" | "BonusLevelForSmallerLandlordTeam";
+  | "NoBonusLevel"
+  | "BonusLevelForSmallerLandlordTeam";
 export type KittyPenalty = "Times" | "Power";
 export type KittyBidPolicy = "FirstCard" | "FirstCardOfLevelOrHighest";
 export type TrickDrawPolicy =
@@ -277,7 +289,12 @@ export type Trump =
     };
 export type Suit = string;
 export type EffectiveSuit =
-  "Unknown" | "Clubs" | "Diamonds" | "Spades" | "Hearts" | "Trump";
+  | "Unknown"
+  | "Clubs"
+  | "Diamonds"
+  | "Spades"
+  | "Hearts"
+  | "Trump";
 export type GameMessage =
   | {
       State: {
@@ -1056,6 +1073,10 @@ export interface ExchangePhase {
   autobid?: Bid | null;
   bids?: Bid[];
   decks?: Deck[];
+  /**
+   * Humans that explicitly passed during the current finalized kitty-theft bidding window. A successful bid or a new exchange epoch clears this so everyone can respond to the changed standing bid.
+   */
+  done_bidding?: number[];
   epoch?: number;
   exchanger: number;
   finalized?: boolean;
@@ -1086,7 +1107,7 @@ export interface PlayPhase {
     [k: string]: number;
   };
   /**
-   * Every card that has been played in a COMPLETED trick this hand, as a multiset (card -> count). This is HONEST/public: every seat watched these cards hit the table. Used by the Enoch bot's full-memory boss-card detection so it never "forgets" cards from tricks earlier than the last. `#[serde(default)]` so older serialized states (which lack this field) still deserialize without breaking wasm state-sync.
+   * Every card that has been played in a COMPLETED trick this hand, as a multiset (card -> count). This is HONEST/public: every seat watched these cards hit the table. Used by every honest bot's full-memory world model and boss-card detection so no tier "forgets" earlier tricks. `#[serde(default)]` so older serialized states (which lack this field) still deserialize without breaking wasm state-sync.
    */
   played_this_hand?: {
     [k: string]: number;
@@ -1096,9 +1117,27 @@ export interface PlayPhase {
     [k: string]: Card[];
   };
   propagated: PropagatedState;
+  /**
+   * Public declaration history retained into play for belief proposals.
+   */
+  public_bids?: Bid[];
+  /**
+   * False only for a mid-hand snapshot written by an older server that had an aggregate played-card multiset but no attributed history. Belief models can then degrade conservatively instead of treating missing history as evidence.
+   */
+  public_history_complete?: boolean;
+  /**
+   * Completed public play history with trick boundaries and seat attribution. The multiset above remains a compact compatibility/indexing aid; this log is the belief-model-ready record needed to condition hidden-card proposals on *who* played *what* and in which trick. `PlayedCards` also retains throw metadata. The current in-progress trick remains in [`PlayPhase::trick`].
+   */
+  public_play_history?: PlayedCards[][];
   removed_cards?: Card[];
   trick: Trick;
   trump: Trump;
+  /**
+   * Per-seat suit voids established this hand: a seat is recorded void in the led effective suit of a completed trick when it could not follow (it played an off-suit card). HONEST/public — off-suit follows are watched by every seat. Persist this alongside the played-card multiset: dropping it during a room save/reload used to make an honest bot forget hard constraints learned earlier in the hand and sample impossible worlds until those voids happened to be observed again.
+   */
+  voids_this_hand?: {
+    [k: string]: EffectiveSuit[];
+  };
   [k: string]: unknown;
 }
 export interface BroadcastMessage {

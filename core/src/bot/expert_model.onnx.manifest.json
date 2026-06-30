@@ -1,0 +1,8 @@
+{
+  "manifest_version": 1,
+  "feature_schema_version": 1,
+  "feature_dim": 36,
+  "outputs": ["score"],
+  "output_semantics": ["policy_logit"],
+  "contract": "legacy_policy_baseline"
+}

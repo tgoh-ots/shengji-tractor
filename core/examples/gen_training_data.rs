@@ -1,131 +1,92 @@
-//! Training-data exporter for the Expert (learned-net) tier.
+//! Seeded training-data exporter for the Expert policy baseline and staged
+//! honest action-value learning.
 //!
-//! Plays many all-bot self-play Tractor hands and, at every PLAY-phase decision,
-//! emits one CSV row PER LEGAL CANDIDATE move:
+//! Schema v3 retains the original one-hot Omniscient-teacher label, but makes
+//! the two value semantics explicit:
 //!
-//! * a fixed-length **HONEST** feature vector for `(state, candidate)` computed
-//!   from the acting seat's REDACTED view (`bot::expert::candidate_features`),
-//!   identical to what the Rust inference path will see at serving time; plus
-//! * a binary label = 1 if this candidate is the move the STRONG teacher (the
-//!   `Omniscient` perfect-information bot) picked from that same position, else
-//!   0; plus
-//! * a `group` id so the trainer can apply a softmax/cross-entropy over the
-//!   candidates of a single decision (exactly one candidate per group is
-//!   labelled 1).
+//! * v_target is V(o): signed terminal level utility of the behaviour trajectory from
+//!   this honest observation. It is constant within a decision and must be fed
+//!   to a state-only value head.
+//! * q_target is Q(o,a): signed terminal level utility after forcing this candidate in
+//!   the same true deal, then continuing from honest per-seat observations. Only
+//!   a configurable subset of candidates is evaluated; missing targets are blank.
 //!
-//! The teacher chooses with PERFECT INFORMATION (it sees every hand), but the
-//! FEATURES are HONEST-only — so the net learns to approximate perfect-info play
-//! from the honest observation. This is the behavioral-cloning / distillation
-//! signal.
+//! Counterfactual candidates share the exact same compatible world (the seeded
+//! true deal), which gives a low-variance within-decision comparison. Across many
+//! deals, a network that consumes only honest features learns an expected return
+//! rather than a hidden-world-specific oracle argmax.
 //!
-//! Output: `training/data.csv` (header + rows). Run with:
-//!
-//!     SHENGJI_BOT_BUDGET_MS=10 GEN_GAMES=300 \
-//!         cargo run --release --example gen_training_data
-//!
-//! Each row also carries a `value` column: the realized terminal point-differential
-//! (oriented for the acting team, normalized by `expert::VALUE_NORM`), back-filled
-//! at game end — the regression target for the learned VALUE head.
-//!
-//! Env knobs:
-//!   GEN_GAMES   number of self-play hands to export (default 200)
-//!   GEN_OUT     output CSV path (default training/data.csv)
-//!   GEN_SEED    deal-RNG seed (default 0xD157111). Distinct seeds give disjoint
-//!               deals, so a run can be SHARDED across processes for parallelism.
-//!   GEN_TEACHER_BUDGET_MS  teacher (Omniscient) perfect-info search budget per
-//!               decision, in ms (default 400). This directly sets LABEL QUALITY:
-//!               an 8ms label is near-noise. Applied via SHENGJI_BOT_BUDGET_MS.
-//!   GEN_BEHAVIOUR  which policy ADVANCES the game = the recorded STATE
-//!               DISTRIBUTION (DAgger): easy | expert | enoch | mix (default easy).
-//!   GEN_MIX_SEARCH_FRAC  for GEN_BEHAVIOUR=mix, fraction of GAMES advanced by the
-//!               search tier (default 0.5; the rest by Easy). A search behaviour
-//!               shares the teacher's budget and is MUCH slower (hours, not minutes).
-//!   SHENGJI_BOT_BUDGET_MS  if set explicitly, OVERRIDES GEN_TEACHER_BUDGET_MS
-//!               (back-compat). Caps BOTH the teacher and any search behaviour.
+//! Important env knobs:
+//! * `GEN_GAMES` (default 200), `GEN_OUT` (default `training/data.csv`),
+//!   `GEN_SEED` (default `0xD157111`);
+//! * `GEN_BEHAVIOUR=easy|expert|enoch|mix` and `GEN_MIX_SEARCH_FRAC`;
+//! * `GEN_BEHAVIOUR_BUDGET_MS` is the behavior policy's final per-call budget;
+//! * `GEN_TEACHER_BUDGET_MS` (default 400; policy-label quality);
+//! * `GEN_Q_CANDIDATES` (default 2, `0` disables Q generation, `all` evaluates
+//!   every candidate) and `GEN_Q_ROLLOUT_BEHAVIOUR=easy|expert|enoch`;
+//! * `GEN_Q_ROLLOUT_BUDGET_MS` is independent from both budgets above;
+//! * `GEN_MANIFEST` overrides the default `<GEN_OUT>.manifest.json` sidecar.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::path::Path;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use serde::Serialize;
 
-use shengji_core::bot::expert::{candidate_features, FEATURE_DIM, VALUE_NORM};
-use shengji_core::bot::BotDifficulty;
-use shengji_core::bot::{heuristics, policy};
-use shengji_core::game_state::initialize_phase::InitializePhase;
+use shengji_core::bot::expert::{
+    candidate_features_v2, LEVEL_UTILITY_NORM, TRAINING_FEATURE_DIM,
+    TRAINING_FEATURE_SCHEMA_VERSION, VALUE_NORM,
+};
+use shengji_core::bot::harness::seeded_draw_phase;
+use shengji_core::bot::{heuristics, policy, BotDifficulty};
 use shengji_core::game_state::play_phase::PlayPhase;
 use shengji_core::game_state::GameState;
 use shengji_core::interactive::Action;
-use shengji_mechanics::types::{Card, PlayerID};
+use shengji_mechanics::deck::Deck;
+use shengji_mechanics::types::{Card, PlayerID, FULL_DECK};
 
-/// The teacher tier whose (perfect-information) choice provides the label.
+const DATASET_SCHEMA_VERSION: u32 = 3;
 const TEACHER: BotDifficulty = BotDifficulty::Omniscient;
+const GAME_CONFIG: &str = "tractor-4p-2deck";
 
-/// Which policy ADVANCES the game between recorded decisions — i.e. which state
-/// DISTRIBUTION the exported data covers. The teacher's pick is recorded as the
-/// label at every decision regardless of who is acting, so changing this is a
-/// DAgger-style move: relabel-with-the-teacher on a new state distribution.
-///
-/// The legacy default (`Easy`) means the net is trained on states the WEAKEST
-/// tier reaches but served as the prior of a strong determinized search — a
-/// train/serve covariate shift. `GEN_BEHAVIOUR` lets a DAgger pass advance with
-/// the actual search tier (or a mix) so recorded states match the serving
-/// distribution; it ALSO sharpens the VALUE target (the realized margin is now
-/// under strong play, not Easy play).
 #[derive(Clone, Copy)]
 enum BehaviourMode {
-    /// Advance every game with `Easy` (legacy default; rng-stream-identical to the
-    /// pre-DAgger exporter, so old policy-only data reproduces byte-for-byte).
     Easy,
-    /// Advance every game with a single search tier (`Expert` / `Enoch`).
     Tier(BotDifficulty),
-    /// Advance each GAME with `tier` with probability `frac`, else `Easy`. Mixing
-    /// per-GAME (not per-decision) keeps each trajectory coherent so the value
-    /// target is a clean single-policy playout, while spanning BOTH the
-    /// strong-search and the noisy-Easy state distributions across the corpus.
     Mix { tier: BotDifficulty, frac: f64 },
 }
 
 impl BehaviourMode {
-    /// Parse `GEN_BEHAVIOUR` (easy | expert | enoch | mix; default easy) and, for
-    /// `mix`, `GEN_MIX_SEARCH_FRAC` (default 0.5).
     fn from_env() -> Self {
         match std::env::var("GEN_BEHAVIOUR").ok().as_deref() {
-            Some("expert") => BehaviourMode::Tier(BotDifficulty::Expert),
-            Some("enoch") => BehaviourMode::Tier(BotDifficulty::Enoch),
-            Some("mix") => {
-                let frac = std::env::var("GEN_MIX_SEARCH_FRAC")
-                    .ok()
-                    .and_then(|v| v.parse::<f64>().ok())
-                    .unwrap_or(0.5)
-                    .clamp(0.0, 1.0);
-                BehaviourMode::Mix {
-                    tier: BotDifficulty::Expert,
-                    frac,
-                }
-            }
-            _ => BehaviourMode::Easy,
+            Some("expert") => Self::Tier(BotDifficulty::Expert),
+            Some("enoch") => Self::Tier(BotDifficulty::Enoch),
+            Some("mix") => Self::Mix {
+                tier: BotDifficulty::Expert,
+                frac: env_f64("GEN_MIX_SEARCH_FRAC", 0.5).clamp(0.0, 1.0),
+            },
+            _ => Self::Easy,
         }
     }
 
     fn label(self) -> String {
         match self {
-            BehaviourMode::Easy => "Easy".to_string(),
-            BehaviourMode::Tier(d) => format!("{d:?}"),
-            BehaviourMode::Mix { tier, frac } => {
-                format!("mix({tier:?} {frac:.0}% / Easy)", frac = frac * 100.0)
+            Self::Easy => "easy".to_string(),
+            Self::Tier(tier) => tier.as_str().to_ascii_lowercase(),
+            Self::Mix { tier, frac } => {
+                format!("mix-{}-{frac:.3}", tier.as_str().to_ascii_lowercase())
             }
         }
     }
 
-    /// The tier that drives THIS game, chosen once per game. For `Easy`/`Tier` it
-    /// does NOT consume `rng` (so the default-Easy rng stream — and thus the deal
-    /// sequence — is unchanged); `Mix` consumes one `gen_bool` per game.
     fn pick(self, rng: &mut StdRng) -> BotDifficulty {
         match self {
-            BehaviourMode::Easy => BotDifficulty::Easy,
-            BehaviourMode::Tier(d) => d,
-            BehaviourMode::Mix { tier, frac } => {
+            Self::Easy => BotDifficulty::Easy,
+            Self::Tier(tier) => tier,
+            Self::Mix { tier, frac } => {
                 if rng.gen_bool(frac) {
                     tier
                 } else {
@@ -136,226 +97,349 @@ impl BehaviourMode {
     }
 }
 
-struct Row {
-    group: u64,
-    features: [f32; FEATURE_DIM],
-    label: u8,
-    /// The acting seat for this decision. Transient: used only to ORIENT the
-    /// terminal value target at game end; NOT written to the CSV.
-    actor: PlayerID,
-    /// The VALUE target: the realized terminal point-differential oriented for
-    /// `actor`'s team, normalized by `VALUE_NORM` and clamped to [-1, 1]. Filled
-    /// in at game completion (back-filled), since the outcome is only known then.
-    value: f32,
+#[derive(Clone, Copy)]
+struct QConfig {
+    candidate_cap: Option<usize>,
+    rollout: BotDifficulty,
+    budget_ms: u64,
 }
 
-/// Counts of decisions that were SKIPPED (no row emitted) and why. A quick
-/// fact-check on label coverage: in particular `teacher_outside_candidates`
-/// should be ~0, because the teacher and the candidate generator both go through
-/// `heuristics::{lead,follow}_candidates` — if it is large, the assumption that
-/// the teacher always picks a generated candidate is wrong.
-#[derive(Default)]
+impl QConfig {
+    fn from_env() -> Self {
+        let candidate_cap = match std::env::var("GEN_Q_CANDIDATES")
+            .unwrap_or_else(|_| "2".to_string())
+            .as_str()
+        {
+            "all" => None,
+            value => Some(value.parse::<usize>().unwrap_or(2)),
+        };
+        let rollout = match std::env::var("GEN_Q_ROLLOUT_BEHAVIOUR")
+            .unwrap_or_else(|_| "easy".to_string())
+            .as_str()
+        {
+            "expert" => BotDifficulty::Expert,
+            "enoch" => BotDifficulty::Enoch,
+            _ => BotDifficulty::Easy,
+        };
+        Self {
+            candidate_cap,
+            rollout,
+            budget_ms: env_u64("GEN_Q_ROLLOUT_BUDGET_MS", 20).max(1),
+        }
+    }
+
+    fn enabled(self) -> bool {
+        self.candidate_cap != Some(0)
+    }
+
+    fn label(self) -> String {
+        self.rollout.as_str().to_ascii_lowercase()
+    }
+
+    fn cap_label(self) -> String {
+        self.candidate_cap
+            .map(|cap| cap.to_string())
+            .unwrap_or_else(|| "all".to_string())
+    }
+}
+
+struct Row {
+    run_id: String,
+    game_id: String,
+    game_seed: u64,
+    decision_id: u32,
+    candidate_id: usize,
+    group: String,
+    actor: PlayerID,
+    actor_team: &'static str,
+    behaviour: String,
+    rollout_behaviour: String,
+    action: String,
+    features: [f32; TRAINING_FEATURE_DIM],
+    label: u8,
+    behaviour_label: u8,
+    v_target: f32,
+    v_attacker_points: isize,
+    v_score_bucket: isize,
+    v_win_target: f32,
+    v_kitty_target: Option<f32>,
+    q_target: Option<f32>,
+    q_attacker_points: Option<isize>,
+    q_score_bucket: Option<isize>,
+    q_win_target: Option<f32>,
+    q_kitty_target: Option<f32>,
+    q_samples: u32,
+}
+
+#[derive(Clone, Debug)]
+struct TerminalOutcome {
+    attacker_points: isize,
+    score_bucket: isize,
+    landlord_won: bool,
+    landlord_delta: usize,
+    attacker_delta: usize,
+    landlord_team: Vec<PlayerID>,
+    last_trick_winner: Option<PlayerID>,
+}
+
+#[derive(Default, Serialize)]
 struct DropStats {
-    /// Fewer than 2 legal candidates: no learning signal (a forced move).
     degenerate: usize,
-    /// The teacher produced no `PlayCards` action (should not happen in Play).
     teacher_no_play: usize,
-    /// The teacher's pick was not among the generated candidates (expected ~0).
     teacher_outside_candidates: usize,
+    behaviour_no_play: usize,
+    behaviour_outside_candidates: usize,
+    q_rollout_failed: usize,
+    game_failed: usize,
+}
+
+#[derive(Serialize)]
+struct DatasetManifest {
+    manifest_version: u32,
+    dataset_schema_version: u32,
+    feature_schema_version: u32,
+    feature_dim: usize,
+    game_config: &'static str,
+    output: String,
+    gen_seed: u64,
+    games_requested: usize,
+    games_completed: usize,
+    rows: usize,
+    decisions: usize,
+    q_rows: usize,
+    behaviour: String,
+    mix_search_fraction: f64,
+    teacher: &'static str,
+    teacher_budget_ms: u64,
+    behaviour_budget_ms: u64,
+    q_candidates: String,
+    q_rollout_behaviour: String,
+    q_rollout_budget_ms: u64,
+    point_feature_norm: f64,
+    level_utility_norm: f32,
+    target_contract: &'static str,
+    auxiliary_targets: [&'static str; 4],
+    drops: DropStats,
 }
 
 fn main() {
-    // The teacher (Omniscient) runs a perfect-information search at EVERY recorded
-    // decision to produce the label, so its budget directly sets LABEL QUALITY: an
-    // 8ms label is near-noise. Default to a meaningfully stronger teacher, tunable
-    // independently via GEN_TEACHER_BUDGET_MS. We apply it through the shared
-    // `SHENGJI_BOT_BUDGET_MS` knob (the only search in this all-Easy-driven process
-    // is the teacher's), but an explicit SHENGJI_BOT_BUDGET_MS still wins.
-    let teacher_budget_ms: u64 = std::env::var("GEN_TEACHER_BUDGET_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(400);
-    if std::env::var("SHENGJI_BOT_BUDGET_MS").is_err() {
-        std::env::set_var("SHENGJI_BOT_BUDGET_MS", teacher_budget_ms.to_string());
-    }
-    eprintln!(
-        "teacher budget: SHENGJI_BOT_BUDGET_MS={} ms (GEN_TEACHER_BUDGET_MS default {})",
-        std::env::var("SHENGJI_BOT_BUDGET_MS").unwrap_or_default(),
-        teacher_budget_ms,
-    );
-    // DAgger knob: which policy advances the game (= the recorded state
-    // distribution). Default Easy (legacy). A search behaviour shares the teacher's
-    // SHENGJI_BOT_BUDGET_MS and makes generation MUCH slower (a search per move on
-    // top of the teacher search per decision) — expect hours, not minutes.
-    let behaviour = BehaviourMode::from_env();
-    eprintln!(
-        "behaviour: GEN_BEHAVIOUR={} (advances the game; teacher still labels)",
-        behaviour.label()
-    );
-    let games: usize = std::env::var("GEN_GAMES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(200);
+    let teacher_budget_ms = env_u64("GEN_TEACHER_BUDGET_MS", 400).max(1);
+    let behaviour_budget_ms = env_u64("GEN_BEHAVIOUR_BUDGET_MS", 80).max(1);
+    let games = env_usize("GEN_GAMES", 200);
+    let gen_seed = env_u64("GEN_SEED", 0xD157111);
     let out_path = std::env::var("GEN_OUT").unwrap_or_else(|_| "training/data.csv".to_string());
+    let manifest_path =
+        std::env::var("GEN_MANIFEST").unwrap_or_else(|_| format!("{out_path}.manifest.json"));
+    let behaviour = BehaviourMode::from_env();
+    let q_config = QConfig::from_env();
 
-    // Deal-RNG seed. Distinct seeds generate DISJOINT deal sequences, so a long
-    // run can be SHARDED across processes (GEN_SEED=base+i per shard) for parallel,
-    // resumable generation. Default keeps the original fixed seed (back-compat).
-    let gen_seed: u64 = std::env::var("GEN_SEED")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0xD157111);
+    eprintln!(
+        "seeded schema-v{} generation: games={} seed={} behaviour={}@{}ms teacher={}ms q_candidates={} q_rollout={}@{}ms",
+        DATASET_SCHEMA_VERSION,
+        games,
+        gen_seed,
+        behaviour.label(),
+        behaviour_budget_ms,
+        teacher_budget_ms,
+        q_config.cap_label(),
+        q_config.label(),
+        q_config.budget_ms,
+    );
+
+    ensure_parent(&out_path);
+    ensure_parent(&manifest_path);
+    let file = File::create(&out_path).expect("create output CSV");
+    let mut writer = BufWriter::new(file);
+    write_header(&mut writer);
+
     let start = std::time::Instant::now();
-    let mut rng = StdRng::seed_from_u64(gen_seed);
-    let mut group_counter: u64 = 0;
-    let mut rows: Vec<Row> = Vec::new();
-    let mut decisions = 0usize;
     let mut drops = DropStats::default();
+    let mut completed_games = 0usize;
+    let mut total_rows = 0usize;
+    let mut total_decisions = 0usize;
+    let mut q_rows = 0usize;
 
-    for g in 0..games {
-        play_one_hand_collecting(
-            &mut rng,
-            &mut group_counter,
-            &mut rows,
-            &mut decisions,
-            &mut drops,
+    for game_index in 0..games {
+        let game_seed = derive_game_seed(gen_seed, game_index as u64);
+        match play_one_hand_collecting(
+            gen_seed,
+            game_index,
+            game_seed,
             behaviour,
-        );
-        if g % 25 == 0 {
+            behaviour_budget_ms,
+            teacher_budget_ms,
+            q_config,
+            &mut drops,
+        ) {
+            Some(rows) => {
+                if let Err(error) = validate_game_rows(&rows) {
+                    eprintln!("  rejecting invalid game {game_index}: {error}");
+                    drops.game_failed += 1;
+                    continue;
+                }
+                completed_games += 1;
+                total_decisions += rows
+                    .last()
+                    .map(|row| row.decision_id as usize + 1)
+                    .unwrap_or(0);
+                q_rows += rows.iter().filter(|row| row.q_target.is_some()).count();
+                total_rows += rows.len();
+                for row in rows {
+                    write_row(&mut writer, &row);
+                }
+            }
+            None => drops.game_failed += 1,
+        }
+        if game_index % 25 == 0 {
             eprintln!(
-                "  game {g}/{games}: {decisions} decisions, {} rows so far ({:.0}s)",
-                rows.len(),
+                "  game {game_index}/{games}: completed={completed_games} decisions={total_decisions} rows={total_rows} q_rows={q_rows} ({:.1}s)",
                 start.elapsed().as_secs_f64()
             );
         }
     }
+    writer.flush().expect("flush dataset");
 
-    // Write CSV.
-    if let Some(parent) = std::path::Path::new(&out_path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let file = File::create(&out_path).expect("create output CSV");
-    let mut w = BufWriter::new(file);
-    // Header: group, f0..f{D-1}, label, value. The trailing `value` column is the
-    // (normalized, oriented) realized terminal margin for the learned VALUE head;
-    // the trainer treats it as optional (back-compat with policy-only CSVs).
-    write!(w, "group").unwrap();
-    for i in 0..FEATURE_DIM {
-        write!(w, ",f{i}").unwrap();
-    }
-    writeln!(w, ",label,value").unwrap();
-    for r in &rows {
-        write!(w, "{}", r.group).unwrap();
-        for x in &r.features {
-            write!(w, ",{x:.6}").unwrap();
-        }
-        writeln!(w, ",{},{:.6}", r.label, r.value).unwrap();
-    }
-    w.flush().unwrap();
+    let manifest = DatasetManifest {
+        manifest_version: 1,
+        dataset_schema_version: DATASET_SCHEMA_VERSION,
+        feature_schema_version: TRAINING_FEATURE_SCHEMA_VERSION,
+        feature_dim: TRAINING_FEATURE_DIM,
+        game_config: GAME_CONFIG,
+        output: out_path.clone(),
+        gen_seed,
+        games_requested: games,
+        games_completed: completed_games,
+        rows: total_rows,
+        decisions: total_decisions,
+        q_rows,
+        behaviour: behaviour.label(),
+        mix_search_fraction: env_f64("GEN_MIX_SEARCH_FRAC", 0.5),
+        teacher: "omniscient-policy-baseline",
+        teacher_budget_ms,
+        behaviour_budget_ms,
+        q_candidates: q_config.cap_label(),
+        q_rollout_behaviour: q_config.label(),
+        q_rollout_budget_ms: q_config.budget_ms,
+        point_feature_norm: VALUE_NORM,
+        level_utility_norm: LEVEL_UTILITY_NORM,
+        target_contract:
+            "actor_sign*(1+winner_level_delta)/5, clamped[-1,1]; +1 iff actor team won",
+        auxiliary_targets: [
+            "final_attacker_points",
+            "attacker_score_bucket=floor(points/step)",
+            "actor_team_win",
+            "actor_team_won_final_trick_kitty",
+        ],
+        drops,
+    };
+    let manifest_file = File::create(&manifest_path).expect("create dataset manifest");
+    serde_json::to_writer_pretty(BufWriter::new(manifest_file), &manifest)
+        .expect("write dataset manifest");
 
     eprintln!(
-        "Wrote {} rows across {} decisions ({} games) to {} in {:.1}s",
-        rows.len(),
-        decisions,
-        games,
-        out_path,
+        "Wrote {total_rows} rows / {total_decisions} decisions / {completed_games} seeded games to {out_path} in {:.1}s; manifest={manifest_path}",
         start.elapsed().as_secs_f64()
-    );
-    let total_seen =
-        decisions + drops.degenerate + drops.teacher_no_play + drops.teacher_outside_candidates;
-    eprintln!(
-        "Skipped decisions: {} degenerate(<2 cands), {} teacher-no-play, {} teacher-outside-candidates \
-         (of {} positions seen). teacher-outside should be ~0.",
-        drops.degenerate, drops.teacher_no_play, drops.teacher_outside_candidates, total_seen,
     );
 }
 
-/// Drive one all-bot hand, recording per-candidate rows at every play decision.
-fn play_one_hand_collecting(
-    rng: &mut StdRng,
-    group_counter: &mut u64,
-    rows: &mut Vec<Row>,
-    decisions: &mut usize,
-    drops: &mut DropStats,
-    behaviour: BehaviourMode,
-) {
-    // The tier that advances THIS game (chosen once, before the deal RNG, so the
-    // continuation — and thus the value target — is a coherent single-policy
-    // playout). `Easy`/`Tier` don't consume rng here, keeping the default deal
-    // sequence unchanged.
-    let game_behaviour = behaviour.pick(rng);
-    let n = 4;
-    let mut init = InitializePhase::new();
-    let mut seats: Vec<PlayerID> = vec![];
-    for i in 0..n {
-        seats.push(init.add_player(format!("seat{i}")).unwrap().0);
+fn validate_game_rows(rows: &[Row]) -> Result<(), String> {
+    let mut groups: BTreeMap<&str, Vec<&Row>> = BTreeMap::new();
+    for row in rows {
+        if row.features.iter().any(|value| !value.is_finite())
+            || !row.v_target.is_finite()
+            || row.q_target.is_some_and(|value| !value.is_finite())
+        {
+            return Err(format!("{} contains NaN/Inf", row.group));
+        }
+        if row.q_samples != u32::from(row.q_target.is_some()) {
+            return Err(format!("{} has inconsistent q_samples", row.group));
+        }
+        groups.entry(&row.group).or_default().push(row);
     }
-    init.set_num_decks(Some(n / 2)).ok();
+    for (group, candidates) in groups {
+        if candidates.len() < 2
+            || candidates
+                .iter()
+                .map(|row| row.label as usize)
+                .sum::<usize>()
+                != 1
+            || candidates
+                .iter()
+                .map(|row| row.behaviour_label as usize)
+                .sum::<usize>()
+                != 1
+        {
+            return Err(format!("{group} is not a valid listwise decision"));
+        }
+        let v = candidates[0].v_target;
+        if candidates.iter().any(|row| (row.v_target - v).abs() > 1e-6) {
+            return Err(format!("{group} has candidate-dependent state V"));
+        }
+    }
+    Ok(())
+}
 
-    // Buffer THIS game's rows so the value target (the realized terminal margin,
-    // known only at game end) can be back-filled before flushing to the global
-    // `rows`. A game that errors out before completion contributes NOTHING (its
-    // buffered rows are dropped), so every emitted value target is a real outcome.
+fn play_one_hand_collecting(
+    run_seed: u64,
+    game_index: usize,
+    game_seed: u64,
+    behaviour_mode: BehaviourMode,
+    behaviour_budget_ms: u64,
+    teacher_budget_ms: u64,
+    q_config: QConfig,
+    drops: &mut DropStats,
+) -> Option<Vec<Row>> {
+    // Deal RNG is isolated from policy/mix RNG. Adding a diagnostic or changing
+    // behaviour selection cannot silently change the cards for a given game_id.
+    let mut deal_rng = StdRng::seed_from_u64(game_seed);
+    let decks = [Deck::default(), Deck::default()];
+    let draw = seeded_draw_phase(&decks, &mut deal_rng);
+    let seats: Vec<PlayerID> = draw.propagated().players().iter().map(|p| p.id).collect();
+    let mut policy_rng = StdRng::seed_from_u64(game_seed ^ 0xB3A4_91C2_D5E6_F708);
+    let game_behaviour = behaviour_mode.pick(&mut policy_rng);
+    let run_id = format!("seed-{run_seed}");
+    let game_id = format!("{run_id}-game-{game_index}");
+
+    let mut state = GameState::Draw(draw);
     let mut game_rows: Vec<Row> = Vec::new();
-    let mut game_decisions = 0usize;
+    let mut decision_id = 0u32;
+    let mut iterations = 0usize;
 
-    let mut state = GameState::Initialize(init);
-    let mut iters = 0usize;
     loop {
-        iters += 1;
-        if iters > 200_000 {
-            return;
+        iterations += 1;
+        if iterations > 2_000_000 {
+            return None;
         }
         match &mut state {
-            GameState::Initialize(s) => match s.landlord() {
-                None => {
-                    // Randomize landlord seat for deal diversity.
-                    let l = seats[rng.gen_range(0..seats.len())];
-                    s.set_landlord(Some(l)).ok();
-                }
-                Some(l) => {
-                    state = match s.start(l) {
-                        Ok(d) => GameState::Draw(d),
-                        Err(_) => return,
-                    };
-                }
-            },
-            GameState::Draw(s) => {
-                if !s.done_drawing() {
-                    let p = match s.next_player() {
-                        Ok(p) => p,
-                        Err(_) => return,
-                    };
-                    if s.draw_card(p).is_err() {
-                        return;
-                    }
-                } else if s.bid_decided() {
-                    let responsible = match s.next_player() {
-                        Ok(p) => p,
-                        Err(_) => return,
-                    };
-                    state = match s.advance(responsible) {
-                        Ok(e) => GameState::Exchange(e),
-                        Err(_) => return,
-                    };
+            GameState::Initialize(_) => return None,
+            GameState::Draw(draw) => {
+                if !draw.done_drawing() {
+                    let player = draw.next_player().ok()?;
+                    draw.draw_card(player).ok()?;
+                } else if draw.bid_decided() {
+                    let responsible = draw.next_player().ok()?;
+                    state = GameState::Exchange(draw.advance(responsible).ok()?);
                 } else {
                     let mut bid = false;
                     for &seat in &seats {
-                        if let Some(b) = policy::choose_bid(s, seat, BotDifficulty::Expert) {
-                            if s.bid(seat, b.card, b.count) {
+                        if let Some(candidate) =
+                            policy::choose_bid(draw, seat, BotDifficulty::Expert)
+                        {
+                            if draw.bid(seat, candidate.card, candidate.count) {
                                 bid = true;
                                 break;
                             }
                         }
                     }
-                    if !bid && s.reveal_card().is_err() {
+                    if !bid && draw.reveal_card().is_err() {
                         for &seat in &seats {
-                            if let Some(b) = s
+                            if let Some(candidate) = draw
                                 .valid_bids(seat)
-                                .ok()
-                                .and_then(|v| v.into_iter().min_by_key(|b| b.count))
+                                .ok()?
+                                .into_iter()
+                                .min_by_key(|candidate| candidate.count)
                             {
-                                if s.bid(seat, b.card, b.count) {
+                                if draw.bid(seat, candidate.card, candidate.count) {
                                     break;
                                 }
                             }
@@ -363,87 +447,79 @@ fn play_one_hand_collecting(
                     }
                 }
             }
-            GameState::Exchange(s) => {
-                let landlord = s.landlord();
-                let view = GameState::Exchange(s.clone()).for_player(landlord);
-                match policy::select_action(&view, landlord, game_behaviour)
-                    .ok()
-                    .flatten()
+            GameState::Exchange(exchange) => {
+                let landlord = exchange.landlord();
+                let view = GameState::Exchange(exchange.clone()).for_player(landlord);
+                match policy::select_action_with_search_budget(
+                    &view,
+                    landlord,
+                    game_behaviour,
+                    behaviour_budget_ms,
+                )
+                .ok()
+                .flatten()
                 {
-                    Some(Action::MoveCardToKitty(c)) => {
-                        if s.move_card_to_kitty(landlord, c).is_err() {
-                            return;
-                        }
+                    Some(Action::MoveCardToKitty(card)) => {
+                        exchange.move_card_to_kitty(landlord, card).ok()?;
                     }
-                    Some(Action::MoveCardToHand(c)) => {
-                        if s.move_card_to_hand(landlord, c).is_err() {
-                            return;
-                        }
+                    Some(Action::MoveCardToHand(card)) => {
+                        exchange.move_card_to_hand(landlord, card).ok()?;
                     }
-                    Some(Action::SetFriends(f)) => {
-                        if s.set_friends(landlord, f).is_err() {
-                            return;
-                        }
+                    Some(Action::SetFriends(friends)) => {
+                        exchange.set_friends(landlord, friends).ok()?;
                     }
-                    _ => {
-                        state = match s.advance(landlord) {
-                            Ok(p) => GameState::Play(p),
-                            Err(_) => return,
-                        };
-                    }
+                    _ => state = GameState::Play(exchange.advance(landlord).ok()?),
                 }
             }
-            GameState::Play(s) => {
-                if s.game_finished() {
-                    // Back-fill the value target from the realized terminal margin
-                    // (oriented per decision's acting team) and flush this game's
-                    // rows to the global buffer.
-                    let (non_landlord_points, _) = s.calculate_points();
-                    let landlords_team: Vec<PlayerID> = s.landlords_team().to_vec();
-                    for mut r in game_rows.drain(..) {
-                        let actor_is_defender = landlords_team.contains(&r.actor);
-                        let oriented = if actor_is_defender {
-                            -(non_landlord_points as f64)
-                        } else {
-                            non_landlord_points as f64
-                        };
-                        r.value = (oriented / VALUE_NORM).clamp(-1.0, 1.0) as f32;
-                        rows.push(r);
+            GameState::Play(play) => {
+                if play.game_finished() {
+                    let terminal = terminal_outcome(play)?;
+                    for row in &mut game_rows {
+                        row.v_target = orient_level_utility(&terminal, row.actor);
+                        row.v_attacker_points = terminal.attacker_points;
+                        row.v_score_bucket = terminal.score_bucket;
+                        row.v_win_target = actor_team_won(&terminal, row.actor);
+                        row.v_kitty_target = actor_team_won_last_trick(&terminal, row.actor);
                     }
-                    *decisions += game_decisions;
-                    return;
+                    return Some(game_rows);
                 }
-                match s.trick().next_player() {
+                match play.trick().next_player() {
                     None => {
-                        if s.finish_trick().is_err() {
-                            return;
-                        }
+                        play.finish_trick().ok()?;
                     }
                     Some(actor) => {
-                        // Record the decision (per-candidate rows) BEFORE applying
-                        // a move to advance the game (into the per-game buffer).
-                        record_decision(
-                            s,
+                        let honest = GameState::Play(play.clone()).for_player(actor);
+                        let behaviour_cards = match policy::select_action_with_search_budget(
+                            &honest,
                             actor,
-                            group_counter,
+                            game_behaviour,
+                            behaviour_budget_ms,
+                        )
+                        .ok()
+                        .flatten()
+                        {
+                            Some(Action::PlayCards(cards)) => cards,
+                            _ => {
+                                drops.behaviour_no_play += 1;
+                                return None;
+                            }
+                        };
+                        record_decision(
+                            play,
+                            actor,
+                            &behaviour_cards,
+                            &run_id,
+                            &game_id,
+                            game_seed,
+                            decision_id,
+                            game_behaviour,
+                            teacher_budget_ms,
+                            q_config,
                             &mut game_rows,
-                            &mut game_decisions,
                             drops,
                         );
-
-                        // Advance with this game's behaviour policy from the
-                        // honest redacted view.
-                        let view = GameState::Play(s.clone()).for_player(actor);
-                        let cards = match policy::select_action(&view, actor, game_behaviour)
-                            .ok()
-                            .flatten()
-                        {
-                            Some(Action::PlayCards(c)) => c,
-                            _ => return,
-                        };
-                        if s.play_cards(actor, &cards).is_err() {
-                            return;
-                        }
+                        decision_id += 1;
+                        play.play_cards(actor, &behaviour_cards).ok()?;
                     }
                 }
             }
@@ -451,87 +527,441 @@ fn play_one_hand_collecting(
     }
 }
 
-/// Emit one row per legal candidate for `actor`'s current play decision into the
-/// PER-GAME buffer `rows`. The FEATURES come from the redacted view; the LABEL
-/// comes from the Omniscient teacher's perfect-information choice on the SAME
-/// position; the VALUE target is left as a placeholder (`0.0`) and back-filled
-/// from the realized terminal margin when the game finishes.
+#[allow(clippy::too_many_arguments)]
 fn record_decision(
     full: &PlayPhase,
     actor: PlayerID,
-    group_counter: &mut u64,
+    behaviour_cards: &[Card],
+    run_id: &str,
+    game_id: &str,
+    game_seed: u64,
+    decision_id: u32,
+    game_behaviour: BotDifficulty,
+    teacher_budget_ms: u64,
+    q_config: QConfig,
     rows: &mut Vec<Row>,
-    decisions: &mut usize,
     drops: &mut DropStats,
 ) {
-    // Honest, redacted view: feature computation must only ever see this.
     let view_state = GameState::Play(full.clone()).for_player(actor);
     let view = match &view_state {
-        GameState::Play(p) => p,
+        GameState::Play(play) => play,
         _ => return,
     };
-
     let leading = view.trick().played_cards().is_empty();
-    let candidates: Vec<Vec<Card>> = if leading {
+    let candidates = if leading {
         heuristics::lead_candidates(view, actor)
     } else {
         heuristics::follow_candidates(view, actor)
     };
-    // A degenerate decision with 0 or 1 candidate carries no learning signal.
     if candidates.len() < 2 {
         drops.degenerate += 1;
         return;
     }
 
-    // The teacher's pick, computed with PERFECT INFORMATION on the true world
-    // `full` (every seat's real cards). We mirror production's Omniscient honesty
-    // bypass: hand the teacher the full state.
     let teacher_state = GameState::Play(full.clone());
-    let teacher_pick = match policy::select_action(&teacher_state, actor, TEACHER)
-        .ok()
-        .flatten()
+    let teacher_cards = match policy::select_action_with_search_budget(
+        &teacher_state,
+        actor,
+        TEACHER,
+        teacher_budget_ms,
+    )
+    .ok()
+    .flatten()
     {
-        Some(Action::PlayCards(c)) => c,
+        Some(Action::PlayCards(cards)) => cards,
         _ => {
             drops.teacher_no_play += 1;
             return;
         }
     };
-
-    // Match the teacher's pick to one of our (honest) candidates by multiset of
-    // cards. If the teacher chose something outside the candidate set (rare —
-    // both use the same generators), skip this decision to keep labels clean.
-    let teacher_idx = candidates
+    let teacher_idx = match candidates
         .iter()
-        .position(|c| same_multiset(c, &teacher_pick));
-    let teacher_idx = match teacher_idx {
-        Some(i) => i,
+        .position(|candidate| same_multiset(candidate, &teacher_cards))
+    {
+        Some(index) => index,
         None => {
             drops.teacher_outside_candidates += 1;
             return;
         }
     };
+    let behaviour_idx = match candidates
+        .iter()
+        .position(|candidate| same_multiset(candidate, behaviour_cards))
+    {
+        Some(index) => index,
+        None => {
+            drops.behaviour_outside_candidates += 1;
+            return;
+        }
+    };
 
-    let group = *group_counter;
-    *group_counter += 1;
-    *decisions += 1;
-    for (i, cand) in candidates.iter().enumerate() {
+    let q_indices = selected_q_indices(candidates.len(), teacher_idx, behaviour_idx, q_config);
+    let actor_is_landlord = full.landlords_team().contains(&actor);
+    let group = format!("{game_id}-decision-{decision_id}");
+    for (candidate_id, candidate) in candidates.iter().enumerate() {
+        let q_outcome = if q_indices.contains(&candidate_id) {
+            match counterfactual_return(
+                full,
+                actor,
+                candidate,
+                q_config.rollout,
+                q_config.budget_ms,
+            ) {
+                Some(outcome) => Some(outcome),
+                None => {
+                    drops.q_rollout_failed += 1;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let q_target = q_outcome
+            .as_ref()
+            .map(|outcome| orient_level_utility(outcome, actor));
         rows.push(Row {
-            group,
-            features: candidate_features(view, actor, cand),
-            label: if i == teacher_idx { 1 } else { 0 },
+            run_id: run_id.to_string(),
+            game_id: game_id.to_string(),
+            game_seed,
+            decision_id,
+            candidate_id,
+            group: group.clone(),
             actor,
-            value: 0.0, // back-filled at game end from the realized terminal margin
+            actor_team: if actor_is_landlord {
+                "landlord"
+            } else {
+                "attacker"
+            },
+            behaviour: game_behaviour.as_str().to_ascii_lowercase(),
+            rollout_behaviour: q_config.label(),
+            action: encode_action(candidate),
+            features: candidate_features_v2(view, actor, candidate),
+            label: u8::from(candidate_id == teacher_idx),
+            behaviour_label: u8::from(candidate_id == behaviour_idx),
+            v_target: 0.0,
+            v_attacker_points: 0,
+            v_score_bucket: 0,
+            v_win_target: 0.0,
+            v_kitty_target: None,
+            q_target,
+            q_attacker_points: q_outcome.as_ref().map(|outcome| outcome.attacker_points),
+            q_score_bucket: q_outcome.as_ref().map(|outcome| outcome.score_bucket),
+            q_win_target: q_outcome
+                .as_ref()
+                .map(|outcome| actor_team_won(outcome, actor)),
+            q_kitty_target: q_outcome
+                .as_ref()
+                .and_then(|outcome| actor_team_won_last_trick(outcome, actor)),
+            q_samples: u32::from(q_target.is_some()),
         });
     }
 }
 
-/// Whether two card slices are equal as multisets (order-independent).
-fn same_multiset(a: &[Card], b: &[Card]) -> bool {
-    if a.len() != b.len() {
-        return false;
+fn selected_q_indices(
+    candidate_count: usize,
+    teacher_idx: usize,
+    behaviour_idx: usize,
+    q_config: QConfig,
+) -> BTreeSet<usize> {
+    if !q_config.enabled() {
+        return BTreeSet::new();
     }
-    let ca = Card::count(a.iter().copied());
-    let cb = Card::count(b.iter().copied());
-    ca == cb
+    let cap = q_config
+        .candidate_cap
+        .unwrap_or(candidate_count)
+        .min(candidate_count);
+    let mut selected = BTreeSet::new();
+    // Preserve both anchors when possible: the current behaviour action gives an
+    // on-policy DMC sample; the teacher action keeps a direct comparison to the
+    // old policy target. Fill remaining slots deterministically for reproducibility.
+    for index in [behaviour_idx, teacher_idx] {
+        if selected.len() < cap {
+            selected.insert(index);
+        }
+    }
+    for index in 0..candidate_count {
+        if selected.len() >= cap {
+            break;
+        }
+        selected.insert(index);
+    }
+    selected
+}
+
+fn counterfactual_return(
+    full: &PlayPhase,
+    actor: PlayerID,
+    candidate: &[Card],
+    rollout: BotDifficulty,
+    rollout_budget_ms: u64,
+) -> Option<TerminalOutcome> {
+    let mut simulation = full.clone();
+    simulation.play_cards(actor, candidate).ok()?;
+    let mut iterations = 0usize;
+    loop {
+        iterations += 1;
+        if iterations > 1_000_000 {
+            return None;
+        }
+        if simulation.game_finished() {
+            return terminal_outcome(&simulation);
+        }
+        match simulation.trick().next_player() {
+            None => {
+                simulation.finish_trick().ok()?;
+            }
+            Some(next) => {
+                // Centralized training may inspect the true deal to obtain a
+                // return, but every continuation action is chosen from that
+                // player's redacted view. No rollout policy receives hidden cards.
+                let view = GameState::Play(simulation.clone()).for_player(next);
+                let cards = match policy::select_action_with_search_budget(
+                    &view,
+                    next,
+                    rollout,
+                    rollout_budget_ms,
+                )
+                .ok()
+                .flatten()
+                {
+                    Some(Action::PlayCards(cards)) => cards,
+                    _ => return None,
+                };
+                simulation.play_cards(next, &cards).ok()?;
+            }
+        }
+    }
+}
+
+fn terminal_outcome(play: &PlayPhase) -> Option<TerminalOutcome> {
+    let (attacker_points, _) = play.calculate_points();
+    let score = play.current_game_score().ok()?;
+    let step = play.bot_step_size().filter(|step| *step > 0).unwrap_or(1);
+    Some(TerminalOutcome {
+        attacker_points,
+        score_bucket: attacker_points.div_euclid(step),
+        landlord_won: score.landlord_won,
+        landlord_delta: score.landlord_delta,
+        attacker_delta: score.non_landlord_delta,
+        landlord_team: play.landlords_team().to_vec(),
+        last_trick_winner: play.last_trick().and_then(|trick| trick.winner_so_far()),
+    })
+}
+
+/// Threshold-aware scalar utility. Winning is worth at least one unit even in
+/// the turnover/dead-zone where the winner receives zero level increments.
+fn orient_level_utility(outcome: &TerminalOutcome, actor: PlayerID) -> f32 {
+    let actor_is_landlord = outcome.landlord_team.contains(&actor);
+    let actor_won = actor_is_landlord == outcome.landlord_won;
+    let awarded_levels = if outcome.landlord_won {
+        outcome.landlord_delta
+    } else {
+        outcome.attacker_delta
+    };
+    let magnitude = (1 + awarded_levels) as f32 / LEVEL_UTILITY_NORM;
+    (if actor_won { magnitude } else { -magnitude }).clamp(-1.0, 1.0)
+}
+
+fn actor_team_won(outcome: &TerminalOutcome, actor: PlayerID) -> f32 {
+    let actor_is_landlord = outcome.landlord_team.contains(&actor);
+    if actor_is_landlord == outcome.landlord_won {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn actor_team_won_last_trick(outcome: &TerminalOutcome, actor: PlayerID) -> Option<f32> {
+    let winner = outcome.last_trick_winner?;
+    let actor_is_landlord = outcome.landlord_team.contains(&actor);
+    let winner_is_landlord = outcome.landlord_team.contains(&winner);
+    Some(if actor_is_landlord == winner_is_landlord {
+        1.0
+    } else {
+        0.0
+    })
+}
+
+fn write_header(writer: &mut impl Write) {
+    write!(
+        writer,
+        "schema_version,run_id,game_id,game_seed,decision_id,candidate_id,group,actor,actor_team,behaviour,rollout_behaviour,config,action"
+    )
+    .unwrap();
+    for index in 0..TRAINING_FEATURE_DIM {
+        write!(writer, ",f{index}").unwrap();
+    }
+    writeln!(
+        writer,
+        ",label,behaviour_label,v_target,v_attacker_points,v_score_bucket,v_win_target,v_kitty_target,q_target,q_attacker_points,q_score_bucket,q_win_target,q_kitty_target,q_samples"
+    )
+    .unwrap();
+}
+
+fn write_row(writer: &mut impl Write, row: &Row) {
+    write!(
+        writer,
+        "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        DATASET_SCHEMA_VERSION,
+        row.run_id,
+        row.game_id,
+        row.game_seed,
+        row.decision_id,
+        row.candidate_id,
+        row.group,
+        row.actor.0,
+        row.actor_team,
+        row.behaviour,
+        row.rollout_behaviour,
+        GAME_CONFIG,
+        row.action,
+    )
+    .unwrap();
+    for value in row.features {
+        write!(writer, ",{value:.6}").unwrap();
+    }
+    write!(
+        writer,
+        ",{},{},{:.6},{},{},{:.1},",
+        row.label,
+        row.behaviour_label,
+        row.v_target,
+        row.v_attacker_points,
+        row.v_score_bucket,
+        row.v_win_target,
+    )
+    .unwrap();
+    if let Some(v_kitty_target) = row.v_kitty_target {
+        write!(writer, "{v_kitty_target:.1}").unwrap();
+    }
+    write!(writer, ",").unwrap();
+    if let Some(q_target) = row.q_target {
+        write!(writer, "{q_target:.6}").unwrap();
+    }
+    write!(writer, ",").unwrap();
+    if let Some(q_attacker_points) = row.q_attacker_points {
+        write!(writer, "{q_attacker_points}").unwrap();
+    }
+    write!(writer, ",").unwrap();
+    if let Some(q_score_bucket) = row.q_score_bucket {
+        write!(writer, "{q_score_bucket}").unwrap();
+    }
+    write!(writer, ",").unwrap();
+    if let Some(q_win_target) = row.q_win_target {
+        write!(writer, "{q_win_target:.1}").unwrap();
+    }
+    write!(writer, ",").unwrap();
+    if let Some(q_kitty_target) = row.q_kitty_target {
+        write!(writer, "{q_kitty_target:.1}").unwrap();
+    }
+    writeln!(writer, ",{}", row.q_samples).unwrap();
+}
+
+fn encode_action(cards: &[Card]) -> String {
+    let mut ids: Vec<usize> = cards
+        .iter()
+        .filter_map(|card| FULL_DECK.iter().position(|known| known == card))
+        .collect();
+    ids.sort_unstable();
+    ids.iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn same_multiset(a: &[Card], b: &[Card]) -> bool {
+    a.len() == b.len() && Card::count(a.iter().copied()) == Card::count(b.iter().copied())
+}
+
+fn derive_game_seed(base: u64, game_index: u64) -> u64 {
+    // SplitMix64: stable random access to a deal seed, so sharding/resume order
+    // does not affect any game's cards.
+    let mut z = base.wrapping_add(game_index.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn ensure_parent(path: &str) {
+    if let Some(parent) = Path::new(path).parent() {
+        std::fs::create_dir_all(parent).expect("create output parent");
+    }
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn env_f64(name: &str, default: f64) -> f64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn game_seeds_are_stable_and_distinct() {
+        assert_eq!(derive_game_seed(7, 3), derive_game_seed(7, 3));
+        assert_ne!(derive_game_seed(7, 3), derive_game_seed(7, 4));
+        assert_ne!(derive_game_seed(7, 3), derive_game_seed(8, 3));
+    }
+
+    #[test]
+    fn q_selection_keeps_behaviour_and_teacher_anchors() {
+        let config = QConfig {
+            candidate_cap: Some(2),
+            rollout: BotDifficulty::Easy,
+            budget_ms: 1,
+        };
+        let selected = selected_q_indices(6, 4, 2, config);
+        assert_eq!(selected, BTreeSet::from([2, 4]));
+    }
+
+    #[test]
+    fn disabled_q_selection_is_empty() {
+        let config = QConfig {
+            candidate_cap: Some(0),
+            rollout: BotDifficulty::Easy,
+            budget_ms: 1,
+        };
+        assert!(selected_q_indices(6, 4, 2, config).is_empty());
+    }
+
+    #[test]
+    fn level_utility_preserves_deadzone_win_and_level_magnitude() {
+        let landlord = PlayerID(0);
+        let attacker = PlayerID(1);
+        let deadzone = TerminalOutcome {
+            attacker_points: 80,
+            score_bucket: 2,
+            landlord_won: false,
+            landlord_delta: 0,
+            attacker_delta: 0,
+            landlord_team: vec![landlord],
+            last_trick_winner: Some(attacker),
+        };
+        assert_eq!(orient_level_utility(&deadzone, attacker), 0.2);
+        assert_eq!(orient_level_utility(&deadzone, landlord), -0.2);
+
+        let two_levels = TerminalOutcome {
+            attacker_delta: 2,
+            ..deadzone
+        };
+        assert_eq!(orient_level_utility(&two_levels, attacker), 0.6);
+        assert_eq!(actor_team_won_last_trick(&two_levels, attacker), Some(1.0));
+    }
 }

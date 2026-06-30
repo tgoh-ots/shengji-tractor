@@ -47,8 +47,10 @@
 //! hand-written heuristic prior inside the determinized search, so Expert is
 //! never illegal/None.
 
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use serde::Deserialize;
 use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Trump};
 
 use crate::bot::determinize::Knowledge;
@@ -65,6 +67,17 @@ use crate::game_state::play_phase::PlayPhase;
 /// heuristic.
 pub const FEATURE_DIM: usize = 36;
 
+/// Feature width emitted by the v2 action-value data pipeline. The embedded
+/// production model remains on [`FEATURE_DIM`] (schema v1), so the existing
+/// policy baseline is byte-for-byte compatible. Candidate models declare their
+/// schema in a companion `MODEL.onnx.manifest.json`; inference selects the
+/// matching encoder instead of guessing from an ONNX graph.
+pub const TRAINING_FEATURE_DIM: usize = 49;
+
+/// Version of [`candidate_features_v2`]. Bump this whenever a v2 feature changes
+/// meaning, even if its width does not change.
+pub const TRAINING_FEATURE_SCHEMA_VERSION: u32 = 2;
+
 /// Points-scale for the (optional) learned VALUE head's target. The value target
 /// is the realized terminal point-differential oriented for the acting seat's team
 /// (same sign convention as the search leaf evaluator's `realized` term), DIVIDED
@@ -78,6 +91,14 @@ pub const FEATURE_DIM: usize = 36;
 /// so changing this only requires regenerating data + retraining, no Python edit.
 pub const VALUE_NORM: f64 = 200.0;
 
+/// Normalizer for schema-v2 terminal level utility. The scalar target is
+/// signed from the acting team's perspective:
+///   sign(team won) * (1 + levels awarded to the winning team) / 5
+/// and clamped to [-1, 1]. The added one preserves a learning signal for a
+/// turnover/dead-zone win that awards zero levels. This is deliberately NOT a
+/// point unit and must never be passed through the legacy VALUE_NORM leaf blend.
+pub const LEVEL_UTILITY_NORM: f32 = 5.0;
+
 /// The embedded ONNX model (a small MLP scoring one candidate's features to a
 /// scalar logit). If training has not produced a model yet, this file may be a
 /// placeholder; [`model`] handles a missing/invalid model gracefully by
@@ -87,6 +108,7 @@ pub const VALUE_NORM: f64 = 200.0;
 /// pure-Rust `tract-onnx` runtime builds in the musl Docker image — no
 /// `onnxruntime` / `ort` C dependency).
 static MODEL_BYTES: &[u8] = include_bytes!("expert_model.onnx");
+static EMBEDDED_MODEL_MANIFEST: &str = include_str!("expert_model.onnx.manifest.json");
 
 /// Environment variable that, when set to a readable path, overrides the embedded
 /// [`MODEL_BYTES`] with an ONNX model loaded from disk AT RUNTIME.
@@ -99,15 +121,61 @@ static MODEL_BYTES: &[u8] = include_bytes!("expert_model.onnx");
 /// decision (the model is cached in a [`OnceLock`]), so set it BEFORE the process
 /// makes any bot decision. Leave it unset in production to use the embedded net.
 pub const MODEL_PATH_ENV: &str = "SHENGJI_EXPERT_MODEL_PATH";
+/// Optional explicit companion-manifest path for [`MODEL_PATH_ENV`]. When unset,
+/// inference looks for `<model path>.manifest.json`. A missing manifest is
+/// accepted only as a legacy schema-v1/36-feature policy model, preserving old
+/// A/B commands while making every v2 model self-describing.
+pub const MODEL_MANIFEST_PATH_ENV: &str = "SHENGJI_EXPERT_MODEL_MANIFEST";
 
-type Model = tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedModel>;
+type RunnableModel = tract_onnx::prelude::TypedRunnableModel<tract_onnx::prelude::TypedModel>;
+
+#[derive(Clone, Debug, Deserialize)]
+struct ModelManifest {
+    manifest_version: u32,
+    feature_schema_version: u32,
+    feature_dim: usize,
+    outputs: Vec<String>,
+    /// Semantic unit for each ONNX output. Schema-v2 manifests must declare
+    /// this explicitly so a level-utility V head can never be multiplied by the
+    /// legacy point scale inside search.
+    #[serde(default)]
+    output_semantics: Option<Vec<String>>,
+}
+
+struct Model {
+    runnable: RunnableModel,
+    manifest: ModelManifest,
+}
+
+/// Typed runtime contract. Callers branch on semantic units rather than merely
+/// on output position, preventing normalized levels from being consumed as
+/// normalized points.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExpertModelSemantics {
+    LegacyPolicy,
+    LegacyPointValue,
+    V2Policy,
+    V2LevelValue,
+    V2LevelQ,
+}
 
 /// Lazily-parsed model, shared across all Expert decisions. `None` means the
 /// model could not be loaded (e.g. the embedded bytes are a placeholder), in
 /// which case the caller falls back to the hand-written heuristic.
 fn model() -> Option<&'static Model> {
     static MODEL: OnceLock<Option<Model>> = OnceLock::new();
-    MODEL.get_or_init(|| load_model().ok()).as_ref()
+    MODEL
+        .get_or_init(|| match load_model() {
+            Ok(model) => Some(model),
+            Err(error) => {
+                // This executes at most once because the failure is cached in the
+                // OnceLock. Surface a bad override/schema instead of silently
+                // making an A/B compare the heuristic fallback against itself.
+                eprintln!("[expert-model] load failed; using heuristic fallback: {error:#}");
+                None
+            }
+        })
+        .as_ref()
 }
 
 /// Parse and optimize the ONNX model into a runnable plan, choosing the byte
@@ -123,16 +191,175 @@ fn load_model() -> tract_onnx::prelude::TractResult<Model> {
         Some(path) if !path.is_empty() => {
             let bytes = std::fs::read(&path)
                 .map_err(|e| anyhow::anyhow!("failed to read {MODEL_PATH_ENV} ({path:?}): {e}"))?;
-            model_from_bytes(&bytes)
+            let path = PathBuf::from(path);
+            let manifest_path = std::env::var_os(MODEL_MANIFEST_PATH_ENV)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| companion_manifest_path(&path));
+            let manifest = match std::fs::read_to_string(&manifest_path) {
+                Ok(json) => parse_manifest(&json)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!(
+                        "[expert-model] no companion manifest at {}; assuming legacy schema-v1/36-feature policy model",
+                        manifest_path.display()
+                    );
+                    legacy_manifest()
+                }
+                Err(error) => anyhow::bail!(
+                    "failed to read expert model manifest {}: {error}",
+                    manifest_path.display()
+                ),
+            };
+            model_from_bytes_with_manifest(&bytes, manifest)
         }
-        _ => model_from_bytes(MODEL_BYTES),
+        _ => model_from_bytes_with_manifest(MODEL_BYTES, parse_manifest(EMBEDDED_MODEL_MANIFEST)?),
     }
+}
+
+fn companion_manifest_path(model_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.manifest.json", model_path.display()))
+}
+
+fn legacy_manifest() -> ModelManifest {
+    ModelManifest {
+        manifest_version: 1,
+        feature_schema_version: 1,
+        feature_dim: FEATURE_DIM,
+        outputs: vec!["score".to_string()],
+        output_semantics: Some(vec!["policy_logit".to_string()]),
+    }
+}
+
+fn parse_manifest(json: &str) -> tract_onnx::prelude::TractResult<ModelManifest> {
+    let manifest: ModelManifest = serde_json::from_str(json)
+        .map_err(|e| anyhow::anyhow!("invalid expert model manifest JSON: {e}"))?;
+    validate_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+fn validate_manifest(manifest: &ModelManifest) -> tract_onnx::prelude::TractResult<()> {
+    if manifest.manifest_version != 1 {
+        anyhow::bail!(
+            "unsupported expert manifest version {} (expected 1)",
+            manifest.manifest_version
+        );
+    }
+    let supported_features = (manifest.feature_schema_version == 1
+        && manifest.feature_dim == FEATURE_DIM)
+        || (manifest.feature_schema_version == TRAINING_FEATURE_SCHEMA_VERSION
+            && manifest.feature_dim == TRAINING_FEATURE_DIM);
+    if !supported_features {
+        anyhow::bail!(
+            "unsupported expert feature contract schema={} dim={} (supported: schema=1 dim={}, schema={} dim={})",
+            manifest.feature_schema_version,
+            manifest.feature_dim,
+            FEATURE_DIM,
+            TRAINING_FEATURE_SCHEMA_VERSION,
+            TRAINING_FEATURE_DIM
+        );
+    }
+    let expected = ["score", "state_value", "action_q"];
+    if manifest.outputs.is_empty() || manifest.outputs.len() > expected.len() {
+        anyhow::bail!("expert model must declare 1..=3 outputs");
+    }
+    if manifest.feature_schema_version == 1 && manifest.outputs.len() > 2 {
+        anyhow::bail!("schema-v1 models cannot declare action_q");
+    }
+    for (actual, expected) in manifest.outputs.iter().zip(expected.iter()) {
+        if actual != expected {
+            anyhow::bail!(
+                "unsupported expert output contract {:?}; expected prefix {:?}",
+                manifest.outputs,
+                expected
+            );
+        }
+    }
+    if let Some(semantics) = &manifest.output_semantics {
+        if semantics.len() != manifest.outputs.len() {
+            anyhow::bail!(
+                "expert output_semantics length {} != outputs length {}",
+                semantics.len(),
+                manifest.outputs.len()
+            );
+        }
+        if semantics.first().map(String::as_str) != Some("policy_logit") {
+            anyhow::bail!("expert output 0 semantic must be policy_logit");
+        }
+        if manifest.feature_schema_version == 1
+            && semantics.get(1).map(String::as_str)
+                != manifest.outputs.get(1).map(|_| "normalized_point_margin")
+        {
+            anyhow::bail!("schema-v1 state_value semantic must be normalized_point_margin");
+        }
+        if manifest.feature_schema_version == TRAINING_FEATURE_SCHEMA_VERSION {
+            if semantics.get(1).map(String::as_str)
+                != manifest.outputs.get(1).map(|_| "normalized_level_utility")
+            {
+                anyhow::bail!("schema-v2 state_value semantic must be normalized_level_utility");
+            }
+            if semantics.get(2).map(String::as_str)
+                != manifest.outputs.get(2).map(|_| "normalized_level_utility")
+            {
+                anyhow::bail!("schema-v2 action_q semantic must be normalized_level_utility");
+            }
+        }
+    } else if manifest.feature_schema_version == TRAINING_FEATURE_SCHEMA_VERSION {
+        anyhow::bail!("schema-v2 expert models must declare output_semantics");
+    }
+    Ok(())
+}
+
+fn output_semantic(model: &Model, index: usize) -> Option<&str> {
+    if let Some(semantics) = &model.manifest.output_semantics {
+        return semantics.get(index).map(String::as_str);
+    }
+    // Compatibility for old schema-v1 manifests produced before semantic units
+    // were recorded. Their optional value head was trained on normalized points.
+    match (model.manifest.feature_schema_version, index) {
+        (1, 0) => Some("policy_logit"),
+        (1, 1) => Some("normalized_point_margin"),
+        _ => None,
+    }
+}
+
+fn semantics_for(model: &Model) -> ExpertModelSemantics {
+    match (
+        model.manifest.feature_schema_version,
+        output_semantic(model, 1),
+        output_semantic(model, 2),
+    ) {
+        (1, Some("normalized_point_margin"), _) => ExpertModelSemantics::LegacyPointValue,
+        (1, _, _) => ExpertModelSemantics::LegacyPolicy,
+        (
+            TRAINING_FEATURE_SCHEMA_VERSION,
+            Some("normalized_level_utility"),
+            Some("normalized_level_utility"),
+        ) => ExpertModelSemantics::V2LevelQ,
+        (TRAINING_FEATURE_SCHEMA_VERSION, Some("normalized_level_utility"), _) => {
+            ExpertModelSemantics::V2LevelValue
+        }
+        (TRAINING_FEATURE_SCHEMA_VERSION, _, _) => ExpertModelSemantics::V2Policy,
+        _ => unreachable!("manifest validation rejected unsupported feature schema"),
+    }
+}
+
+/// Semantic contract of the lazily loaded model, or None when model loading
+/// failed and Expert is using its heuristic fallback.
+pub fn loaded_model_semantics() -> Option<ExpertModelSemantics> {
+    model().map(semantics_for)
 }
 
 /// Parse and optimize ONNX bytes into a runnable plan. The model takes a single
 /// input named `x` of shape `[N, FEATURE_DIM]` (a batch of N candidates) and
 /// produces `[N, 1]` logits.
+#[cfg(test)]
 fn model_from_bytes(bytes: &[u8]) -> tract_onnx::prelude::TractResult<Model> {
+    model_from_bytes_with_manifest(bytes, legacy_manifest())
+}
+
+fn model_from_bytes_with_manifest(
+    bytes: &[u8],
+    manifest: ModelManifest,
+) -> tract_onnx::prelude::TractResult<Model> {
     use tract_onnx::prelude::*;
 
     // A near-empty / placeholder file can't be a valid ONNX graph; bail early so
@@ -148,10 +375,10 @@ fn model_from_bytes(bytes: &[u8]) -> tract_onnx::prelude::TractResult<Model> {
     let batch = model.symbols.sym("N");
     model.set_input_fact(
         0,
-        f32::fact([batch.to_dim(), (FEATURE_DIM as i64).to_dim()]).into(),
+        f32::fact([batch.to_dim(), (manifest.feature_dim as i64).to_dim()]).into(),
     )?;
-    let model = model.into_optimized()?.into_runnable()?;
-    Ok(model)
+    let runnable = model.into_optimized()?.into_runnable()?;
+    Ok(Model { runnable, manifest })
 }
 
 /// Score an explicit set of candidate plays with the learned Expert net,
@@ -176,12 +403,8 @@ pub fn score_candidates_net(
     }
     let model = model()?;
 
-    // Build a [N, FEATURE_DIM] batch and score it in one inference call.
     let n = candidates.len();
-    let mut flat: Vec<f32> = Vec::with_capacity(n * FEATURE_DIM);
-    for cand in candidates {
-        flat.extend_from_slice(&candidate_features(p, me, cand));
-    }
+    let flat = feature_batch(model, p, me, candidates)?;
     run_model(model, &flat, n)
 }
 
@@ -235,13 +458,108 @@ fn run_model(model: &Model, flat: &[f32], n: usize) -> Option<Vec<f32>> {
 fn run_model_output(model: &Model, flat: &[f32], n: usize, out_idx: usize) -> Option<Vec<f32>> {
     use tract_onnx::prelude::*;
 
-    let input = tract_ndarray::Array2::from_shape_vec((n, FEATURE_DIM), flat.to_vec()).ok()?;
+    if out_idx >= model.manifest.outputs.len() {
+        return None;
+    }
+    let expected_input_len = n.checked_mul(model.manifest.feature_dim)?;
+    if flat.len() != expected_input_len {
+        log_inference_error(format!(
+            "input length {} != expected {} (n={} dim={})",
+            flat.len(),
+            expected_input_len,
+            n,
+            model.manifest.feature_dim
+        ));
+        return None;
+    }
+    let input =
+        match tract_ndarray::Array2::from_shape_vec((n, model.manifest.feature_dim), flat.to_vec())
+        {
+            Ok(input) => input,
+            Err(error) => {
+                log_inference_error(format!("could not construct model input: {error}"));
+                return None;
+            }
+        };
     let tensor: Tensor = input.into();
-    let result = model.run(tvec!(tensor.into())).ok()?;
+    let result = match model.runnable.run(tvec!(tensor.into())) {
+        Ok(result) => result,
+        Err(error) => {
+            log_inference_error(format!("ONNX execution failed: {error}"));
+            return None;
+        }
+    };
+    if result.len() != model.manifest.outputs.len() {
+        log_inference_error(format!(
+            "model returned {} outputs but manifest declares {} ({:?})",
+            result.len(),
+            model.manifest.outputs.len(),
+            model.manifest.outputs
+        ));
+        return None;
+    }
     let out = result.get(out_idx)?;
-    let view = out.to_array_view::<f32>().ok()?;
-    // Each output is [N, 1]; flatten to N scalars.
-    Some(view.iter().copied().collect())
+    let view = match out.to_array_view::<f32>() {
+        Ok(view) => view,
+        Err(error) => {
+            log_inference_error(format!(
+                "output {} ({}) is not f32: {error}",
+                out_idx, model.manifest.outputs[out_idx]
+            ));
+            return None;
+        }
+    };
+    if view.shape() != [n, 1] {
+        log_inference_error(format!(
+            "output {} ({}) has shape {:?}, expected [{}, 1]",
+            out_idx,
+            model.manifest.outputs[out_idx],
+            view.shape(),
+            n
+        ));
+        return None;
+    }
+    let values: Vec<f32> = view.iter().copied().collect();
+    if values.iter().any(|v| !v.is_finite()) {
+        log_inference_error(format!(
+            "output {} ({}) contains NaN/Inf",
+            out_idx, model.manifest.outputs[out_idx]
+        ));
+        return None;
+    }
+    Some(values)
+}
+
+fn log_inference_error(message: String) {
+    static LOGGED: OnceLock<()> = OnceLock::new();
+    LOGGED.get_or_init(|| {
+        eprintln!(
+            "[expert-model] inference contract failure; using heuristic/static fallback: {message}"
+        );
+    });
+}
+
+fn feature_batch(
+    model: &Model,
+    p: &PlayPhase,
+    me: PlayerID,
+    candidates: &[Vec<Card>],
+) -> Option<Vec<f32>> {
+    let mut flat = Vec::with_capacity(candidates.len() * model.manifest.feature_dim);
+    match model.manifest.feature_schema_version {
+        1 => {
+            for candidate in candidates {
+                flat.extend_from_slice(&candidate_features(p, me, candidate));
+            }
+        }
+        TRAINING_FEATURE_SCHEMA_VERSION => {
+            for candidate in candidates {
+                flat.extend_from_slice(&candidate_features_v2(p, me, candidate));
+            }
+        }
+        _ => return None,
+    }
+    Some(flat)
 }
 
 /// Score an explicit set of candidates with the learned VALUE head, returning one
@@ -253,7 +571,7 @@ fn run_model_output(model: &Model, flat: &[f32], n: usize, out_idx: usize) -> Op
 ///
 /// `p` MUST be the redacted per-player view (the honesty invariant); the search
 /// calls this only on SAMPLED determinized worlds, never the real hidden hands.
-pub fn value_candidates_net(
+pub fn point_value_candidates_net(
     p: &PlayPhase,
     me: PlayerID,
     candidates: &[Vec<Card>],
@@ -262,14 +580,70 @@ pub fn value_candidates_net(
         return None;
     }
     let model = model()?;
-    let n = candidates.len();
-    let mut flat: Vec<f32> = Vec::with_capacity(n * FEATURE_DIM);
-    for cand in candidates {
-        flat.extend_from_slice(&candidate_features(p, me, cand));
+    // Search converts this head back to points with VALUE_NORM. A schema-v2
+    // level-utility state value is deliberately NOT accepted here.
+    if output_semantic(model, 1) != Some("normalized_point_margin") {
+        return None;
     }
-    // Output index 1 is the value head; `None` here means a 1-output (policy-only)
+    let n = candidates.len();
+    let flat = feature_batch(model, p, me, candidates)?;
+    // Output index 1 is the state-value head; `None` here means a 1-output policy
     // model, which correctly disables the value blend.
     run_model_output(model, &flat, n, 1)
+}
+
+/// Schema-v2 state value in normalized terminal level-utility units. This is
+/// intentionally separate from point_value_candidates_net; callers may replace
+/// a level-valued evaluator with it, but must never mix it into point scores.
+pub fn level_value_candidates_net(
+    p: &PlayPhase,
+    me: PlayerID,
+    candidates: &[Vec<Card>],
+) -> Option<Vec<f32>> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let model = model()?;
+    if !matches!(
+        semantics_for(model),
+        ExpertModelSemantics::V2LevelValue | ExpertModelSemantics::V2LevelQ
+    ) {
+        return None;
+    }
+    let n = candidates.len();
+    let flat = feature_batch(model, p, me, candidates)?;
+    run_model_output(model, &flat, n, 1)
+}
+
+/// Backward-compatible name for callers predating typed output semantics. It is
+/// safe: the implementation delegates to the point-only API and returns None
+/// for every schema-v2 level-utility model.
+pub fn value_candidates_net(
+    p: &PlayPhase,
+    me: PlayerID,
+    candidates: &[Vec<Card>],
+) -> Option<Vec<f32>> {
+    point_value_candidates_net(p, me, candidates)
+}
+
+/// Score candidates with the optional action-value head (`Q(o,a)`, output 2).
+/// The shipped model has no such output; this is the explicit inference contract
+/// for staged DMC/action-value models and does not alter production selection yet.
+pub fn action_q_candidates_net(
+    p: &PlayPhase,
+    me: PlayerID,
+    candidates: &[Vec<Card>],
+) -> Option<Vec<f32>> {
+    if candidates.is_empty() {
+        return None;
+    }
+    let model = model()?;
+    if semantics_for(model) != ExpertModelSemantics::V2LevelQ {
+        return None;
+    }
+    let n = candidates.len();
+    let flat = feature_batch(model, p, me, candidates)?;
+    run_model_output(model, &flat, n, 2)
 }
 
 /// Normalize a raw card-strength rank into roughly `[0, 1]`.
@@ -367,12 +741,12 @@ pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; 
         .count();
     let max_strength = cards
         .iter()
-        .map(|c| heuristics::card_strength(trump, *c))
+        .map(|c| heuristics::legacy_card_strength(trump, *c))
         .max()
         .unwrap_or(0);
     let min_strength = cards
         .iter()
-        .map(|c| heuristics::card_strength(trump, *c))
+        .map(|c| heuristics::legacy_card_strength(trump, *c))
         .min()
         .unwrap_or(0);
 
@@ -428,7 +802,7 @@ pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; 
             trick.played_cards().iter().find(|pc| pc.id == w).map(|pc| {
                 pc.cards
                     .iter()
-                    .map(|c| heuristics::card_strength(trump, *c))
+                    .map(|c| heuristics::legacy_card_strength(trump, *c))
                     .max()
                     .unwrap_or(0)
             })
@@ -531,17 +905,15 @@ pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; 
 
     // Trump accounting: total trumps in the deck, how many I can see (mine +
     // played), and therefore how many remain unseen in hidden hands / kitty.
-    let decks = k.num_decks.max(1);
     let seen_trumps: usize = k
         .seen
         .iter()
         .filter(|(c, _)| trump.effective_suit(**c) == EffectiveSuit::Trump)
         .map(|(_, &n)| n)
         .sum();
-    // The full deck has `num_decks` copies of every distinct card. The trump
-    // universe (jokers + trump-number cards + the trump suit's ranks) times the
-    // deck count is the total number of trumps in play.
-    let total_trumps = heuristics::trump_universe_size(trump) * decks;
+    // Use the exact configured special-deck multiset; joker-less/short decks
+    // must not invent phantom unseen trumps.
+    let total_trumps = k.total_trumps;
     let unseen_trumps = total_trumps.saturating_sub(seen_trumps);
     f[28] = if total_trumps > 0 {
         (unseen_trumps as f32 / total_trumps as f32).clamp(0.0, 1.0)
@@ -582,7 +954,7 @@ pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; 
 
     // Points still unseen (in hidden hands + kitty): total deck points minus the
     // points I have already seen on the table / in my hand / last trick.
-    let total_points = 100 * decks; // 100 points per 54-card deck (5/10/K × …)
+    let total_points = k.total_points;
     let mut seen_points = 0usize;
     for (card, &seen) in &k.seen {
         if let Some(pts) = card.points() {
@@ -601,7 +973,7 @@ pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; 
     // by a same-suit response). Only meaningful when leading or following suit.
     let strongest = cards
         .iter()
-        .max_by_key(|c| heuristics::card_strength(trump, **c))
+        .max_by_key(|c| heuristics::legacy_card_strength(trump, **c))
         .copied();
     f[34] = strongest
         .map(|c| heuristics::is_guaranteed_top(&k, trump, c))
@@ -614,8 +986,132 @@ pub fn candidate_features(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> [f32; 
     let seen_total: usize = k.seen.values().sum();
     let my_hand = (f[18] * 27.0).round() as usize;
     let revealed = seen_total.saturating_sub(my_hand);
-    let deck_size = 54 * decks;
+    let deck_size = k.total_cards.max(1);
     f[35] = (revealed as f32 / deck_size as f32).clamp(0.0, 1.0);
+
+    f
+}
+
+/// Version-2 honest `(observation, action)` encoding used by the action-value
+/// pipeline. Its first 36 entries are the frozen production-policy contract from
+/// [`candidate_features`]; the appended entries add signals that were previously
+/// aliased away. Keeping the prefix frozen lets experiments measure the added
+/// information while the model manifest prevents a v2 network from ever being
+/// run with v1 inputs.
+///
+/// Appended layout:
+/// * 36 — actor is on the landlord team;
+/// * 37 — realized points so far, oriented to the actor's team / VALUE_NORM;
+/// * 38 — progress through the current scoring threshold interval;
+/// * 39 — scoring threshold step size / 80;
+/// * 40 — exact public game progress from the full played-card log;
+/// * 41 — actor's remaining-hand fraction;
+/// * 42 — fraction of distinct card identities in the candidate;
+/// * 43 — duplicate-card fraction in the candidate (pair/triple structure);
+/// * 44 — all candidate cards have one effective suit;
+/// * 45 — fraction of all trumps still unseen using full public memory;
+/// * 46 — fraction of all point value still unseen using full public memory;
+/// * 47 — fraction of possible opponent/effective-suit void facts established;
+/// * 48 — exact mechanics-engine answer: this candidate takes the lead now.
+pub fn candidate_features_v2(
+    p: &PlayPhase,
+    me: PlayerID,
+    cards: &[Card],
+) -> [f32; TRAINING_FEATURE_DIM] {
+    let legacy = candidate_features(p, me, cards);
+    let mut f = [0.0f32; TRAINING_FEATURE_DIM];
+    f[..FEATURE_DIM].copy_from_slice(&legacy);
+
+    let actor_is_landlord = p.landlords_team().contains(&me);
+    f[36] = if actor_is_landlord { 1.0 } else { 0.0 };
+
+    let (non_landlord_points, _) = p.calculate_points();
+    let oriented = if actor_is_landlord {
+        -non_landlord_points
+    } else {
+        non_landlord_points
+    };
+    f[37] = (oriented as f64 / VALUE_NORM).clamp(-1.0, 1.0) as f32;
+
+    if let Some(step) = p.bot_step_size().filter(|step| *step > 0) {
+        f[38] = (non_landlord_points.rem_euclid(step) as f32 / step as f32).clamp(0.0, 1.0);
+        f[39] = (step as f32 / 80.0).clamp(0.0, 1.0);
+    }
+
+    let deck_cards = p
+        .configured_cards_for_determinization()
+        .map(|cards| cards.len())
+        .unwrap_or_else(|| 54 * p.num_decks().max(1));
+    let completed_cards: usize = p.played_this_hand().values().copied().sum();
+    let table_cards: usize = p
+        .trick()
+        .played_cards()
+        .iter()
+        .map(|played| played.cards.len())
+        .sum();
+    f[40] = ((completed_cards + table_cards) as f32 / deck_cards as f32).clamp(0.0, 1.0);
+    let hand_size = p
+        .hands()
+        .get(me)
+        .map(|hand| hand.values().copied().sum::<usize>())
+        .unwrap_or(0);
+    f[41] = (hand_size as f32 / 27.0).clamp(0.0, 1.0);
+
+    if !cards.is_empty() {
+        let counts = Card::count(cards.iter().copied());
+        let distinct = counts.len();
+        f[42] = (distinct as f32 / cards.len() as f32).clamp(0.0, 1.0);
+        f[43] = (1.0 - f[42]).clamp(0.0, 1.0);
+        let trump = p.trump();
+        let first_suit = trump.effective_suit(cards[0]);
+        f[44] = if cards
+            .iter()
+            .all(|card| trump.effective_suit(*card) == first_suit)
+        {
+            1.0
+        } else {
+            0.0
+        };
+    }
+
+    let full = Knowledge::from_play_view(p, me);
+    let trump = p.trump();
+    let total_trumps = full.total_trumps;
+    let seen_trumps: usize = full
+        .seen
+        .iter()
+        .filter(|(card, _)| trump.effective_suit(**card) == EffectiveSuit::Trump)
+        .map(|(_, count)| *count)
+        .sum();
+    if total_trumps > 0 {
+        f[45] =
+            (total_trumps.saturating_sub(seen_trumps) as f32 / total_trumps as f32).clamp(0.0, 1.0);
+    }
+    let total_points = full.total_points.max(1);
+    let seen_points: usize = full
+        .seen
+        .iter()
+        .map(|(card, count)| card.points().unwrap_or(0) * *count)
+        .sum();
+    f[46] = (total_points.saturating_sub(seen_points) as f32 / total_points as f32).clamp(0.0, 1.0);
+    let known_voids: usize = full
+        .voids
+        .iter()
+        .filter(|(player, _)| **player != me)
+        .map(|(_, suits)| suits.len())
+        .sum();
+    // Three other seats × five effective suits is the maximum useful count.
+    f[47] = (known_voids as f32 / 15.0).clamp(0.0, 1.0);
+
+    // Unlike frozen f16, this asks the rules engine to evaluate the complete
+    // follow structure. It is therefore correct for pairs, tractors, throws,
+    // bombs, trump-led tricks, and mixed forced follows. A lead trivially owns
+    // the current trick, matching the engine result after applying the play.
+    f[48] = if heuristics::candidate_wins_current_trick(p, me, cards) {
+        1.0
+    } else {
+        0.0
+    };
 
     f
 }
@@ -669,6 +1165,28 @@ mod model_path_tests {
         );
     }
 
+    #[test]
+    fn manifest_rejects_width_drift_and_untyped_v2_outputs() {
+        assert!(parse_manifest(
+            r#"{"manifest_version":1,"feature_schema_version":2,"feature_dim":48,
+                 "outputs":["score"],"output_semantics":["policy_logit"]}"#
+        )
+        .is_err());
+        assert!(parse_manifest(
+            r#"{"manifest_version":1,"feature_schema_version":2,"feature_dim":49,
+                 "outputs":["score","state_value","action_q"]}"#
+        )
+        .is_err());
+        let valid = parse_manifest(
+            r#"{"manifest_version":1,"feature_schema_version":2,"feature_dim":49,
+                 "outputs":["score","state_value","action_q"],
+                 "output_semantics":["policy_logit","normalized_level_utility",
+                                     "normalized_level_utility"]}"#,
+        )
+        .expect("typed schema-v2 manifest");
+        assert_eq!(valid.feature_dim, TRAINING_FEATURE_DIM);
+    }
+
     /// Backward-compat (the load-bearing value-head safety property): the SHIPPED
     /// embedded model is policy-only, so output index 1 (value) must be ABSENT.
     /// `value_candidates_net` → `run_model_output(.., 1)` therefore returns `None`,
@@ -688,20 +1206,25 @@ mod model_path_tests {
         );
     }
 
-    /// Manual validation that a freshly-trained 2-output value model loads in tract
+    /// Manual validation that a freshly-trained multi-output value model loads in tract
     /// and exposes a readable `tanh` value output in [-1, 1]. `#[ignore]`d because
     /// it needs an external model file; run after training one:
     ///   SHENGJI_TEST_VALUE_MODEL=/path/to/value_model.onnx \
     ///     cargo +1.92.0 test -p shengji-core --lib value_output_readable -- --ignored
     #[test]
     #[ignore]
-    fn value_output_readable_from_2output_model() {
+    fn value_output_readable_from_multioutput_model() {
         let path = std::env::var("SHENGJI_TEST_VALUE_MODEL")
-            .expect("set SHENGJI_TEST_VALUE_MODEL to a 2-output ONNX");
+            .expect("set SHENGJI_TEST_VALUE_MODEL to a multi-output ONNX");
         let bytes = std::fs::read(&path).expect("read value model");
-        let model = model_from_bytes(&bytes).expect("2-output value model should load in tract");
+        let manifest_json = std::fs::read_to_string(companion_manifest_path(Path::new(&path)))
+            .expect("read companion model manifest");
+        let manifest = parse_manifest(&manifest_json).expect("parse companion model manifest");
+        let dim = manifest.feature_dim;
+        let model = model_from_bytes_with_manifest(&bytes, manifest)
+            .expect("multi-output value model should load in tract");
         let n = 3;
-        let flat = vec![0.0f32; n * FEATURE_DIM];
+        let flat = vec![0.0f32; n * dim];
         let policy = run_model_output(&model, &flat, n, 0).expect("policy output (index 0)");
         let value = run_model_output(&model, &flat, n, 1).expect("value output (index 1)");
         assert_eq!(policy.len(), n);

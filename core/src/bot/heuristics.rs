@@ -10,10 +10,10 @@
 //! ranked. Callers (the difficulty tiers) then pick from the ranking with
 //! tier-specific randomness.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use shengji_mechanics::ordered_card::OrderedCard;
-use shengji_mechanics::trick::{TractorRequirements, TrickUnit, UnitLike};
+use shengji_mechanics::trick::{PlayCards, TrickUnit, UnitLike};
 use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Rank, Suit, Trump};
 
 use crate::bot::determinize::Knowledge;
@@ -45,12 +45,13 @@ pub struct ScoredPlay {
     pub score: f64,
 }
 
-/// The relative "strength rank" of a card within its effective suit, ignoring
-/// suit identity. Bigger means stronger. Used to compare cards quickly.
+/// The historical relative-strength encoding used by the embedded Expert model.
 ///
-/// `pub(crate)` so the Expert feature encoder shares the EXACT same metric the
-/// heuristic uses (no drift between training features and the heuristic prior).
-pub(crate) fn card_strength(trump: Trump, card: Card) -> i32 {
+/// This deliberately preserves the old Ace-low quirk (`Ace == 1`). It must only
+/// be used by frozen legacy scorers/features whose distributions the shipped
+/// model was trained against. Live move generation and strategy must use
+/// [`card_strength`], which follows the mechanics engine's Ace-high ordering.
+pub(crate) fn legacy_card_strength(trump: Trump, card: Card) -> i32 {
     match card {
         Card::BigJoker => 1000,
         Card::SmallJoker => 999,
@@ -70,6 +71,24 @@ pub(crate) fn card_strength(trump: Trump, card: Card) -> i32 {
     }
 }
 
+/// Rank-correct relative strength within a card's effective suit.
+///
+/// The mechanics engine orders ordinary side-suit cards Ace-high. Keeping this
+/// as the default bot strength function prevents the live policy from treating
+/// an Ace as low trash when generating follows, bidding, or choosing a kitty.
+/// Frozen Expert-model inputs explicitly call [`legacy_card_strength`] instead.
+pub(crate) fn card_strength(trump: Trump, card: Card) -> i32 {
+    match card {
+        Card::Suited { number, suit }
+            if trump.number() != Some(number) && number == Number::Ace =>
+        {
+            let _ = suit;
+            14
+        }
+        _ => legacy_card_strength(trump, card),
+    }
+}
+
 fn is_trump(trump: Trump, card: Card) -> bool {
     trump.effective_suit(card) == EffectiveSuit::Trump
 }
@@ -84,22 +103,7 @@ pub fn same_team(p: &PlayPhase, me: PlayerID, other: PlayerID) -> bool {
     team.contains(&me) == team.contains(&other)
 }
 
-/// Number of distinct-position trump cards in a SINGLE deck for `trump`:
-/// 2 jokers + the trump-number cards + the 13 ranks of the trump suit (when
-/// there is a trump suit). For NoTrump the trump set is just the two jokers plus
-/// the four trump-number cards.
-pub(crate) fn trump_universe_size(trump: Trump) -> usize {
-    match trump {
-        Trump::NoTrump { number } => {
-            let number_cards = if number.is_some() { 4 } else { 0 };
-            2 + number_cards
-        }
-        Trump::Standard { .. } => 2 + 13 + 3,
-    }
-}
-
-/// Enumerate the cards in effective-suit `eff` whose strength strictly exceeds
-/// `floor` (used to test whether a card is the uncatchable top of its suit).
+/// Enumerate cards above `floor` under the frozen legacy Expert ordering.
 ///
 /// Honest: depends only on the trump declaration + card identities. Lives here
 /// (the lower-level module) so the Expert feature encoder and the heuristic both
@@ -107,7 +111,7 @@ pub(crate) fn trump_universe_size(trump: Trump) -> usize {
 pub(crate) fn stronger_cards_in_suit(trump: Trump, eff: EffectiveSuit, floor: i32) -> Vec<Card> {
     let mut out: Vec<Card> = Vec::new();
     let mut consider = |c: Card| {
-        if trump.effective_suit(c) == eff && card_strength(trump, c) > floor {
+        if trump.effective_suit(c) == eff && legacy_card_strength(trump, c) > floor {
             out.push(c);
         }
     };
@@ -137,26 +141,24 @@ pub(crate) fn stronger_cards_in_suit(trump: Trump, eff: EffectiveSuit, floor: i3
     out
 }
 
-/// Whether `card` cannot be beaten, within its own effective suit, by any card
-/// the acting player has NOT yet seen. Jokers (and the trump-suit trump-number
-/// card) are always guaranteed; otherwise we check that no higher same-suit card
-/// remains unseen. This is an HONEST upper bound: it only consults `k.seen`,
-/// which is derived purely from the redacted view + public play history.
+/// Frozen Expert-feature estimate of whether `card` cannot be beaten within its
+/// effective suit by an unseen card. This is honest, but intentionally preserves
+/// the old Ace-low ordering for the embedded model; live strategy uses
+/// [`is_boss_card`].
 ///
-/// NOTE: this uses [`card_strength`], whose ordering puts side-suit Aces LOW
+/// NOTE: this uses [`legacy_card_strength`], whose ordering puts side-suit Aces LOW
 /// (`Number::as_u32` is Ace-low). It is kept verbatim because the Expert net's
 /// `f[34]` feature was trained against exactly this behaviour. The NEW heuristic
 /// uses the rank-correct [`is_boss_card`] instead.
 pub(crate) fn is_guaranteed_top(k: &Knowledge, trump: Trump, card: Card) -> bool {
-    let s = card_strength(trump, card);
+    let s = legacy_card_strength(trump, card);
     if s >= 1000 {
         return true;
     }
     let eff = trump.effective_suit(card);
-    let decks = k.num_decks.max(1);
     for higher in stronger_cards_in_suit(trump, eff, s) {
         let seen = k.seen.get(&higher).copied().unwrap_or(0);
-        if decks > seen {
+        if k.configured_copies(higher) > seen {
             // At least one copy of a stronger same-suit card is still unseen.
             return false;
         }
@@ -164,23 +166,11 @@ pub(crate) fn is_guaranteed_top(k: &Knowledge, trump: Trump, card: Card) -> bool
     true
 }
 
-/// Rank-correct "boss strength": identical to [`card_strength`] EXCEPT that
-/// side-suit Aces are the TOP of their suit (14), as they actually are in play.
-/// Used only by the NEW heuristic's boss machinery so a side-suit Ace is treated
-/// as the uncatchable winner it is. (Kept separate from `card_strength` so the
-/// frozen Expert features that depend on the Ace-low quirk don't shift.)
+/// Backward-compatible name for the rank-correct live strength. New strategy
+/// code historically called this helper; keeping it avoids churn while making
+/// [`card_strength`] itself safe for all live policy paths.
 pub(crate) fn boss_strength(trump: Trump, card: Card) -> i32 {
-    match card {
-        Card::Suited { number, suit }
-            if trump.number() != Some(number) && number == Number::Ace =>
-        {
-            // A non-trump Ace tops its suit. (A trump-number Ace, if the trump
-            // number were Ace, is already handled by `card_strength`'s 997/998.)
-            let _ = suit;
-            14
-        }
-        _ => card_strength(trump, card),
-    }
+    card_strength(trump, card)
 }
 
 /// Enumerate the same-effective-suit cards strictly STRONGER than `floor` by the
@@ -223,15 +213,15 @@ fn boss_stronger_cards_in_suit(trump: Trump, eff: EffectiveSuit, floor: i32) -> 
 /// `k.seen`). Unlike [`is_guaranteed_top`], side-suit Aces are correctly the top.
 pub(crate) fn is_boss_card(k: &Knowledge, trump: Trump, card: Card) -> bool {
     let s = boss_strength(trump, card);
-    if s >= 998 {
-        // Jokers and the trump-suit trump-number are unconditional tops.
+    if s >= 1000 {
+        // A big joker cannot be over-ranked. A small joker and either kind of
+        // level card remain beatable and must pass through the unseen-card scan.
         return true;
     }
     let eff = trump.effective_suit(card);
-    let decks = k.num_decks.max(1);
     for higher in boss_stronger_cards_in_suit(trump, eff, s) {
         let seen = k.seen.get(&higher).copied().unwrap_or(0);
-        if decks > seen {
+        if k.configured_copies(higher) > seen {
             return false;
         }
     }
@@ -243,10 +233,12 @@ pub(crate) fn is_boss_card(k: &Knowledge, trump: Trump, card: Card) -> bool {
 fn unseen_dominators(k: &Knowledge, trump: Trump, card: Card) -> usize {
     let eff = trump.effective_suit(card);
     let s = boss_strength(trump, card);
-    let decks = k.num_decks.max(1);
     boss_stronger_cards_in_suit(trump, eff, s)
         .iter()
-        .map(|h| decks.saturating_sub(k.seen.get(h).copied().unwrap_or(0)))
+        .map(|h| {
+            k.configured_copies(*h)
+                .saturating_sub(k.seen.get(h).copied().unwrap_or(0))
+        })
         .sum()
 }
 
@@ -310,14 +302,10 @@ impl EvalCtx {
 
     fn build_inner(p: &PlayPhase, me: PlayerID, enoch: bool) -> Self {
         let trump = p.trick().trump();
-        // Enoch gets PERFECT MEMORY of every card played this hand (exact
-        // boss-card detection); Expert/Omniscient keep the limited last-trick
-        // memory. Both seed only from honest, public information.
-        let k = if enoch {
-            Knowledge::from_play_view_full_memory(p, me)
-        } else {
-            Knowledge::from_play_view(p, me)
-        };
+        // Full public memory belongs to the observation, not a difficulty tier.
+        // Stronger tiers differ in policy/search rather than intentionally
+        // forgetting cards every human at the table saw.
+        let k = Knowledge::from_play_view(p, me);
         let num_decks = k.num_decks.max(1);
         let me_is_attacker = !p.landlords_team().contains(&me);
         let (non_landlord_points, _) = p.calculate_points();
@@ -328,8 +316,7 @@ impl EvalCtx {
             .filter(|(c, _)| trump.effective_suit(**c) == EffectiveSuit::Trump)
             .map(|(_, &n)| n)
             .sum();
-        let total_trumps = trump_universe_size(trump) * num_decks;
-        let unseen_trumps = total_trumps.saturating_sub(seen_trumps);
+        let unseen_trumps = k.total_trumps.saturating_sub(seen_trumps);
 
         // Own-hand summary (honest: it is our own hand). Cheap to compute and
         // only meaningfully consulted by the Enoch playbook.
@@ -355,7 +342,7 @@ impl EvalCtx {
         // exchanger), for whom the kitty is un-redacted. Attackers / other
         // defenders see `None` (the honesty boundary), so the endgame protection
         // rule only fires for the seat that legitimately knows the kitty.
-        let kitty_points = if enoch && p.landlord() == me {
+        let kitty_points = if enoch && p.exchanger() == me {
             p.visible_kitty().map(|kitty| {
                 kitty
                     .iter()
@@ -394,39 +381,422 @@ fn cards_by_suit(trump: Trump, cards: &[Card]) -> HashMap<EffectiveSuit, Vec<Car
     map
 }
 
-/// Generate candidate lead plays (single trick units, never throws), each a
-/// legal lead. Mirrors `simulate_play`'s grouping but returns *all* unit
-/// candidates rather than just the biggest, so the heuristic can choose.
+const DEFAULT_CANDIDATE_GENERATION_CAP: usize = 256;
+const DEFAULT_MAX_THROW_UNITS: usize = 3;
+
+fn candidate_generation_cap() -> usize {
+    std::env::var("SHENGJI_BOT_CANDIDATE_GEN_CAP")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|cap: &usize| *cap > 0)
+        .unwrap_or(DEFAULT_CANDIDATE_GENERATION_CAP)
+        .min(4096)
+}
+
+fn max_throw_units() -> usize {
+    std::env::var("SHENGJI_BOT_MAX_THROW_UNITS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|units: &usize| *units > 0)
+        .unwrap_or(DEFAULT_MAX_THROW_UNITS)
+        .min(8)
+}
+
+fn canonicalize_play(trump: Trump, cards: &mut Vec<Card>) {
+    cards.sort_by(|a, b| {
+        trump
+            .compare(*a, *b)
+            .then_with(|| a.as_char().cmp(&b.as_char()))
+    });
+}
+
+fn canonical_play_key(cards: &[Card]) -> Vec<char> {
+    cards.iter().map(|card| card.as_char()).collect()
+}
+
+fn push_legal_candidate(
+    p: &PlayPhase,
+    me: PlayerID,
+    trump: Trump,
+    mut cards: Vec<Card>,
+    candidates: &mut Vec<Vec<Card>>,
+    seen: &mut HashSet<Vec<char>>,
+    cap: usize,
+) {
+    if cards.is_empty() || candidates.len() >= cap {
+        return;
+    }
+    canonicalize_play(trump, &mut cards);
+    let key = canonical_play_key(&cards);
+    if !seen.contains(&key) && p.can_play_cards(me, &cards).is_ok() {
+        seen.insert(key);
+        candidates.push(cards);
+    }
+}
+
+fn canonical_candidate_order(trump: Trump, candidates: &mut Vec<Vec<Card>>) {
+    for candidate in candidates.iter_mut() {
+        canonicalize_play(trump, candidate);
+    }
+    candidates.sort_by(|a, b| {
+        a.len()
+            .cmp(&b.len())
+            .then_with(|| canonical_play_key(a).cmp(&canonical_play_key(b)))
+    });
+    candidates.dedup();
+}
+
+/// Merge independently generated action families without letting a large early
+/// family consume the global cap. One candidate is taken from each family in
+/// turn; ranking happens afterwards, so this preserves strategic coverage while
+/// remaining deterministic.
+fn merge_candidate_families(
+    trump: Trump,
+    mut families: Vec<Vec<Vec<Card>>>,
+    cap: usize,
+) -> Vec<Vec<Card>> {
+    for family in &mut families {
+        canonical_candidate_order(trump, family);
+    }
+    let mut result = Vec::with_capacity(cap);
+    let mut seen = HashSet::new();
+    let mut index = 0usize;
+    while result.len() < cap {
+        let mut added = false;
+        for family in &families {
+            if let Some(candidate) = family.get(index) {
+                let key = canonical_play_key(candidate);
+                if seen.insert(key) {
+                    result.push(candidate.clone());
+                    added = true;
+                    if result.len() == cap {
+                        break;
+                    }
+                }
+            }
+        }
+        if !added && families.iter().all(|family| family.len() <= index + 1) {
+            break;
+        }
+        index += 1;
+    }
+    canonical_candidate_order(trump, &mut result);
+    result
+}
+
+fn hand_entries(
+    hand: &HashMap<Card, usize>,
+    trump: Trump,
+    predicate: impl Fn(Card) -> bool,
+) -> Vec<(Card, usize)> {
+    let mut entries: Vec<(Card, usize)> = hand
+        .iter()
+        .filter_map(|(&card, &count)| {
+            (count > 0 && card != Card::Unknown && predicate(card)).then_some((card, count))
+        })
+        .collect();
+    entries.sort_by(|(a, _), (b, _)| {
+        trump
+            .compare(*a, *b)
+            .then_with(|| a.as_char().cmp(&b.as_char()))
+    });
+    entries
+}
+
+fn count_multiset_combinations(entries: &[(Card, usize)], choose: usize, cap: usize) -> usize {
+    let mut ways = vec![0usize; choose + 1];
+    ways[0] = 1;
+    for &(_, available) in entries {
+        let previous = ways.clone();
+        for selected in 1..=choose {
+            ways[selected] = (0..=available.min(selected))
+                .map(|take| previous[selected - take])
+                .fold(0usize, |total, n| total.saturating_add(n).min(cap + 1));
+        }
+    }
+    ways[choose]
+}
+
+fn enumerate_multiset_combinations(
+    entries: &[(Card, usize)],
+    choose: usize,
+    limit: usize,
+) -> Vec<Vec<Card>> {
+    fn recurse(
+        entries: &[(Card, usize)],
+        index: usize,
+        remaining: usize,
+        current: &mut Vec<Card>,
+        out: &mut Vec<Vec<Card>>,
+        limit: usize,
+    ) {
+        if out.len() >= limit {
+            return;
+        }
+        if index == entries.len() {
+            if remaining == 0 {
+                out.push(current.clone());
+            }
+            return;
+        }
+        let (card, available) = entries[index];
+        for take in 0..=available.min(remaining) {
+            current.extend(std::iter::repeat_n(card, take));
+            recurse(entries, index + 1, remaining - take, current, out, limit);
+            current.truncate(current.len() - take);
+            if out.len() >= limit {
+                return;
+            }
+        }
+    }
+
+    let mut out = vec![];
+    recurse(entries, 0, choose, &mut vec![], &mut out, limit);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compose_unit_throws(
+    p: &PlayPhase,
+    me: PlayerID,
+    trump: Trump,
+    units: &[Vec<Card>],
+    start: usize,
+    units_left: usize,
+    current: &mut Vec<Card>,
+    candidates: &mut Vec<Vec<Card>>,
+    seen: &mut HashSet<Vec<char>>,
+    cap: usize,
+    attempts: &mut usize,
+    attempt_cap: usize,
+) {
+    if candidates.len() >= cap || *attempts >= attempt_cap {
+        return;
+    }
+    if units_left == 0 {
+        *attempts += 1;
+        push_legal_candidate(p, me, trump, current.clone(), candidates, seen, cap);
+        return;
+    }
+    for index in start..units.len() {
+        let old_len = current.len();
+        current.extend_from_slice(&units[index]);
+        compose_unit_throws(
+            p,
+            me,
+            trump,
+            units,
+            index + 1,
+            units_left - 1,
+            current,
+            candidates,
+            seen,
+            cap,
+            attempts,
+            attempt_cap,
+        );
+        current.truncate(old_len);
+        if candidates.len() >= cap || *attempts >= attempt_cap {
+            return;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enumerate_rainbow_counts(
+    p: &PlayPhase,
+    me: PlayerID,
+    trump: Trump,
+    groups: &[(Card, usize)],
+    index: usize,
+    min_cards: usize,
+    current: &mut Vec<Card>,
+    candidates: &mut Vec<Vec<Card>>,
+    seen: &mut HashSet<Vec<char>>,
+    cap: usize,
+) {
+    if candidates.len() >= cap {
+        return;
+    }
+    if index == groups.len() {
+        if current.len() >= min_cards {
+            push_legal_candidate(p, me, trump, current.clone(), candidates, seen, cap);
+        }
+        return;
+    }
+    let (card, available) = groups[index];
+    for take in 1..=available {
+        current.extend(std::iter::repeat_n(card, take));
+        enumerate_rainbow_counts(
+            p,
+            me,
+            trump,
+            groups,
+            index + 1,
+            min_cards,
+            current,
+            candidates,
+            seen,
+            cap,
+        );
+        current.truncate(current.len() - take);
+        if candidates.len() >= cap {
+            return;
+        }
+    }
+}
+
+/// Generate a bounded hierarchy of legal lead plays:
+///
+/// 1. singles/repeated units/tractors under the table's configured requirements;
+/// 2. enabled rainbows;
+/// 3. ordinary same-suit throws composed progressively from 2..N units.
+///
+/// Every proposal is validated by the mechanics engine and canonicalized, so
+/// search receives deterministic, legal candidates without a combinatorial
+/// powerset explosion. The cap and maximum throw width are configurable through
+/// `SHENGJI_BOT_CANDIDATE_GEN_CAP` and `SHENGJI_BOT_MAX_THROW_UNITS`.
 pub fn lead_candidates(p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
+    lead_candidates_with_limits(p, me, candidate_generation_cap(), max_throw_units())
+}
+
+/// Bounded candidate set for the rollout hot path. Root search keeps the wider
+/// configurable generator, while each hypothetical rollout ply avoids spending
+/// most of its budget constructing/scoring hundreds of actions. Sixty-four still
+/// covers every ordinary single/pair/tractor in a standard hand and permits
+/// two-unit throws; the mechanics engine validates every proposal.
+pub(crate) fn rollout_lead_candidates(p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
+    lead_candidates_with_limits(p, me, 64, 2)
+}
+
+fn lead_candidates_with_limits(
+    p: &PlayPhase,
+    me: PlayerID,
+    cap: usize,
+    max_units: usize,
+) -> Vec<Vec<Card>> {
     let hand = match p.hands().get(me) {
         Ok(h) => h,
         Err(_) => return vec![],
     };
     let cards: Vec<Card> = Card::cards(hand.iter()).copied().collect();
     let trump = p.trick().trump();
+    let cap = cap.max(1);
+    let mut atomic_candidates: Vec<Vec<Card>> = vec![];
+    let mut atomic_seen = HashSet::new();
+    let mut rainbow_candidates: Vec<Vec<Card>> = vec![];
+    let mut rainbow_seen = HashSet::new();
+    let mut throw_candidates: Vec<Vec<Card>> = vec![];
+    let mut throw_seen = HashSet::new();
 
-    let mut candidates: Vec<Vec<Card>> = vec![];
-    for (_, suit_cards) in cards_by_suit(trump, &cards) {
-        let results = TrickUnit::find_plays(trump, TractorRequirements::default(), suit_cards);
-        for play in results {
-            // Each `play` is a full grouping (Units) of this suit. We want each
-            // individual unit as a candidate lead.
+    // Build atomic units deterministically by effective suit. Explicit repeated
+    // units ensure a single card from a held pair remains available as a lead;
+    // `find_plays` adds configured tractors and alternative decompositions.
+    let mut atomic_by_suit: BTreeMap<EffectiveSuit, Vec<Vec<Card>>> = BTreeMap::new();
+    for (&card, &count) in hand {
+        if card == Card::Unknown || count == 0 {
+            continue;
+        }
+        let units = atomic_by_suit
+            .entry(trump.effective_suit(card))
+            .or_default();
+        for repeated in 1..=count {
+            units.push(std::iter::repeat_n(card, repeated).collect());
+        }
+    }
+
+    let mut suit_groups: Vec<(EffectiveSuit, Vec<Card>)> =
+        cards_by_suit(trump, &cards).into_iter().collect();
+    suit_groups.sort_by_key(|(suit, _)| *suit);
+    for (suit, mut suit_cards) in suit_groups {
+        canonicalize_play(trump, &mut suit_cards);
+        let results = TrickUnit::find_plays(trump, p.propagated().tractor_requirements, suit_cards);
+        for play in results.into_iter().take(cap) {
             for unit in play {
-                candidates.push(unit.cards());
+                atomic_by_suit.entry(suit).or_default().push(unit.cards());
             }
         }
     }
-    // Deduplicate identical card-sets.
-    candidates.sort_by(|a, b| {
-        a.len()
-            .cmp(&b.len())
-            .then_with(|| format!("{a:?}").cmp(&format!("{b:?}")))
-    });
-    candidates.dedup();
 
-    // Keep only plays the engine accepts as legal. A lead of a single unit is
-    // always legal, but be defensive against any edge cases.
-    candidates.retain(|c| p.can_play_cards(me, c).is_ok());
+    for units in atomic_by_suit.values_mut() {
+        canonical_candidate_order(trump, units);
+        for unit in units.iter().cloned() {
+            push_legal_candidate(
+                p,
+                me,
+                trump,
+                unit,
+                &mut atomic_candidates,
+                &mut atomic_seen,
+                cap,
+            );
+        }
+    }
+
+    // Rainbows are the one supported compound lead that spans effective suits.
+    if let Some(min_cards) = p.propagated().compound_formats.rainbows {
+        let mut by_number: BTreeMap<Number, BTreeMap<EffectiveSuit, (Card, usize)>> =
+            BTreeMap::new();
+        for (&card, &count) in hand {
+            let Some(number) = card.number() else {
+                continue;
+            };
+            by_number
+                .entry(number)
+                .or_default()
+                .insert(trump.effective_suit(card), (card, count));
+        }
+        for groups in by_number.values() {
+            if groups.len() < 4 {
+                continue;
+            }
+            let groups: Vec<(Card, usize)> = groups.values().copied().collect();
+            enumerate_rainbow_counts(
+                p,
+                me,
+                trump,
+                &groups,
+                0,
+                min_cards,
+                &mut vec![],
+                &mut rainbow_candidates,
+                &mut rainbow_seen,
+                cap,
+            );
+        }
+    }
+
+    // Compose ordinary throws progressively: all atomic units first, then every
+    // legal two-unit throw, then three-unit throws, and so on up to the limit.
+    let mut throw_attempts = 0usize;
+    let throw_attempt_cap = cap.saturating_mul(16);
+    for units_wanted in 2..=max_units.max(1) {
+        for units in atomic_by_suit.values() {
+            if units.len() < units_wanted || throw_candidates.len() >= cap {
+                continue;
+            }
+            compose_unit_throws(
+                p,
+                me,
+                trump,
+                units,
+                0,
+                units_wanted,
+                &mut vec![],
+                &mut throw_candidates,
+                &mut throw_seen,
+                cap,
+                &mut throw_attempts,
+                throw_attempt_cap,
+            );
+        }
+    }
+
+    let mut candidates = merge_candidate_families(
+        trump,
+        vec![atomic_candidates, rainbow_candidates, throw_candidates],
+        cap,
+    );
     if candidates.is_empty() {
         // Guaranteed-legal fallback: lead a single (lowest) card.
         if let Some(card) = cards.iter().min_by(|a, b| trump.compare(**a, **b)) {
@@ -440,6 +810,15 @@ pub fn lead_candidates(p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
 /// of distinct legal follows (length-correct). Always includes at least one
 /// legal play if the hand is non-empty.
 pub fn follow_candidates(p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
+    follow_candidates_with_cap(p, me, candidate_generation_cap())
+}
+
+/// Bounded counterpart to [`follow_candidates`] for repeated rollout plies.
+pub(crate) fn rollout_follow_candidates(p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
+    follow_candidates_with_cap(p, me, 64)
+}
+
+fn follow_candidates_with_cap(p: &PlayPhase, me: PlayerID, cap: usize) -> Vec<Vec<Card>> {
     let hand = match p.hands().get(me) {
         Ok(h) => h.clone(),
         Err(_) => return vec![],
@@ -451,23 +830,28 @@ pub fn follow_candidates(p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
     let trump = trick_format.trump();
     let num_required = trick_format.size();
 
-    let available_cards: Vec<Card> = Card::cards(
+    let mut available_cards: Vec<Card> = Card::cards(
         hand.iter()
             .filter(|(c, _)| trump.effective_suit(**c) == trick_format.suit()),
     )
     .copied()
     .collect();
+    canonicalize_play(trump, &mut available_cards);
 
-    let mut candidates: Vec<Vec<Card>> = vec![];
+    let cap = cap.max(1);
+    let mut structural_candidates: Vec<Vec<Card>> = vec![];
+    let mut structural_seen = HashSet::new();
 
-    // Format-matching plays (the "correct" structural follows).
+    // Format-matching plays. `check_play` can yield many distinct mappings; the
+    // previous generator kept only `.next()`, hiding legal pairs/tractors that
+    // happened to appear later in iterator order.
     for format in trick_format.decomposition(p.propagated().trick_draw_policy()) {
-        let mut playable = UnitLike::check_play(
+        let playable = UnitLike::check_play(
             OrderedCard::make_map(available_cards.iter().copied(), trump),
             format.iter().cloned(),
             p.propagated().trick_draw_policy(),
         );
-        if let Some(u) = playable.next() {
+        for u in playable.into_iter().take(cap) {
             let matched: Vec<Card> = u
                 .into_iter()
                 .flat_map(|x| {
@@ -485,7 +869,18 @@ pub fn follow_candidates(p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
                 num_required,
             );
             if play.len() == num_required {
-                candidates.push(play);
+                push_legal_candidate(
+                    p,
+                    me,
+                    trump,
+                    play,
+                    &mut structural_candidates,
+                    &mut structural_seen,
+                    cap,
+                );
+            }
+            if structural_candidates.len() >= cap {
+                break;
             }
         }
     }
@@ -495,12 +890,40 @@ pub fn follow_candidates(p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
     // give the scorer meaningful choices when discarding within the led suit.
     if available_cards.len() >= num_required {
         let mut low_first = available_cards.clone();
-        low_first.sort_by_key(|c| card_strength(trump, *c));
-        candidates.push(low_first.iter().take(num_required).copied().collect());
+        low_first.sort_by_key(|c| (card_strength(trump, *c), c.as_char()));
+        push_legal_candidate(
+            p,
+            me,
+            trump,
+            low_first.iter().take(num_required).copied().collect(),
+            &mut structural_candidates,
+            &mut structural_seen,
+            cap,
+        );
 
         let mut high_first = available_cards.clone();
-        high_first.sort_by_key(|c| std::cmp::Reverse(card_strength(trump, *c)));
-        candidates.push(high_first.iter().take(num_required).copied().collect());
+        high_first.sort_by_key(|c| (std::cmp::Reverse(card_strength(trump, *c)), c.as_char()));
+        push_legal_candidate(
+            p,
+            me,
+            trump,
+            high_first.iter().take(num_required).copied().collect(),
+            &mut structural_candidates,
+            &mut structural_seen,
+            cap,
+        );
+
+        let mut points_first = available_cards.clone();
+        points_first.sort_by_key(|c| (!is_point(*c), card_strength(trump, *c), c.as_char()));
+        push_legal_candidate(
+            p,
+            me,
+            trump,
+            points_first.iter().take(num_required).copied().collect(),
+            &mut structural_candidates,
+            &mut structural_seen,
+            cap,
+        );
     } else {
         // We are short / void in the led suit. We must play all available in-suit
         // cards, then fill with off-suit. Offer variants of the off-suit fill:
@@ -516,44 +939,126 @@ pub fn follow_candidates(p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
         if need > 0 && !off_suit.is_empty() {
             // Variant A: discard the weakest non-trump non-point cards.
             let mut weak = off_suit.clone();
-            weak.sort_by_key(|c| fill_discard_key(trump, *c));
+            weak.sort_by_key(|c| (fill_discard_key(trump, *c), c.as_char()));
             let mut va = available_cards.clone();
             va.extend(weak.iter().take(need).copied());
             if va.len() == num_required {
-                candidates.push(va);
+                push_legal_candidate(
+                    p,
+                    me,
+                    trump,
+                    va,
+                    &mut structural_candidates,
+                    &mut structural_seen,
+                    cap,
+                );
             }
 
-            // Variant B: trump in with the lowest trumps (capture attempt).
+            // Variant B: if our partner is winning, the scorer may prefer to
+            // feed points. Candidate generation must expose that option.
+            let mut point_dump = off_suit.clone();
+            point_dump.sort_by_key(|c| (!is_point(*c), card_strength(trump, *c), c.as_char()));
+            let mut vb = available_cards.clone();
+            vb.extend(point_dump.iter().take(need).copied());
+            if vb.len() == num_required {
+                push_legal_candidate(
+                    p,
+                    me,
+                    trump,
+                    vb,
+                    &mut structural_candidates,
+                    &mut structural_seen,
+                    cap,
+                );
+            }
+
+            // Variant C: trump in with the lowest trumps (capture attempt).
             let mut trumps: Vec<Card> = off_suit
                 .iter()
                 .copied()
                 .filter(|c| is_trump(trump, *c))
                 .collect();
             if trumps.len() >= need {
-                trumps.sort_by_key(|c| card_strength(trump, *c));
+                trumps.sort_by_key(|c| (card_strength(trump, *c), c.as_char()));
                 let mut vb = available_cards.clone();
                 vb.extend(trumps.iter().take(need).copied());
                 if vb.len() == num_required {
-                    candidates.push(vb);
+                    push_legal_candidate(
+                        p,
+                        me,
+                        trump,
+                        vb,
+                        &mut structural_candidates,
+                        &mut structural_seen,
+                        cap,
+                    );
                 }
             }
         } else if need == 0 {
-            candidates.push(available_cards.clone());
+            push_legal_candidate(
+                p,
+                me,
+                trump,
+                available_cards.clone(),
+                &mut structural_candidates,
+                &mut structural_seen,
+                cap,
+            );
         }
     }
 
-    // Deduplicate.
-    for c in candidates.iter_mut() {
-        c.sort_by(|a, b| trump.compare(*a, *b));
+    // Explicit bomb proposals. Bomb policies can permit a follow of a different
+    // length/suit, so a `num_required`-only generator would never discover them.
+    let mut bomb_candidates = Vec::new();
+    let mut bomb_seen = HashSet::new();
+    if p.propagated().bomb_policy.bombs_enabled() {
+        let entries = hand_entries(&hand, trump, |_| true);
+        for (card, count) in entries {
+            for size in 4..=count {
+                push_legal_candidate(
+                    p,
+                    me,
+                    trump,
+                    std::iter::repeat_n(card, size).collect(),
+                    &mut bomb_candidates,
+                    &mut bomb_seen,
+                    cap,
+                );
+            }
+        }
     }
-    candidates.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
-    candidates.dedup();
 
-    // Keep only plays the engine accepts as legal: our heuristic variants can
-    // occasionally violate suit-following / tuple-protection rules, and the
-    // engine is the source of truth. The deterministic `simple_follow` is a
-    // guaranteed-legal fallback if everything else is filtered out.
-    candidates.retain(|c| p.can_play_cards(me, c).is_ok());
+    // For genuinely small action spaces, enumerate every multiset of the normal
+    // required length and let mechanics filter it. This gives complete legal-
+    // equivalence coverage in endgames while avoiding a late-hand C(27,k)
+    // explosion. Larger spaces stay on the structured proposals above.
+    let entries = hand_entries(&hand, trump, |_| true);
+    let combinations = count_multiset_combinations(&entries, num_required, cap);
+    let mut exhaustive_candidates = Vec::new();
+    let mut exhaustive_seen = HashSet::new();
+    if combinations <= cap {
+        for play in enumerate_multiset_combinations(&entries, num_required, combinations.max(1)) {
+            push_legal_candidate(
+                p,
+                me,
+                trump,
+                play,
+                &mut exhaustive_candidates,
+                &mut exhaustive_seen,
+                cap,
+            );
+        }
+    }
+
+    let mut candidates = merge_candidate_families(
+        trump,
+        vec![
+            structural_candidates,
+            bomb_candidates,
+            exhaustive_candidates,
+        ],
+        cap,
+    );
     if candidates.is_empty() {
         let fallback = simple_follow(
             &available_cards,
@@ -562,7 +1067,16 @@ pub fn follow_candidates(p: &PlayPhase, me: PlayerID) -> Vec<Vec<Card>> {
             trick_format.suit(),
             num_required,
         );
-        candidates.push(fallback);
+        let mut fallback_seen = HashSet::new();
+        push_legal_candidate(
+            p,
+            me,
+            trump,
+            fallback,
+            &mut candidates,
+            &mut fallback_seen,
+            cap,
+        );
     }
     candidates
 }
@@ -603,7 +1117,7 @@ fn top_up(
         }
     }
     // Prefer to keep strong in-suit cards; top up with the weakest.
-    remaining.sort_by_key(|c| card_strength(trump, *c));
+    remaining.sort_by_key(|c| (card_strength(trump, *c), c.as_char()));
     let needed = num_required - play.len();
     play.extend(remaining.into_iter().take(needed));
     play
@@ -632,7 +1146,7 @@ pub fn simple_follow(
         .copied()
         .collect();
         // Discard the weakest off-suit non-points first.
-        off.sort_by_key(|c| fill_discard_key(trump, *c));
+        off.sort_by_key(|c| (fill_discard_key(trump, *c), c.as_char()));
         play.extend(off.into_iter().take(need));
     }
     play
@@ -652,7 +1166,7 @@ pub fn score_lead_legacy(p: &PlayPhase, _me: PlayerID, cards: &[Card]) -> f64 {
 
     let max_strength = cards
         .iter()
-        .map(|c| card_strength(trump, *c))
+        .map(|c| legacy_card_strength(trump, *c))
         .max()
         .unwrap_or(0) as f64;
     let point_total: i32 = cards
@@ -734,11 +1248,27 @@ pub fn score_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
         .unwrap_or(lead);
     let boss_worth_checking = max_boss_strength >= 13 || trumping;
     let is_boss = boss_worth_checking && is_boss_card(&ctx.k, trump, top);
+    let one_unit = TrickUnit::find_plays(
+        trump,
+        p.propagated().tractor_requirements,
+        cards.iter().copied(),
+    )
+    .into_iter()
+    .any(|units| units.len() == 1);
+    let safe_throw = one_unit || cards.iter().all(|card| is_boss_card(&ctx.k, trump, *card));
 
     let mut score = 0.0;
 
     // Multi-card units (pairs / tractors) pressure opponents.
     score += (len - 1.0) * 6.0;
+
+    // A multi-unit throw is valuable only when every component is protected.
+    // Without this guard, the old max-card approximation gave an unsafe throw
+    // containing one joker roughly +50 raw-strength points and treated its total
+    // length like a tractor, causing routine failed throws.
+    if !safe_throw {
+        score -= (len - 1.0) * 50.0;
+    }
 
     // Modest reward for raw strength.
     score += max_boss_strength as f64 * 0.05;
@@ -774,7 +1304,9 @@ pub fn score_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
     // landlord side should DRAW trump with a boss trump while opponents still
     // hold some, easing off as they dry out; everyone else hoards.
     if trumping {
-        let joker_pair = len >= 2.0 && max_boss_strength >= 990;
+        let counts = Card::count(cards.iter().copied());
+        let joker_pair = counts.get(&Card::BigJoker).copied().unwrap_or(0) >= 2
+            || counts.get(&Card::SmallJoker).copied().unwrap_or(0) >= 2;
         if joker_pair {
             score += 2.0;
         }
@@ -1121,7 +1653,7 @@ pub fn score_follow_legacy(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> f64 {
         .sum();
     let max_strength = cards
         .iter()
-        .map(|c| card_strength(trump, *c))
+        .map(|c| legacy_card_strength(trump, *c))
         .max()
         .unwrap_or(0);
     let trumping_in = !following_suit && cards.iter().any(|c| is_trump(trump, *c));
@@ -1146,7 +1678,7 @@ pub fn score_follow_legacy(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> f64 {
             trick.played_cards().iter().find(|pc| pc.id == w).map(|pc| {
                 pc.cards
                     .iter()
-                    .map(|c| card_strength(trump, *c))
+                    .map(|c| legacy_card_strength(trump, *c))
                     .max()
                     .unwrap_or(0)
             })
@@ -1219,6 +1751,34 @@ pub fn score_follow_legacy(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> f64 {
     score
 }
 
+/// Ask the mechanics engine whether a legal follow would take the lead in the
+/// in-progress trick. This is cheap (one small state clone) and, unlike comparing
+/// only the candidates' highest cards, is correct for pairs, tractors, throws,
+/// bombs, and trump-led tricks.
+pub(crate) fn candidate_wins_current_trick(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> bool {
+    let mut trick = p.trick().clone();
+    let mut hands = p.hands().clone();
+    let rules = p.propagated();
+    if trick
+        .play_cards(PlayCards {
+            id: me,
+            hands: &mut hands,
+            cards,
+            trick_draw_policy: rules.trick_draw_policy,
+            throw_eval_policy: rules.throw_evaluation_policy,
+            format_hint: None,
+            hide_throw_halting_player: rules.hide_throw_halting_player,
+            tractor_requirements: rules.tractor_requirements,
+            bomb_policy: rules.bomb_policy,
+            compound_formats: rules.compound_formats.clone(),
+        })
+        .is_err()
+    {
+        return false;
+    }
+    trick.winner_so_far() == Some(me)
+}
+
 /// Score a candidate follow (the NEW boss-/partner-aware scorer used by all real
 /// tiers). Encodes following strategy relative to the current trick winner, with
 /// a seat-aware partner read and honest boss detection:
@@ -1263,10 +1823,6 @@ pub fn score_follow(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
                     .max_by_key(|c| boss_strength(trump, *c))
             })
     });
-    let winner_is_trump = winner_top_card.map(|c| is_trump(trump, c)).unwrap_or(false);
-    let winner_top_strength = winner_top_card
-        .map(|c| boss_strength(trump, c))
-        .unwrap_or(0);
     let winner_locked = partner_winning
         && winner_top_card
             .map(|c| is_boss_card(&ctx.k, trump, c))
@@ -1296,34 +1852,22 @@ pub fn score_follow(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
         .unwrap_or(0);
     let trumping_in = !following_suit && cards.iter().any(|c| is_trump(trump, *c));
 
-    // Would this candidate BEAT the current winner? Base it on CARD RANKS
-    // (certain), never on inferred voids.
+    // Would this candidate beat the current winner? Delegate the actual format
+    // comparison to the mechanics engine instead of approximating a pair,
+    // tractor, throw, or bomb by its single highest card.
     let my_top = cards
         .iter()
         .copied()
         .max_by_key(|c| boss_strength(trump, *c))
         .unwrap_or(cards[0]);
-    let would_beat = if current_winner.is_none() {
-        true
-    } else if following_suit {
-        max_strength > winner_top_strength && !winner_is_trump
-    } else if trumping_in {
-        if winner_is_trump {
-            max_strength > winner_top_strength
-        } else {
-            true
-        }
-    } else {
-        false
-    };
+    let would_beat = candidate_wins_current_trick(p, me, cards);
     // Does MY candidate, if it wins by following suit with a boss top, lock the
     // trick? (Used to allow beating-to-secure over a stealable partner.)
     let my_card_locks = following_suit && is_boss_card(&ctx.k, trump, my_top);
 
-    // Boss-aware likely-win: now that `boss_strength` ranks side-suit Aces
-    // correctly, beating the current winner by rank IS the win condition. (A
-    // same-suit boss that does not out-rank the card already on the table does
-    // NOT win this trick, so we must not treat it as a winner here.)
+    // `would_beat` is mechanics-accurate for the current table. It does not claim
+    // the trick is safe from seats that have yet to act; the surrounding partner
+    // and boss logic handles that uncertainty separately.
     let likely_win = would_beat;
 
     let mut score = 0.0;
@@ -1514,6 +2058,32 @@ pub fn ranked_follows(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
     scored
 }
 
+pub(crate) fn ranked_leads_for_rollout(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
+    let ctx = EvalCtx::build(p, me);
+    let mut scored: Vec<ScoredPlay> = rollout_lead_candidates(p, me)
+        .into_iter()
+        .map(|cards| ScoredPlay {
+            score: score_lead(&ctx, p, &cards),
+            cards,
+        })
+        .collect();
+    scored.sort_by(|a, b| b.score.total_cmp(&a.score));
+    scored
+}
+
+pub(crate) fn ranked_follows_for_rollout(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
+    let ctx = EvalCtx::build(p, me);
+    let mut scored: Vec<ScoredPlay> = rollout_follow_candidates(p, me)
+        .into_iter()
+        .map(|cards| ScoredPlay {
+            score: score_follow(&ctx, p, &cards),
+            cards,
+        })
+        .collect();
+    scored.sort_by(|a, b| b.score.total_cmp(&a.score));
+    scored
+}
+
 /// Deduplicate identical card-sets in place (order-insensitive), preserving the
 /// first occurrence's card order. Used when merging the Enoch throw candidates
 /// with the shared single-unit candidates.
@@ -1621,6 +2191,35 @@ pub fn ranked_follows_enoch(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    scored
+}
+
+pub(crate) fn ranked_leads_enoch_for_rollout(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
+    let ctx = EvalCtx::build_enoch(p, me);
+    let mut candidates = rollout_lead_candidates(p, me);
+    candidates.extend(enoch_throw_candidates(&ctx, p, me));
+    dedup_card_sets(&mut candidates);
+    let mut scored: Vec<ScoredPlay> = candidates
+        .into_iter()
+        .map(|cards| ScoredPlay {
+            score: score_lead(&ctx, p, &cards),
+            cards,
+        })
+        .collect();
+    scored.sort_by(|a, b| b.score.total_cmp(&a.score));
+    scored
+}
+
+pub(crate) fn ranked_follows_enoch_for_rollout(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
+    let ctx = EvalCtx::build_enoch(p, me);
+    let mut scored: Vec<ScoredPlay> = rollout_follow_candidates(p, me)
+        .into_iter()
+        .map(|cards| ScoredPlay {
+            score: score_follow(&ctx, p, &cards),
+            cards,
+        })
+        .collect();
+    scored.sort_by(|a, b| b.score.total_cmp(&a.score));
     scored
 }
 
@@ -2299,6 +2898,7 @@ mod tests {
             vec![ids[0], ids[2]], // landlord team = seats 0 & 2
             vec![],
             vec![Deck::default()],
+            vec![],
         )
         .unwrap();
         (pp, ids)
@@ -2499,8 +3099,8 @@ mod tests {
         let legacy = choose_play_direct(&pp, ids[0], HeuristicVersion::Legacy).unwrap();
         // NEW cashes the points behind a boss.
         assert!(
-            new == vec![king_s] || new == vec![ace_s],
-            "NEW should lead a boss spade (the point-cashing King, or the Ace); got {:?}",
+            new.contains(&king_s) || new.contains(&ace_s),
+            "NEW should lead a protected boss spade (alone or as a safe throw); got {:?}",
             new
         );
         assert!(
@@ -3231,6 +3831,304 @@ mod tests {
             club_fours, 0,
             "Enoch must protect the low club pair; buried {:?}",
             buried
+        );
+    }
+
+    #[test]
+    fn test_live_strength_is_ace_high_but_legacy_encoding_is_frozen() {
+        let trump = std_trump(Suit::Hearts);
+        let ace = card(Number::Ace, Suit::Spades);
+        let king = card(Number::King, Suit::Spades);
+        assert!(
+            card_strength(trump, ace) > card_strength(trump, king),
+            "live policy strength must match the mechanics engine's Ace-high order"
+        );
+        assert!(
+            legacy_card_strength(trump, ace) < legacy_card_strength(trump, king),
+            "the embedded Expert feature encoding must remain backward compatible"
+        );
+
+        let queen = card(Number::Queen, Suit::Spades);
+        assert_eq!(
+            choose_kitty(&[ace, queen], trump, 1),
+            vec![queen],
+            "kitty selection must keep the Ace rather than treating it as low trash"
+        );
+        let spade_trump = std_trump(Suit::Spades);
+        assert!(
+            bid_strength(&[ace], spade_trump) > bid_strength(&[king], spade_trump),
+            "bid evaluation must value an Ace above a King in the candidate trump suit"
+        );
+    }
+
+    #[test]
+    fn test_only_big_joker_is_unconditionally_boss() {
+        let trump = std_trump(Suit::Hearts);
+        let make_knowledge = |seen: HashMap<Card, usize>| Knowledge {
+            configured_counts: Card::count(Deck::default().cards()),
+            seen,
+            voids: HashMap::new(),
+            hidden_counts: HashMap::new(),
+            known_holding: HashMap::new(),
+            trump,
+            num_decks: 1,
+            total_cards: 54,
+            total_points: 100,
+            total_trumps: 18,
+        };
+        let empty = make_knowledge(HashMap::new());
+        assert!(is_boss_card(&empty, trump, Card::BigJoker));
+        assert!(
+            !is_boss_card(&empty, trump, Card::SmallJoker),
+            "an unseen big joker can beat the small joker"
+        );
+        assert!(
+            !is_boss_card(&empty, trump, card(Number::Two, Suit::Hearts)),
+            "jokers can beat the trump-suit level card"
+        );
+
+        let mut seen = HashMap::new();
+        seen.insert(Card::BigJoker, 1);
+        assert!(is_boss_card(&make_knowledge(seen), trump, Card::SmallJoker));
+    }
+
+    #[test]
+    fn test_special_deck_does_not_invent_excluded_dominators() {
+        let trump = std_trump(Suit::Hearts);
+        let deck = Deck {
+            exclude_small_joker: false,
+            exclude_big_joker: true,
+            min: Number::Five,
+        };
+        let cards: Vec<Card> = deck.cards().collect();
+        let knowledge = Knowledge {
+            configured_counts: Card::count(cards.iter().copied()),
+            total_cards: cards.len(),
+            total_points: cards.iter().map(|card| card.points().unwrap_or(0)).sum(),
+            total_trumps: cards
+                .iter()
+                .filter(|card| trump.effective_suit(**card) == EffectiveSuit::Trump)
+                .count(),
+            seen: HashMap::new(),
+            voids: HashMap::new(),
+            hidden_counts: HashMap::new(),
+            known_holding: HashMap::new(),
+            trump,
+            num_decks: 1,
+        };
+        assert!(
+            is_boss_card(&knowledge, trump, Card::SmallJoker),
+            "an excluded big joker must not remain a phantom dominator"
+        );
+    }
+
+    #[test]
+    fn test_mechanics_winner_check_handles_higher_trump_follow() {
+        let low_trump = card(Number::Three, Suit::Hearts);
+        let high_trump = card(Number::Ace, Suit::Hearts);
+        let (mut pp, ids) = make_play_phase([
+            vec![low_trump],
+            vec![high_trump],
+            vec![card(Number::Four, Suit::Hearts)],
+            vec![card(Number::Five, Suit::Hearts)],
+        ]);
+        pp.play_cards(ids[0], &[low_trump]).unwrap();
+        assert!(
+            candidate_wins_current_trick(&pp, ids[1], &[high_trump]),
+            "a higher trump following a trump lead must take the current lead"
+        );
+    }
+
+    #[test]
+    fn test_small_hand_lead_candidates_cover_every_legal_multiset() {
+        let three = card(Number::Three, Suit::Spades);
+        let four = card(Number::Four, Suit::Spades);
+        let hand = vec![three, four, four];
+        let (pp, ids) = make_play_phase([
+            hand.clone(),
+            vec![card(Number::Five, Suit::Clubs)],
+            vec![card(Number::Six, Suit::Clubs)],
+            vec![card(Number::Seven, Suit::Clubs)],
+        ]);
+        let trump = pp.trump();
+        let entries = hand_entries(pp.hands().get(ids[0]).unwrap(), trump, |_| true);
+        let mut exhaustive = HashSet::new();
+        for size in 1..=hand.len() {
+            for mut candidate in enumerate_multiset_combinations(&entries, size, 1024) {
+                canonicalize_play(trump, &mut candidate);
+                if pp.can_play_cards(ids[0], &candidate).is_ok() {
+                    exhaustive.insert(canonical_play_key(&candidate));
+                }
+            }
+        }
+
+        let generated: HashSet<Vec<char>> = lead_candidates_with_limits(&pp, ids[0], 1024, 3)
+            .iter()
+            .map(|candidate| canonical_play_key(candidate))
+            .collect();
+        assert_eq!(
+            generated, exhaustive,
+            "hierarchical leads must cover every legal-equivalence class in a small hand"
+        );
+    }
+
+    #[test]
+    fn test_small_hand_follow_candidates_cover_every_legal_multiset() {
+        let lead = card(Number::Nine, Suit::Spades);
+        let followers = vec![
+            card(Number::Three, Suit::Spades),
+            card(Number::Four, Suit::Spades),
+            card(Number::Five, Suit::Spades),
+        ];
+        let (mut pp, ids) = make_play_phase([
+            vec![lead, lead],
+            followers.clone(),
+            vec![
+                card(Number::Six, Suit::Spades),
+                card(Number::Seven, Suit::Spades),
+            ],
+            vec![
+                card(Number::Ten, Suit::Spades),
+                card(Number::Jack, Suit::Spades),
+            ],
+        ]);
+        pp.play_cards(ids[0], &[lead, lead]).unwrap();
+        let trump = pp.trump();
+        let entries = hand_entries(pp.hands().get(ids[1]).unwrap(), trump, |_| true);
+        let mut exhaustive = HashSet::new();
+        for mut candidate in enumerate_multiset_combinations(&entries, 2, 1024) {
+            canonicalize_play(trump, &mut candidate);
+            if pp.can_play_cards(ids[1], &candidate).is_ok() {
+                exhaustive.insert(canonical_play_key(&candidate));
+            }
+        }
+        let generated: HashSet<Vec<char>> = follow_candidates_with_cap(&pp, ids[1], 1024)
+            .iter()
+            .map(|candidate| canonical_play_key(candidate))
+            .collect();
+        assert_eq!(
+            generated, exhaustive,
+            "bounded exhaustive fallback must cover every legal small-hand follow"
+        );
+    }
+
+    #[test]
+    fn test_lead_candidates_use_configured_tractor_requirements() {
+        use shengji_mechanics::trick::TractorRequirements;
+
+        let three = card(Number::Three, Suit::Spades);
+        let four = card(Number::Four, Suit::Spades);
+        let tractor = vec![three, three, four, four];
+        let (mut pp, ids) = make_play_phase([
+            tractor.clone(),
+            vec![card(Number::Five, Suit::Clubs)],
+            vec![card(Number::Six, Suit::Clubs)],
+            vec![card(Number::Seven, Suit::Clubs)],
+        ]);
+        let default_atomic = lead_candidates_with_limits(&pp, ids[0], 1024, 1);
+        assert!(default_atomic.contains(&tractor));
+
+        pp.propagated_mut().tractor_requirements = TractorRequirements {
+            min_count: 3,
+            min_length: 2,
+        };
+        let configured_atomic = lead_candidates_with_limits(&pp, ids[0], 1024, 1);
+        assert!(
+            !configured_atomic.contains(&tractor),
+            "a pair tractor must not be proposed as one unit when triples are configured"
+        );
+    }
+
+    #[test]
+    fn test_lead_candidates_propose_enabled_rainbow() {
+        use shengji_mechanics::trick::CompoundFormats;
+
+        let mut rainbow = vec![
+            card(Number::Three, Suit::Clubs),
+            card(Number::Three, Suit::Diamonds),
+            card(Number::Three, Suit::Hearts),
+            card(Number::Three, Suit::Spades),
+        ];
+        let (mut pp, ids) = make_play_phase([
+            rainbow.clone(),
+            vec![card(Number::Five, Suit::Clubs)],
+            vec![card(Number::Six, Suit::Clubs)],
+            vec![card(Number::Seven, Suit::Clubs)],
+        ]);
+        pp.propagated_mut().compound_formats = CompoundFormats { rainbows: Some(4) };
+        canonicalize_play(pp.trump(), &mut rainbow);
+        assert!(
+            lead_candidates_with_limits(&pp, ids[0], 1024, 1).contains(&rainbow),
+            "enabled cross-suit rainbow must be visible to search"
+        );
+    }
+
+    #[test]
+    fn test_low_cap_reserves_each_lead_family() {
+        use shengji_mechanics::trick::CompoundFormats;
+
+        let mut rainbow = vec![
+            card(Number::Three, Suit::Clubs),
+            card(Number::Three, Suit::Diamonds),
+            card(Number::Three, Suit::Hearts),
+            card(Number::Three, Suit::Spades),
+        ];
+        let mut hand = rainbow.clone();
+        hand.push(card(Number::Four, Suit::Clubs));
+        let (mut pp, ids) = make_play_phase([
+            hand,
+            vec![card(Number::Five, Suit::Clubs)],
+            vec![card(Number::Six, Suit::Clubs)],
+            vec![card(Number::Seven, Suit::Clubs)],
+        ]);
+        pp.propagated_mut().compound_formats = CompoundFormats { rainbows: Some(4) };
+        canonicalize_play(pp.trump(), &mut rainbow);
+        let candidates = lead_candidates_with_limits(&pp, ids[0], 3, 2);
+        assert_eq!(candidates.len(), 3);
+        assert!(candidates.iter().any(|candidate| candidate.len() == 1));
+        assert!(candidates.contains(&rainbow));
+        assert!(
+            candidates.iter().any(|candidate| {
+                candidate.len() == 2
+                    && candidate
+                        .iter()
+                        .all(|card| card.suit() == Some(Suit::Clubs))
+            }),
+            "an ordinary throw must survive alongside atomics and rainbows"
+        );
+    }
+
+    #[test]
+    fn test_low_cap_reserves_follow_bomb_family() {
+        use shengji_mechanics::trick::BombPolicy;
+
+        let lead_low = card(Number::Three, Suit::Spades);
+        let lead_high = card(Number::Four, Suit::Spades);
+        let lead = vec![lead_low, lead_low, lead_high, lead_high];
+        let bomb = card(Number::Three, Suit::Clubs);
+        let (mut pp, ids) = make_play_phase([
+            lead.clone(),
+            vec![
+                card(Number::Five, Suit::Spades),
+                card(Number::Five, Suit::Spades),
+                card(Number::Six, Suit::Spades),
+                card(Number::Six, Suit::Spades),
+                bomb,
+                bomb,
+                bomb,
+                bomb,
+            ],
+            vec![card(Number::Six, Suit::Spades)],
+            vec![card(Number::Seven, Suit::Spades)],
+        ]);
+        pp.propagated_mut().bomb_policy = BombPolicy::AllowBombs;
+        pp.play_cards(ids[0], &lead).unwrap();
+        let candidates = follow_candidates_with_cap(&pp, ids[1], 2);
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate == &vec![bomb; 4]),
+            "an enabled bomb must not be starved by structural follows"
         );
     }
 }

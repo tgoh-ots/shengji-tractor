@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use shengji_mechanics::bidding::Bid;
 use shengji_mechanics::deck::Deck;
 use shengji_mechanics::hands::Hands;
-use shengji_mechanics::types::{Card, Number, PlayerID, Rank, Trump};
+use shengji_mechanics::types::{Card, Number, PlayerID, Rank, Trump, FULL_DECK};
 
 use crate::message::MessageVariant;
 use crate::settings::{
@@ -48,6 +48,11 @@ pub struct ExchangePhase {
     removed_cards: Vec<Card>,
     #[serde(default)]
     decks: Vec<Deck>,
+    /// Humans that explicitly passed during the current finalized kitty-theft
+    /// bidding window. A successful bid or a new exchange epoch clears this so
+    /// everyone can respond to the changed standing bid.
+    #[serde(default)]
+    done_bidding: Vec<PlayerID>,
     player_requested_reset: Option<PlayerID>,
 }
 
@@ -80,6 +85,7 @@ impl ExchangePhase {
             autobid,
             removed_cards,
             decks,
+            done_bidding: Vec::new(),
             finalized: false,
             epoch: 1,
             player_requested_reset: None,
@@ -129,6 +135,93 @@ impl ExchangePhase {
         }
     }
 
+    /// Whether the landlord has already supplied the complete friend list.
+    pub fn friends_selected(&self) -> bool {
+        match &self.game_mode {
+            GameMode::FindingFriends {
+                num_friends,
+                friends,
+            } => friends.len() == *num_friends,
+            GameMode::Tractor => true,
+        }
+    }
+
+    fn available_friend_copies(&self, card: Card) -> usize {
+        let configured = if self.decks.is_empty() {
+            self.num_decks
+        } else {
+            self.decks
+                .iter()
+                .filter(|deck| deck.includes_card(card))
+                .count()
+        };
+        configured.saturating_sub(
+            self.removed_cards
+                .iter()
+                .filter(|removed| **removed == card)
+                .count(),
+        )
+    }
+
+    fn validate_friend_selection(&self, friend: &FriendSelection) -> Result<(), Error> {
+        if FriendSelectionPolicy::TrumpsIncluded != self.propagated.friend_selection_policy {
+            if friend.card.is_joker() || friend.card.number() == self.trump.number() {
+                if let Some(n) = self.trump.number() {
+                    bail!("you can't pick a joker or a {} as your friend", n.as_str())
+                } else {
+                    bail!("you can't pick a joker as your friend")
+                }
+            }
+            if self.trump.suit().is_some() && friend.card.suit() == self.trump.suit() {
+                bail!("you can't pick a trump suit as your friend")
+            }
+        }
+        if friend.initial_skip >= self.available_friend_copies(friend.card) {
+            bail!("need to pick a card that exists!")
+        }
+
+        if let FriendSelectionPolicy::HighestCardNotAllowed =
+            self.propagated.friend_selection_policy
+        {
+            match (self.trump.number(), friend.card.number()) {
+                (Some(Number::Ace), Some(Number::King)) | (_, Some(Number::Ace)) => {
+                    bail!("you can't pick the highest card as your friend")
+                }
+                _ => (),
+            }
+        }
+
+        if let FriendSelectionPolicy::PointCardNotAllowed = self.propagated.friend_selection_policy
+        {
+            let landlord_level = self
+                .propagated
+                .players
+                .iter()
+                .find(|p| p.id == self.landlord)
+                .ok_or_else(|| anyhow!("Couldn't find landlord level?"))?
+                .rank();
+            match (landlord_level, friend.card.points(), friend.card.number()) {
+                (Rank::Number(Number::Ace), _, Some(Number::King)) => (),
+                (_, Some(_), _) => bail!("you can't pick a point card as your friend"),
+                (_, _, _) => (),
+            }
+        }
+        Ok(())
+    }
+
+    /// All individual friend declarations accepted by the current rules.
+    pub fn valid_friend_selections(&self) -> Vec<FriendSelection> {
+        FULL_DECK
+            .iter()
+            .copied()
+            .flat_map(|card| {
+                let copies = self.available_friend_copies(card);
+                (0..copies).map(move |initial_skip| FriendSelection { card, initial_skip })
+            })
+            .filter(|friend| self.validate_friend_selection(friend).is_ok())
+            .collect()
+    }
+
     pub fn set_friends(
         &mut self,
         id: PlayerID,
@@ -137,76 +230,31 @@ impl ExchangePhase {
         if self.landlord != id {
             bail!("not the landlord")
         }
+        let num_friends = match self.game_mode {
+            GameMode::FindingFriends { num_friends, .. } => num_friends,
+            GameMode::Tractor => return Err(anyhow!("not playing finding friends")),
+        };
+        let friend_set = iter.into_iter().collect::<HashSet<_>>();
+        if num_friends != friend_set.len() {
+            bail!("incorrect number of friends")
+        }
+        // Validate the complete proposal before clearing the existing list. This
+        // also lets bot code enumerate choices from the exact same rules.
+        for friend in &friend_set {
+            self.validate_friend_selection(friend)?;
+        }
+
         if let GameMode::FindingFriends {
-            num_friends,
-            ref mut friends,
+            ref mut friends, ..
         } = self.game_mode
         {
-            let friend_set = iter.into_iter().collect::<HashSet<_>>();
-            if num_friends != friend_set.len() {
-                bail!("incorrect number of friends")
-            }
-
             friends.clear();
-
-            for friend in friend_set.iter() {
-                if FriendSelectionPolicy::TrumpsIncluded != self.propagated.friend_selection_policy
-                {
-                    if friend.card.is_joker() || friend.card.number() == self.trump.number() {
-                        if let Some(n) = self.trump.number() {
-                            bail!("you can't pick a joker or a {} as your friend", n.as_str())
-                        } else {
-                            bail!("you can't pick a joker as your friend",)
-                        }
-                    }
-                    if self.trump.suit().is_some() && friend.card.suit() == self.trump.suit() {
-                        bail!("you can't pick a trump suit as your friend")
-                    }
-                }
-                if friend.initial_skip >= self.num_decks {
-                    bail!("need to pick a card that exists!")
-                }
-
-                if let FriendSelectionPolicy::HighestCardNotAllowed =
-                    self.propagated.friend_selection_policy
-                {
-                    match (self.trump.number(), friend.card.number()) {
-                        (Some(Number::Ace), Some(Number::King)) | (_, Some(Number::Ace)) => {
-                            bail!("you can't pick the highest card as your friend")
-                        }
-                        _ => (),
-                    }
-                }
-
-                if let FriendSelectionPolicy::PointCardNotAllowed =
-                    self.propagated.friend_selection_policy
-                {
-                    let landlord = self.landlord;
-                    let landlord_level = self
-                        .propagated
-                        .players
-                        .iter()
-                        .find(|p| p.id == landlord)
-                        .ok_or_else(|| anyhow!("Couldn't find landlord level?"))?
-                        .rank();
-
-                    match (landlord_level, friend.card.points(), friend.card.number()) {
-                        (Rank::Number(Number::Ace), _, Some(Number::King)) => (),
-                        (_, Some(_), _) => {
-                            bail!("you can't pick a point card as your friend");
-                        }
-                        (_, _, _) => (),
-                    }
-                }
-
-                friends.push(Friend {
-                    card: friend.card,
-                    initial_skip: friend.initial_skip,
-                    skip: friend.initial_skip,
-                    player_id: None,
-                });
-            }
-
+            friends.extend(friend_set.iter().map(|friend| Friend {
+                card: friend.card,
+                initial_skip: friend.initial_skip,
+                skip: friend.initial_skip,
+                player_id: None,
+            }));
             Ok(())
         } else {
             bail!("not playing finding friends")
@@ -224,6 +272,7 @@ impl ExchangePhase {
             bail!("incorrect number of cards in the bottom")
         }
         self.finalized = true;
+        self.done_bidding.clear();
         Ok(())
     }
 
@@ -251,12 +300,13 @@ impl ExchangePhase {
                 number: self
                     .trump
                     .number()
-                    .expect("Shouldn't have trump number if there are bids"),
+                    .ok_or_else(|| anyhow!("suited bid requires a numbered trump level"))?,
             },
         };
         self.finalized = false;
         self.epoch += 1;
         self.exchanger = winning_bid.id;
+        self.done_bidding.clear();
 
         Ok(())
     }
@@ -265,7 +315,7 @@ impl ExchangePhase {
         if !self.finalized || self.autobid.is_some() {
             return false;
         }
-        Bid::bid(
+        let bid_made = Bid::bid(
             id,
             card,
             count,
@@ -279,7 +329,11 @@ impl ExchangePhase {
             self.propagated.joker_bid_policy,
             self.num_decks,
             self.epoch,
-        )
+        );
+        if bid_made {
+            self.done_bidding.clear();
+        }
+        bid_made
     }
 
     pub fn take_back_bid(&mut self, id: PlayerID) -> Result<(), Error> {
@@ -294,11 +348,86 @@ impl ExchangePhase {
             self.propagated.bid_takeback_policy,
             &mut self.bids,
             self.epoch,
-        )
+        )?;
+        self.done_bidding.clear();
+        Ok(())
+    }
+
+    pub fn set_done_bidding(&mut self, id: PlayerID, ready: bool) {
+        if ready {
+            if !self.done_bidding.contains(&id) {
+                self.done_bidding.push(id);
+            }
+        } else {
+            self.done_bidding.retain(|player| *player != id);
+        }
+    }
+
+    pub fn is_done_bidding(&self, id: PlayerID) -> bool {
+        self.done_bidding.contains(&id)
+    }
+
+    /// Every human other than the seat responsible for resolving this window
+    /// must explicitly pass. Bots are implicit; the standing winner resolves by
+    /// picking up, while a no-bid landlord resolves by beginning play.
+    pub fn all_humans_done_bidding(&self) -> bool {
+        let resolver = self
+            .current_epoch_winning_bid()
+            .map(|bid| bid.id)
+            .unwrap_or(self.landlord);
+        self.propagated
+            .players
+            .iter()
+            .filter(|player| self.propagated.is_bot(player.id).is_none())
+            .filter(|player| player.id != resolver)
+            .all(|player| self.done_bidding.contains(&player.id))
     }
 
     pub fn landlord(&self) -> PlayerID {
         self.landlord
+    }
+
+    pub fn exchanger(&self) -> PlayerID {
+        self.exchanger
+    }
+
+    pub fn finalized(&self) -> bool {
+        self.finalized
+    }
+
+    pub fn kitty_theft_enabled(&self) -> bool {
+        self.propagated.kitty_theft_policy == KittyTheftPolicy::AllowKittyTheft
+            && self.autobid.is_none()
+    }
+
+    /// Legal overbids for the current exchange epoch. Empty while the exchanger
+    /// is still arranging the kitty or when an auto-bid disables theft.
+    pub fn valid_bids(&self, id: PlayerID) -> Result<Vec<Bid>, Error> {
+        if !self.finalized || self.autobid.is_some() {
+            return Ok(vec![]);
+        }
+        Bid::valid_bids(
+            id,
+            &self.bids,
+            &self.hands,
+            &self.propagated.players,
+            self.propagated.landlord,
+            self.epoch,
+            self.propagated.bid_policy,
+            self.propagated.bid_reinforcement_policy,
+            self.propagated.joker_bid_policy,
+            self.num_decks,
+        )
+    }
+
+    /// The winning bid made since the most recent exchanger finalized, if any.
+    pub fn current_epoch_winning_bid(&self) -> Option<Bid> {
+        if self.bids.last().map(|b| b.epoch) != Some(self.epoch) {
+            return None;
+        }
+        Bid::first_and_winner(&self.bids, self.autobid)
+            .ok()
+            .map(|(_, winning)| winning)
     }
 
     /// The number of cards that belong in the kitty (buried pile).
@@ -403,6 +532,7 @@ impl ExchangePhase {
             landlords_team,
             self.removed_cards.clone(),
             self.decks.clone(),
+            self.bids.clone(),
         )
     }
 

@@ -215,6 +215,19 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
       ) : null;
 
     const lastBid = this.props.state.bids![this.props.state.bids!.length - 1];
+    const currentWinningBid =
+      lastBid !== undefined && lastBid.epoch === this.props.state.epoch
+        ? lastBid
+        : null;
+    const biddingResolver = currentWinningBid?.id ?? this.props.state.landlord;
+    const showDoneBidding =
+      playerId >= 0 &&
+      playerId !== biddingResolver &&
+      kittyTheftEnabled &&
+      this.props.state.finalized === true &&
+      this.props.state.autobid === null;
+    const isDoneBidding =
+      playerId >= 0 && (this.props.state.done_bidding ?? []).includes(playerId);
     const startGame = (
       <button
         onClick={this.startGame}
@@ -232,8 +245,7 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
     const bidUI =
       kittyTheftEnabled &&
       this.props.state.finalized &&
-      this.props.state.autobid === null &&
-      (!isExchanger || lastBid.epoch! + 1 !== this.props.state.epoch) ? (
+      this.props.state.autobid === null ? (
         <>
           <BidArea
             bids={this.props.state.bids!}
@@ -249,8 +261,8 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
             }
             jokerBidPolicy={this.props.state.propagated.joker_bid_policy!}
             numDecks={this.props.state.num_decks}
-            showDoneBidding={false}
-            isDoneBidding={false}
+            showDoneBidding={showDoneBidding}
+            isDoneBidding={isDoneBidding}
             header={
               <h2 className="mb-2 text-base font-bold uppercase tracking-wide text-[var(--text-on-felt)]">
                 {t("bid.round", { round: this.props.state.epoch! + 1 })}
@@ -261,8 +273,8 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
                 <button
                   onClick={this.pickUpKitty}
                   disabled={
-                    lastBid.id !== playerId ||
-                    lastBid.epoch !== this.props.state.epoch
+                    currentWinningBid === null ||
+                    currentWinningBid.id !== playerId
                   }
                   className="sj-btn"
                 >

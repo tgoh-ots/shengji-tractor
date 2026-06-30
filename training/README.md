@@ -1,118 +1,167 @@
-# Expert tier training (distillation → ONNX → tract)
+# Bot training
 
-> ⚠️ **PARTIALLY SUPERSEDED — `CLAUDE.md` (the "Retrain the Expert net" section) is
-> the source of truth for the CURRENT pipeline.** This file is accurate on the
-> distillation *concept* but lags on specifics. What changed since:
-> - The net is now **multi-task**: a policy head **and** an optional `tanh` **VALUE
->   head**, exported as a **2-output ONNX** (`score`, `value`) when value targets
->   are present. The CSV is now `group, f0..f35, label, value` (a `value` column).
-> - The leaf-eval **value blend** is gated by `SHENGJI_VALUE_WEIGHT` (default 0=OFF);
->   inference reads ONNX `output[1]`, scaled by `expert::VALUE_NORM`.
-> - **DAgger**: `GEN_BEHAVIOUR` (easy|expert|enoch|mix) picks the data-gen state
->   distribution; `GEN_TEACHER_BUDGET_MS` (default 400) sets label quality;
->   `GEN_SEED` shards data-gen.
-> - The whole generate→train→A/B run is automated + **resumable** by
->   `training/run_value_pipeline.sh`.
-> - Build/run with `cargo +1.92.0` (deps need rustc ≥ 1.87).
-> - The tiers are `Easy < Expert <= Enoch < Omniscient` (the old **"Hard" tier was
->   removed** — ignore any "Hard" mention below).
-> Treat the architecture/CSV/tier/invocation details below as historical.
+The committed Expert model remains the 36-feature policy-distillation baseline.
+The new pipeline is additive: it retains a policy head while training honest
+state-value and action-value heads, and never silently reinterprets a legacy
+model.
 
-The **Expert** bot difficulty is a small learned neural net that scores each
-legal candidate play and picks the best. It is trained by **behavioral cloning /
-distillation** of the **Omniscient** (perfect-information) teacher: for every
-play decision we record, per legal candidate, an *honest* feature vector plus a
-label = 1 on the candidate the teacher (which sees every hand) chose. The net
-therefore learns to approximate perfect-information play from the *honest*
-redacted view it will actually have at serving time. It never reads hidden hands.
+## Contracts
 
-The whole pipeline is pure-Rust at inference (via `tract-onnx`), so it builds in
-the musl deploy image with no `onnxruntime`/`ort` C dependency.
+The generator emits dataset schema 3. One row is one legal candidate; group
+identifies a decision and game_id the whole trajectory. Validation splits by
+whole game.
 
-## Pipeline
+The serving outputs are:
 
-```
-                 self-play (Rust)            PyTorch                 tract (Rust)
-gen_training_data ─────────────► data.csv ──► train_expert.py ──► expert_model.onnx ──► bot::expert
-   (Omniscient teacher labels,                (listwise softmax    (opset 13, [N,D]→[N,1])
-    HONEST features)                            cross-entropy)
-```
+1. score(o,a): listwise teacher or behavior policy logit.
+2. state_value(o): state-only value. Candidate fields are masked and it is
+   trained once per decision.
+3. action_q(o,a): candidate value, trained only where a counterfactual exists.
 
-### 1. Generate training data (Rust)
+Schema-v2 models use 49 honest features. The first 36 freeze the shipped policy
+contract. Additions cover role, score/threshold, exact public progress, action
+structure, full public card/void memory, and an exact mechanics-engine
+candidate-takes-the-lead signal. Manifests must declare schema 2, dimension 49,
+output names, and output semantics.
 
-```sh
-# From the repo root. The Omniscient teacher runs a perfect-info search at every
-# recorded decision. A LARGER budget gives stronger (less noisy) labels; the
-# per-game wall-clock barely grows because the perfect-info search usually
-# converges well before the budget. The shipped model was distilled from
-# 5000 games at a 500ms teacher budget.
-GEN_GAMES=5000 SHENGJI_BOT_BUDGET_MS=500 \
-  cargo run --release --example gen_training_data
-# -> writes training/data.csv  (group, f0..f35, label)
-```
+The primary threshold-aware target is:
 
-Each row is one *candidate*; rows sharing a `group` are the candidates of a
-single decision, and exactly one of them has `label == 1` (the teacher's pick).
-The feature encoding is defined once in `core/src/bot/expert.rs`
-(`candidate_features`, `FEATURE_DIM = 36`) and reused by both the exporter and the
-Rust inference path, so training and serving can never drift.
+    sign(actor team won) * (1 + levels awarded to the winner) / 5
 
-The 36-feature encoding mixes a compact candidate/trick/hand summary (indices
-0–27) with **honest card-memory** features (28–35) derived from
-`Knowledge::from_play_view`: the fraction of trumps still unseen, my share of the
-live trumps, whether the opponents still to act are known void in the led suit,
-points left unseen, my seat position, whether the candidate is an uncatchable
-top of its suit, and overall game progress. These were the lever that pushed the
-distilled net clearly above Hard — they are all computed from the redacted view
-+ public play history (never hidden hands), preserving the honesty invariant.
+It is clamped to [-1,1]. Adding one preserves a signal for a turnover/dead-zone
+win that awards zero levels. The CSV also records final attacker points, scoring
+bucket, actor-team win, and actor-team final-trick/kitty win for behavior V and
+sparse Q. The trainer consumes these with offline categorical/binary heads and
+reports bucket accuracy, Brier scores, and ten-bin ECE. Auxiliary heads are not
+exported to serving ONNX; the manifest states that explicitly.
 
-### 2. Train + export ONNX (Python)
+The old 36-feature optional V is normalized point margin. Runtime exposes
+separate typed APIs for legacy point V, v2 level V, and v2 level Q, preventing a
+level value from entering a point-valued blend.
 
-```sh
-cd training
-python3 -m venv .venv && . .venv/bin/activate     # recommended
-pip install -r requirements.txt                   # torch + onnx + numpy (large)
-python train_expert.py --data data.csv \
-  --out ../core/src/bot/expert_model.onnx          # defaults: hidden 128, 200 epochs
-```
+## Seeded generation
 
-The model is a 3-hidden-layer MLP (`FEATURE_DIM → 128 → 128 → 64 → 1`) with ReLU
-+ dropout, trained with a softmax cross-entropy over each decision's candidates
-(the teacher's candidate should get the top logit). It uses a cosine LR schedule
-and **early stopping** on val top-1 accuracy (`--patience`, default 25). The
-headline metric is **top-1 accuracy** = fraction of decisions where the net's
-argmax candidate equals the teacher's pick; compare it against the printed
-random-guess baseline (≈ 1 / avg-candidates).
+~~~sh
+GEN_GAMES=2 GEN_SEED=123 GEN_TEACHER_BUDGET_MS=10 \
+GEN_BEHAVIOUR=easy GEN_BEHAVIOUR_BUDGET_MS=5 \
+GEN_Q_CANDIDATES=2 GEN_Q_ROLLOUT_BEHAVIOUR=easy \
+GEN_Q_ROLLOUT_BUDGET_MS=5 GEN_OUT=/tmp/shengji-v3.csv \
+cargo +1.92.0 run --release -p shengji-core --example gen_training_data
+python3.13 training/train_expert.py --data /tmp/shengji-v3.csv --analyze
+~~~
 
-Dropout is a no-op in eval/export, so the exported graph is just Gemm/ReLU and
-loads cleanly in tract. It exports `expert_model.onnx` with input `x:[N,36]` →
-output `[N,1]` (opset 13, legacy TorchScript exporter via `dynamo=False`).
+Each deal seed is a stable SplitMix64 derivation of seed and game index, so
+sharding/resume order cannot change cards. Deal and behavior-mixture RNGs are
+isolated. Teacher, behavior, and Q continuation receive explicit per-call
+budgets; no process-global budget is shared. Time-bounded search may still vary
+across very different machines if simulation counts differ. Byte-identical
+labels require deterministic caps or enough time to exhaust the world cap.
 
-### 3. Use it (Rust)
+Q forces selected candidates into the same compatible real deal, after which
+every player acts from its own redacted view. Behavior and teacher actions are
+anchors when the Q cap permits. A blank Q cell means unsampled, not zero.
 
-`core/src/bot/expert.rs` `include_bytes!`s `expert_model.onnx`, parses it with
-`tract-onnx`, and scores all legal candidates of a decision in one inference
-call. If the model can't load/run (e.g. it's still the committed placeholder),
-the Expert tier transparently falls back to the **Hard** determinized search, so
-Expert is never illegal/None.
+Generation cost is dominated by teacher search and counterfactual completion.
+Candidate expansion can make early decisions wide; inspect rows per decision,
+Q coverage, drop counters, and elapsed time before scaling.
 
-### 4. Evaluate the ladder
+## Train, export, validate
 
-```sh
-cargo run --release --example eval     # prints Easy/Hard/Expert/Omniscient ladder
-```
+The macOS reference environment is fully pinned in requirements.lock.txt. The
+runner also records Python version, platform, and pip freeze --all, refusing
+resume after drift.
 
-## Training longer / stronger
+~~~sh
+python3.13 -m venv /tmp/shengji-train
+/tmp/shengji-train/bin/pip install -r training/requirements.lock.txt
+/tmp/shengji-train/bin/python training/train_expert.py \
+  --data /tmp/shengji-v3.csv --out /tmp/expert-v3.onnx \
+  --policy-weight 1 --value-weight 1 --q-weight 1 --auxiliary-weight .25
 
-- More data: raise `GEN_GAMES` (the shipped model used 5000; 8000+ helps a bit
-  more with diminishing returns).
-- Stronger teacher labels: raise `SHENGJI_BOT_BUDGET_MS` during generation so the
-  Omniscient search is deeper. This is nearly free in wall-clock because the
-  perfect-info search usually converges before the budget.
-- Bigger/longer net: `--hidden 192 --epochs 300` (early stopping caps the cost).
-- Richer honest features are the highest-leverage knob and already include the
-  remaining-trump counts, per-seat voids of the seats still to act, seat
-  position, and uncatchable-top detection (indices 28–35 of
-  `candidate_features`). Further honest signals (e.g. per-suit remaining high
-  cards, landlord-relative seat) can be added there — bump `FEATURE_DIM`, keep
-  the Python `FEATURE_DIM` in sync, and regenerate + retrain.
+cargo +1.92.0 run --release -p shengji-core \
+  --example validate_expert_model -- \
+  /tmp/expert-v3.onnx /tmp/expert-v3.onnx.manifest.json \
+  /tmp/expert-v3.onnx.golden.json
+~~~
+
+Export writes ONNX, a semantic/config/data/split/hash manifest, and deterministic
+PyTorch golden vectors. Rust runs those through tract and fails on shape,
+finiteness, or numerical drift.
+
+Legacy CSVs without trajectory IDs are accepted for analysis, but training
+refuses to call a decision-level pseudo split leakage-free. Historical
+reproduction needs --allow-legacy-group-split. Only widths 36 and 49 are valid.
+
+## Resumable DMC pipeline
+
+~~~sh
+WORKDIR=/tmp/shengji-dmc training/run_dmc_pilot.sh
+
+WORKDIR=$HOME/.shengji-action-value-run \
+NUM_SHARDS=16 GAMES_PER_SHARD=250 PAR=8 \
+training/run_value_pipeline.sh
+
+WORKDIR=$HOME/.shengji-action-value-run STATUS=1 \
+training/run_value_pipeline.sh
+~~~
+
+The DMC pilot also generates two belief games, trains a short experimental
+belief model, and runs validate_belief_model. Set RUN_BELIEF_PILOT=0 to skip
+that independent smoke stage.
+
+The runner uses set -euo pipefail, writes shard content/config manifests,
+validates headers and IDs, and marks completion only after all artifacts exist.
+Its config fingerprints core/src, mechanics/src, Cargo manifests/lock, and
+training sources by current file content, including dirty changes.
+
+After training it validates tract parity, then launches embedded and candidate
+models in separate processes so model OnceLock state cannot cross arms.
+Identical deals/budgets face the same Easy control. Candidate-minus-embedded
+per-deck win, margin, and level utility get paired bootstrap intervals;
+AB_MIN_LEVEL_DELTA is a quantitative gate.
+
+## Offline belief model
+
+~~~sh
+BELIEF_GAMES=20 BELIEF_SEED=77 BELIEF_SNAPSHOT_EVERY=4 \
+BELIEF_OUT=/tmp/belief.csv \
+cargo +1.92.0 run --release -p shengji-core --example gen_belief_data
+
+python3.13 training/train_belief.py --data /tmp/belief.csv \
+  --out /tmp/belief.onnx
+
+cargo +1.92.0 run --release -p shengji-core \
+  --example validate_belief_model -- \
+  /tmp/belief.onnx /tmp/belief.onnx.manifest.json \
+  /tmp/belief.onnx.golden.json
+~~~
+
+For each honest snapshot and hidden card copy, the exporter records public
+history/card/role/capacity/void features, a relative destination (next,
+opposite, previous, kitty), and hard legality mask. The trainer splits by game,
+masks illegal logits, and reports accuracy, NLL, multiclass Brier, ECE, and
+illegal probability mass.
+
+This first contract is intentionally narrow: CSV schema 1, exactly b0..b19,
+target order next/opposite/previous/kitty, and the
+tractor:4p:2x-standard:kitty8:no-removed game contract. Training requires the
+generator sidecar and validates its schema, width, target order, behavior, and
+declared game contract before reading rows. `--allow-unsafe-no-sidecar` exists
+only for exploration and marks the artifact non-servable. Export includes exact feature names and writes
+PyTorch golden vectors; validate_belief_model checks the manifest and numerical
+ONNX/tract parity for both feature and legality-mask inputs.
+
+The manifest marks the result as an experimental serving candidate. The runtime
+loader is opt-in and production defaults it off; promotion still requires
+evaluation of belief-guided determinization.
+
+Runtime belief weighting defaults off. A serving-path smoke must explicitly
+enable it, for example:
+
+~~~sh
+SHENGJI_BELIEF_MODEL_PATH=/tmp/belief.onnx \
+SHENGJI_BELIEF_MODEL_MANIFEST=/tmp/belief.onnx.manifest.json \
+SHENGJI_BELIEF_WEIGHT=0.35 SHENGJI_BOT_BUDGET_MS=20 \
+cargo +1.92.0 run --release -p shengji-core \
+  --example model_control_eval -- 2 48879
+~~~

@@ -56,6 +56,11 @@ const AddAIPlayer = (): JSX.Element => {
       <button type="button" className="sj-btn sj-btn-primary" onClick={addBot}>
         + {t("ai.add")}
       </button>
+      {difficulty === "Omniscient" && (
+        <span className="text-sm font-semibold text-[#b91c1c]" role="status">
+          ⚠ {t("ai.omniscientWarning")}
+        </span>
+      )}
     </div>
   );
 };

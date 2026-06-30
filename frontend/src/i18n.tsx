@@ -78,7 +78,8 @@ const en: Dict = {
   "ai.difficulty.Expert": "Expert",
   "ai.difficulty.Enoch": "Enoch",
   "ai.difficulty.Grandmaster": "Grandmaster",
-  "ai.difficulty.Omniscient": "Omniscient",
+  "ai.difficulty.Omniscient": "Omniscient (cheats)",
+  "ai.omniscientWarning": "Cheating tier: sees every player's hand.",
   "ai.botLabel": "Bot",
 
   // Shengji terms
@@ -247,7 +248,8 @@ const zh: Dict = {
   "ai.difficulty.Expert": "专家",
   "ai.difficulty.Enoch": "Enoch（大师）",
   "ai.difficulty.Grandmaster": "宗师",
-  "ai.difficulty.Omniscient": "全知",
+  "ai.difficulty.Omniscient": "全知（作弊）",
+  "ai.omniscientWarning": "作弊难度：可以看到所有玩家的手牌。",
   "ai.botLabel": "机器人",
 
   "term.trump": "主牌",

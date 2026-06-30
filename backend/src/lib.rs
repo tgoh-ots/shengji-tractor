@@ -56,6 +56,7 @@ pub mod wasm_rpc_handler;
 use security::{OriginPolicy, ResourceLimits, DEFAULT_ALLOWED_ORIGINS, MAX_INBOUND_MESSAGE_BYTES};
 
 use serving_types::{CardsBlob, VersionedGame};
+use shengji_handler::BotRuntime;
 use state_dump::InMemoryStats;
 
 /// Our global unique user id counter.
@@ -129,6 +130,23 @@ pub fn build_app(
     origin_policy: OriginPolicy,
     resource_limits: Arc<ResourceLimits>,
 ) -> Router {
+    let bot_runtime = BotRuntime::new(resource_limits.max_parallel_bot_searches);
+    build_app_with_bot_runtime(
+        backend_storage,
+        stats,
+        origin_policy,
+        resource_limits,
+        bot_runtime,
+    )
+}
+
+fn build_app_with_bot_runtime(
+    backend_storage: HashMapStorage<VersionedGame>,
+    stats: Arc<Mutex<InMemoryStats>>,
+    origin_policy: OriginPolicy,
+    resource_limits: Arc<ResourceLimits>,
+    bot_runtime: BotRuntime,
+) -> Router {
     let app = Router::new()
         .route(
             "/api",
@@ -172,7 +190,8 @@ pub fn build_app(
         .layer(Extension(backend_storage))
         .layer(Extension(stats))
         .layer(Extension(origin_policy))
-        .layer(Extension(resource_limits));
+        .layer(Extension(resource_limits))
+        .layer(Extension(bot_runtime));
 
     apply_security_headers(app)
 }
@@ -233,14 +252,23 @@ pub async fn run() -> Result<(), anyhow::Error> {
         );
     }
 
-    let resource_limits = ResourceLimits::from_env();
+    let resource_limits = Arc::new(ResourceLimits::from_env());
     info!(ROOT_LOGGER, "Resource limits configured"; "limits" => format!("{resource_limits:?}"));
 
-    let app = build_app(
+    let bot_runtime = BotRuntime::new(resource_limits.max_parallel_bot_searches);
+    shengji_handler::resume_restored_bot_rooms(
+        ROOT_LOGGER.new(o!("component" => "bot-resume")),
+        backend_storage.clone(),
+        bot_runtime.clone(),
+    )
+    .await;
+
+    let app = build_app_with_bot_runtime(
         backend_storage,
         stats,
         origin_policy,
-        Arc::new(resource_limits),
+        resource_limits,
+        bot_runtime,
     );
 
     axum::Server::bind(&SocketAddr::from(([0, 0, 0, 0], 3030)))
@@ -342,11 +370,15 @@ struct GameStats {
     num_games_created: u64,
     num_active_games: usize,
     num_players_online_now: usize,
+    active_bot_room_drivers: usize,
+    active_bot_searches: usize,
+    max_parallel_bot_searches: usize,
     sha: &'static str,
 }
 
 async fn get_stats(
     Extension(backend_storage): Extension<HashMapStorage<VersionedGame>>,
+    Extension(bot_runtime): Extension<BotRuntime>,
 ) -> Result<Json<GameStats>, &'static str> {
     let num_games_created = backend_storage
         .clone()
@@ -362,6 +394,9 @@ async fn get_stats(
         num_games_created,
         num_players_online_now,
         num_active_games,
+        active_bot_room_drivers: bot_runtime.active_room_drivers(),
+        active_bot_searches: bot_runtime.active_searches(),
+        max_parallel_bot_searches: bot_runtime.max_parallel_searches(),
         sha: &VERSION,
     }))
 }
@@ -409,6 +444,7 @@ pub async fn handle_websocket(
     Extension(backend_storage): Extension<HashMapStorage<VersionedGame>>,
     Extension(stats): Extension<Arc<Mutex<InMemoryStats>>>,
     Extension(resource_limits): Extension<Arc<ResourceLimits>>,
+    Extension(bot_runtime): Extension<BotRuntime>,
 ) -> impl IntoResponse {
     // Cap the size of inbound frames so a single oversized message can't be used
     // to exhaust memory. A move is at most a few hundred bytes.
@@ -493,6 +529,7 @@ pub async fn handle_websocket(
             backend_storage,
             stats,
             resource_limits,
+            bot_runtime,
         )
     })
     .into_response()

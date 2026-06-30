@@ -1,8 +1,10 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
 
 use anyhow::bail;
 use slog::{debug, error, info, o, Logger};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 
 use shengji_core::bot::{
     apply_planned_bot_action, classify_next_bot_work, plan_next_bot_action, BotPause, BotStep,
@@ -20,9 +22,119 @@ use crate::{
     },
     serving_types::{JoinRoom, UserMessage, VersionedGame},
     state_dump::InMemoryStats,
-    utils::{execute_immutable_operation, execute_operation},
+    utils::{
+        execute_immutable_operation, execute_operation, execute_operation_at_version,
+        VersionedOperationOutcome,
+    },
     ZSTD_COMPRESSOR,
 };
+
+#[derive(Debug, Default)]
+struct RoomDriveState {
+    /// At least one request arrived while this room's driver was running.  The
+    /// active driver performs one more complete pass before releasing the room,
+    /// which closes the otherwise-racy "request arrived just before exit" gap.
+    dirty: bool,
+}
+
+/// Process-wide coordination for bot work.
+///
+/// There may be many WebSocket connections per room, each of which can observe
+/// and trigger the same state transition.  `rooms` makes bot driving
+/// single-flight per room with a dirty/re-run bit, while `search_slots` bounds
+/// CPU-heavy planning globally so wall-clock search budgets remain meaningful on
+/// small deployments.
+#[derive(Clone, Debug)]
+pub struct BotRuntime {
+    rooms: Arc<StdMutex<HashMap<String, RoomDriveState>>>,
+    search_slots: Arc<Semaphore>,
+    max_parallel_searches: usize,
+}
+
+impl BotRuntime {
+    pub fn new(max_parallel_searches: usize) -> Self {
+        let max_parallel_searches = max_parallel_searches.max(1);
+        Self {
+            rooms: Arc::new(StdMutex::new(HashMap::new())),
+            search_slots: Arc::new(Semaphore::new(max_parallel_searches)),
+            max_parallel_searches,
+        }
+    }
+
+    pub fn active_room_drivers(&self) -> usize {
+        self.rooms.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    pub fn active_searches(&self) -> usize {
+        self.max_parallel_searches
+            .saturating_sub(self.search_slots.available_permits())
+    }
+
+    pub fn max_parallel_searches(&self) -> usize {
+        self.max_parallel_searches
+    }
+
+    /// Request a drive for `room`.  The first caller receives a lease and starts
+    /// the task; later callers only mark the running task dirty.
+    fn request_drive(&self, room: &str) -> Option<RoomDriveLease> {
+        let mut rooms = self.rooms.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(state) = rooms.get_mut(room) {
+            state.dirty = true;
+            return None;
+        }
+        rooms.insert(room.to_owned(), RoomDriveState::default());
+        Some(RoomDriveLease {
+            runtime: self.clone(),
+            room: room.to_owned(),
+            active: true,
+        })
+    }
+}
+
+impl Default for BotRuntime {
+    fn default() -> Self {
+        Self::new(1)
+    }
+}
+
+/// RAII lease for one room's bot driver.  Dropping a cancelled/panicked task
+/// clears the room, so a later user action can always restart it.
+struct RoomDriveLease {
+    runtime: BotRuntime,
+    room: String,
+    active: bool,
+}
+
+impl RoomDriveLease {
+    /// Finish one driver pass.  Returns true when an overlapping request marked
+    /// the room dirty and another pass is required.
+    fn continue_if_dirty(&mut self) -> bool {
+        let mut rooms = self.runtime.rooms.lock().unwrap_or_else(|p| p.into_inner());
+        match rooms.get_mut(&self.room) {
+            Some(state) if state.dirty => {
+                state.dirty = false;
+                true
+            }
+            _ => {
+                rooms.remove(&self.room);
+                self.active = false;
+                false
+            }
+        }
+    }
+}
+
+impl Drop for RoomDriveLease {
+    fn drop(&mut self) {
+        if self.active {
+            self.runtime
+                .rooms
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&self.room);
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn entrypoint<
@@ -36,6 +148,7 @@ pub async fn entrypoint<
     backend_storage: S,
     stats: Arc<Mutex<InMemoryStats>>,
     resource_limits: Arc<ResourceLimits>,
+    bot_runtime: BotRuntime,
 ) {
     let _ = handle_user_connected(
         tx,
@@ -45,6 +158,7 @@ pub async fn entrypoint<
         backend_storage,
         stats,
         resource_limits,
+        bot_runtime,
     )
     .await;
 }
@@ -91,6 +205,7 @@ async fn handle_user_connected<
     backend_storage: S,
     stats: Arc<Mutex<InMemoryStats>>,
     resource_limits: Arc<ResourceLimits>,
+    bot_runtime: BotRuntime,
 ) -> Result<(), anyhow::Error> {
     let (room, name, disable_compression) = loop {
         if let Some(msg) = rx.recv().await {
@@ -189,6 +304,17 @@ async fn handle_user_connected<
     info!(logger, "Successfully registered user");
     let _ = subscribe_player_id_tx.send(player_id);
 
+    // A persisted room may have been restored while a bot was responsible for
+    // the next action.  Registration is the first event after wake/reconnect, so
+    // request a drive here as well as after explicit user actions.
+    request_bot_drive(
+        logger.clone(),
+        ws_id,
+        room.clone(),
+        backend_storage.clone(),
+        bot_runtime.clone(),
+    );
+
     run_game_for_player(
         logger.clone(),
         ws_id,
@@ -197,6 +323,7 @@ async fn handle_user_connected<
         name,
         backend_storage.clone(),
         rx,
+        bot_runtime,
     )
     .await;
 
@@ -356,6 +483,7 @@ async fn run_game_for_player<
     name: String,
     backend_storage: S,
     mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    bot_runtime: BotRuntime,
 ) {
     debug!(logger, "Entering main game loop");
     // Handle the main game loop
@@ -370,6 +498,7 @@ async fn run_game_for_player<
                     name.clone(),
                     backend_storage.clone(),
                     msg,
+                    bot_runtime.clone(),
                 )
                 .await
                 {
@@ -407,6 +536,7 @@ async fn handle_user_action<S: Storage<VersionedGame, E> + 'static, E: Send + 's
     name: String,
     backend_storage: S,
     msg: UserMessage,
+    bot_runtime: BotRuntime,
 ) -> Result<(), E> {
     match msg {
         UserMessage::Beep => {
@@ -554,15 +684,82 @@ async fn handle_user_action<S: Storage<VersionedGame, E> + 'static, E: Send + 's
             // human is done, the bot finalizes itself here, with no timer and no
             // forced finalization. An all-bot table has zero humans, so "all humans
             // done" is trivially true and the bot proceeds immediately (no deadlock).
-            tokio::task::spawn(drive_bots_non_blocking(
+            request_bot_drive(
                 logger,
                 ws_id,
                 room_name.to_string(),
                 backend_storage,
-            ));
+                bot_runtime,
+            );
         }
     }
     Ok(())
+}
+
+fn request_bot_drive<S: Storage<VersionedGame, E> + 'static, E: Send + 'static>(
+    logger: Logger,
+    ws_id: usize,
+    room_name: String,
+    backend_storage: S,
+    bot_runtime: BotRuntime,
+) {
+    if let Some(mut lease) = bot_runtime.request_drive(&room_name) {
+        let runtime = bot_runtime.clone();
+        tokio::task::spawn(async move {
+            loop {
+                drive_bots_non_blocking(
+                    logger.clone(),
+                    ws_id,
+                    room_name.clone(),
+                    backend_storage.clone(),
+                    runtime.clone(),
+                )
+                .await;
+                if !lease.continue_if_dirty() {
+                    break;
+                }
+            }
+        });
+    } else {
+        debug!(logger, "Coalesced bot-drive request into active room task");
+    }
+}
+
+/// Resume bot-owned turns in rooms restored from the state dump.  Rooms parked
+/// on a human remain untouched; all-bot or bot-to-act rooms continue without
+/// waiting for an unrelated WebSocket action after process restart.
+pub async fn resume_restored_bot_rooms<
+    S: Storage<VersionedGame, E> + 'static,
+    E: Send + std::fmt::Debug + 'static,
+>(
+    logger: Logger,
+    backend_storage: S,
+    bot_runtime: BotRuntime,
+) {
+    let keys = match backend_storage.clone().get_all_keys().await {
+        Ok(keys) => keys,
+        Err(error) => {
+            error!(logger, "Unable to enumerate restored rooms for bot resume"; "error" => format!("{error:?}"));
+            return;
+        }
+    };
+    let mut requested = 0usize;
+    for key in keys {
+        let Ok(room_name) = String::from_utf8(key) else {
+            continue;
+        };
+        requested += 1;
+        request_bot_drive(
+            logger.clone(),
+            0,
+            room_name,
+            backend_storage.clone(),
+            bot_runtime.clone(),
+        );
+    }
+    if requested > 0 {
+        info!(logger, "Requested bot resume for restored rooms"; "rooms" => requested);
+    }
 }
 
 /// Default human-visible pause (milliseconds) before a bot clears a trick it
@@ -597,12 +794,18 @@ fn bot_pause(kind: BotPause) -> std::time::Duration {
 /// without mutating or re-versioning it. Used by `drive_bots_non_blocking` to
 /// snapshot the state the bot needs BEFORE computing its move off the lock.
 /// Returns `None` if the read failed (e.g. the room vanished).
+#[derive(Clone)]
+struct BotSnapshot {
+    state: GameState,
+    version: u64,
+}
+
 async fn snapshot_state<S: Storage<VersionedGame, E> + 'static, E: Send + 'static>(
     ws_id: usize,
     room_name: &str,
     backend_storage: S,
-) -> Option<GameState> {
-    let captured: Arc<std::sync::Mutex<Option<GameState>>> = Arc::new(std::sync::Mutex::new(None));
+) -> Option<BotSnapshot> {
+    let captured: Arc<StdMutex<Option<BotSnapshot>>> = Arc::new(StdMutex::new(None));
     let sink = captured.clone();
     // `execute_immutable_operation` runs the closure with `&InteractiveGame` and
     // does NOT bump the version or publish a State, so this is a pure read.
@@ -610,16 +813,17 @@ async fn snapshot_state<S: Storage<VersionedGame, E> + 'static, E: Send + 'stati
         ws_id,
         room_name,
         backend_storage,
-        move |game, _| {
+        move |game, version| {
             if let Ok(state) = game.dump_state() {
-                *sink.lock().unwrap() = Some(state);
+                *sink.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(BotSnapshot { state, version });
             }
             Ok(vec![])
         },
         "snapshot game state",
     )
     .await;
-    let state = captured.lock().unwrap().take();
+    let state = captured.lock().unwrap_or_else(|p| p.into_inner()).take();
     state
 }
 
@@ -643,21 +847,19 @@ async fn snapshot_state<S: Storage<VersionedGame, E> + 'static, E: Send + 'stati
 ///   2. **Compute** the move with `plan_next_bot_action` on a
 ///      `tokio::task::spawn_blocking` worker — OFF the async runtime AND off the lock
 ///      — so neither the lock nor an async worker is blocked for the up-to-1s search;
-///   3. **Apply** the precomputed step under a brief lock via
-///      `apply_planned_bot_action`, which first cheaply re-checks (no policy/search)
-///      that the SAME bot is still responsible for the SAME kind of action. If the
-///      world moved on during the off-lock compute (a human finished the trick, a
-///      takeback/reset happened, the game ended, ...), the stale step is DROPPED and
-///      we re-snapshot/re-plan on the next loop — no double-apply.
+///   3. **Apply** the precomputed step under a brief lock only if the room's
+///      monotonic version still exactly matches the snapshot, then also re-check
+///      the expected actor/action kind. If the world moved on, the stale step is
+///      a true no-op and we re-snapshot/re-plan — no double-apply.
 ///
 /// Pacing is preserved exactly:
 ///
-/// * `BotStep::pause == Some(TrickClear)` — a bot is about to finish a trick it
-///   won. The completed 4-card trick is already on the table (published by the prior
-///   play). We sleep the longer trick-clear beat WITHOUT the lock, THEN apply the
+/// * Planning begins immediately after the previous action.  Publication waits
+///   only for any remainder of the visible action beat, so thinking and pacing
+///   overlap.
+/// * `BotStep::pause == Some(TrickClear)` keeps the completed trick visible until
+///   the longer deadline measured from the last card's publication, then applies
 ///   `EndTrick`.
-/// * `Some(Action)` — apply the move, publish, then sleep the shorter per-action
-///   beat WITHOUT the lock.
 ///
 /// The done-bidding PARK is preserved: when a bot holds the standing bid and a human
 /// could still outbid, both the burst and `plan_next_bot_action` make no move, so
@@ -669,7 +871,14 @@ async fn drive_bots_non_blocking<S: Storage<VersionedGame, E> + 'static, E: Send
     ws_id: usize,
     room_name: String,
     backend_storage: S,
+    bot_runtime: BotRuntime,
 ) {
+    // The time at which the previous visible bot action was applied.  We plan
+    // the next action immediately and delay only its publication, allowing the
+    // configured human-visible beat to overlap CPU search instead of adding to
+    // it.  This is local to one continuous pass; a human-triggered later pass
+    // starts with no artificial delay.
+    let mut last_visible_apply: Option<Instant> = None;
     // A generous bound on chained paceable bot steps within a single hand (many
     // short per-action pauses can chain across a multi-trick run), so a wedged
     // state can never spin this task forever.
@@ -683,7 +892,7 @@ async fn drive_bots_non_blocking<S: Storage<VersionedGame, E> + 'static, E: Send
             None => break,
         };
         let work = {
-            let game = InteractiveGame::new_from_state(snapshot.clone());
+            let game = InteractiveGame::new_from_state(snapshot.state.clone());
             classify_next_bot_work(&game, true).unwrap_or(NextBotWork::None)
         };
 
@@ -738,9 +947,20 @@ async fn drive_bots_non_blocking<S: Storage<VersionedGame, E> + 'static, E: Send
         // the async runtime. The determinized search is CPU-bound with no await
         // points, so it must run on a blocking worker to avoid starving an async
         // worker thread.
+        let wait_started = Instant::now();
+        let search_permit = match bot_runtime.search_slots.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => break,
+        };
+        let queue_ms = wait_started.elapsed().as_secs_f64() * 1000.0;
+        if queue_ms >= 1.0 {
+            debug!(logger, "Bot planner waited for global CPU slot"; "queue_ms" => queue_ms);
+        }
         let plan_logger = logger.clone();
+        let snapshot_version = snapshot.version;
+        let snapshot_state = snapshot.state;
         let planned = tokio::task::spawn_blocking(move || {
-            let game = InteractiveGame::new_from_state(snapshot);
+            let game = InteractiveGame::new_from_state(snapshot_state);
             match plan_next_bot_action(&game, true) {
                 Ok(step) => step,
                 Err(e) => {
@@ -750,6 +970,7 @@ async fn drive_bots_non_blocking<S: Storage<VersionedGame, E> + 'static, E: Send
             }
         })
         .await;
+        drop(search_permit);
 
         let step: BotStep = match planned {
             Ok(Some(step)) => step,
@@ -762,11 +983,23 @@ async fn drive_bots_non_blocking<S: Storage<VersionedGame, E> + 'static, E: Send
             }
         };
 
-        // For a trick-clear beat, the completed trick is already on the table
-        // (published by the prior play). Wait the longer beat WITHOUT the lock
-        // BEFORE applying the EndTrick, so the human sees the full trick.
-        if matches!(step.pause, Some(BotPause::TrickClear)) {
-            tokio::time::sleep(bot_pause(BotPause::TrickClear)).await;
+        // Search has already run.  Wait only the REMAINDER of the visible beat
+        // before publishing this step.  A trick-clear deadline is measured from
+        // the last card appearing, not from the end of the next planning call.
+        let not_before = match step.pause {
+            Some(BotPause::TrickClear) => Some(
+                last_visible_apply
+                    .map(|t| t + bot_pause(BotPause::TrickClear))
+                    .unwrap_or_else(|| Instant::now() + bot_pause(BotPause::TrickClear)),
+            ),
+            Some(BotPause::Action) => last_visible_apply.map(|t| t + bot_pause(BotPause::Action)),
+            None => None,
+        };
+        if let Some(deadline) = not_before {
+            let now = Instant::now();
+            if deadline > now {
+                tokio::time::sleep(deadline.duration_since(now)).await;
+            }
         }
 
         // Apply the precomputed step under a brief lock, re-checking the world
@@ -776,21 +1009,19 @@ async fn drive_bots_non_blocking<S: Storage<VersionedGame, E> + 'static, E: Send
         // `apply_planned_bot_action` returns `None` when it DROPS the step (the
         // world changed since the snapshot); `Some(..)` when it applies (the
         // broadcast list may be empty for a kitty/exchange step that still mutates).
-        let applied = Arc::new(std::sync::Mutex::new(false));
-        let applied_in_op = applied.clone();
-        execute_operation(
+        let outcome = execute_operation_at_version(
             ws_id,
             &room_name,
             backend_storage.clone(),
-            move |game, _, _| match apply_planned_bot_action(game, &step, true, &op_logger)? {
-                Some(broadcasts) => {
-                    *applied_in_op.lock().unwrap() = true;
-                    Ok(broadcasts
+            snapshot_version,
+            move |game, _| match apply_planned_bot_action(game, &step, true, &op_logger)? {
+                Some(broadcasts) => Ok(Some(
+                    broadcasts
                         .into_iter()
                         .map(|(data, message)| GameMessage::Broadcast { data, message })
-                        .collect())
-                }
-                None => Ok(vec![]),
+                        .collect(),
+                )),
+                None => Ok(None),
             },
             "drive bots (non-blocking)",
         )
@@ -799,15 +1030,18 @@ async fn drive_bots_non_blocking<S: Storage<VersionedGame, E> + 'static, E: Send
         // If the precomputed step was dropped by the re-check (the world changed
         // out from under us, e.g. a human finished the trick during the compute),
         // re-burst/re-snapshot and re-plan rather than pausing on a stale beat.
-        if !*applied.lock().unwrap() {
-            continue;
+        match outcome {
+            VersionedOperationOutcome::Applied => {}
+            VersionedOperationOutcome::Stale => continue,
+            VersionedOperationOutcome::Failed => break,
         }
 
-        // Per-action beat: pause briefly WITHOUT the lock so the human can register
-        // the single move before the next bot acts. Trick-clear already slept above
-        // (before applying).
         if matches!(pause_after_apply, Some(BotPause::Action)) {
-            tokio::time::sleep(bot_pause(BotPause::Action)).await;
+            last_visible_apply = Some(Instant::now());
+        } else if matches!(pause_after_apply, Some(BotPause::TrickClear)) {
+            // The completed trick has now been cleared; the next lead does not
+            // inherit the prior card's display deadline.
+            last_visible_apply = None;
         }
     }
 }
@@ -840,4 +1074,36 @@ async fn user_disconnected<S: Storage<VersionedGame, E>, E: Send>(
         "parent_span" => format!("{room}:{parent}"),
         "span" => format!("{room}:ws_{ws_id}")
     );
+}
+
+#[cfg(test)]
+mod bot_runtime_tests {
+    use super::BotRuntime;
+
+    #[test]
+    fn room_drives_are_singleflight_and_dirty_requests_are_not_lost() {
+        let runtime = BotRuntime::new(2);
+        let mut lease = runtime.request_drive("room").expect("first request starts");
+
+        assert!(runtime.request_drive("room").is_none());
+        assert!(runtime.request_drive("room").is_none());
+        assert!(
+            lease.continue_if_dirty(),
+            "overlap requests require another pass"
+        );
+        assert!(
+            !lease.continue_if_dirty(),
+            "room is released after a clean pass"
+        );
+
+        assert!(runtime.request_drive("room").is_some());
+    }
+
+    #[test]
+    fn dropping_a_driver_lease_releases_the_room() {
+        let runtime = BotRuntime::new(1);
+        let lease = runtime.request_drive("room").expect("first request starts");
+        drop(lease);
+        assert!(runtime.request_drive("room").is_some());
+    }
 }

@@ -1,159 +1,338 @@
 #!/usr/bin/env bash
-#
-# Resumable, parallel value-head training + A/B pipeline.
-#
-# Runs the full headline experiment end-to-end: DAgger (`GEN_BEHAVIOUR=mix`)
-# data generation -> train the value head -> paired A/B of the search leaf-eval
-# value blend (SHENGJI_VALUE_WEIGHT off vs on). It is a MULTI-HOUR job, so it is
-# CHECKPOINTED and RESUMABLE: every stage writes durable markers in $WORKDIR, and
-# **re-running this script simply continues from the last completed step**. Safe to
-# kill / sleep / reboot and re-run.
-#
-#   bash training/run_value_pipeline.sh            # start (or resume)
-#   tail -f "$HOME/.shengji-value-run/run.log"     # watch progress
-#   STATUS=1 bash training/run_value_pipeline.sh   # just print which stages are done
-#
-# Tunables (env, with defaults): NUM_SHARDS, GAMES_PER_SHARD, GEN_TEACHER_BUDGET_MS,
-# GEN_MIX_SEARCH_FRAC, BASE_SEED, AB_PAIRS, AB_BUDGET_MS, AB_SEED, EPOCHS, PAR,
-# WORKDIR, CARGO.
-set -u
+# Resumable schema-v3 dataset / schema-v2 model policy + state-V + action-Q pipeline.
+set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
-WORKDIR="${WORKDIR:-$HOME/.shengji-value-run}"
-NUM_SHARDS="${NUM_SHARDS:-14}"
-GAMES_PER_SHARD="${GAMES_PER_SHARD:-150}"     # 14 x 150 = 2100 mix games
+WORKDIR="${WORKDIR:-$HOME/.shengji-action-value-run}"
+NUM_SHARDS="${NUM_SHARDS:-8}"
+GAMES_PER_SHARD="${GAMES_PER_SHARD:-100}"
 GEN_TEACHER_BUDGET_MS="${GEN_TEACHER_BUDGET_MS:-200}"
+GEN_BEHAVIOUR_BUDGET_MS="${GEN_BEHAVIOUR_BUDGET_MS:-80}"
+GEN_BEHAVIOUR="${GEN_BEHAVIOUR:-mix}"
 GEN_MIX_SEARCH_FRAC="${GEN_MIX_SEARCH_FRAC:-0.5}"
+GEN_Q_CANDIDATES="${GEN_Q_CANDIDATES:-2}"
+GEN_Q_ROLLOUT_BEHAVIOUR="${GEN_Q_ROLLOUT_BEHAVIOUR:-easy}"
+GEN_Q_ROLLOUT_BUDGET_MS="${GEN_Q_ROLLOUT_BUDGET_MS:-20}"
 BASE_SEED="${BASE_SEED:-1000}"
-AB_PAIRS="${AB_PAIRS:-200}"                   # 200 deck-pairs -> ~+-4pp 95% MDE
+EPOCHS="${EPOCHS:-80}"
+POLICY_WEIGHT="${POLICY_WEIGHT:-1.0}"
+VALUE_WEIGHT="${VALUE_WEIGHT:-1.0}"
+Q_WEIGHT="${Q_WEIGHT:-1.0}"
+AUXILIARY_WEIGHT="${AUXILIARY_WEIGHT:-0.25}"
+POLICY_TARGET="${POLICY_TARGET:-teacher}"
+EARLY_STOP_METRIC="${EARLY_STOP_METRIC:-policy}"
+AB_PAIRS="${AB_PAIRS:-200}"
 AB_BUDGET_MS="${AB_BUDGET_MS:-150}"
 AB_SEED="${AB_SEED:-0x5EED}"
-EPOCHS="${EPOCHS:-80}"
+AB_MIN_LEVEL_DELTA="${AB_MIN_LEVEL_DELTA:--0.05}"
+RUN_AB="${RUN_AB:-1}"
 CARGO="${CARGO:-cargo +1.92.0}"
+PYTHON="${PYTHON:-python3.13}"
 NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
-PAR="${PAR:-$(( NCPU > 1 ? NCPU - 1 : 1 ))}"
+PAR="${PAR:-$((NCPU > 1 ? NCPU - 1 : 1))}"
 
 mkdir -p "$WORKDIR"
 LOG="$WORKDIR/run.log"
-say() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
-
 VENV="$WORKDIR/venv"
 GEN="$REPO/target/release/examples/gen_training_data"
-PEVAL="$REPO/target/release/examples/paired_eval"
+CONTROL="$REPO/target/release/examples/model_control_eval"
+VALIDATOR="$REPO/target/release/examples/validate_expert_model"
 FULL="$WORKDIR/data_full.csv"
-MODEL="$WORKDIR/value.onnx"
+MODEL="$WORKDIR/action_value.onnx"
+CONFIG="$WORKDIR/config.json"
+read -r -a CARGO_CMD <<<"$CARGO"
 
-# ---- STATUS=1: report progress and exit ----
-if [ "${STATUS:-0}" = "1" ]; then
+say() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
+
+# Lock every resumability-relevant input. Reusing marker files under a changed
+# teacher, schema, source tree, or trainer setting is a hard error, not a warning.
+CONFIG_CANDIDATE="$WORKDIR/config.candidate.json"
+export REPO NUM_SHARDS GAMES_PER_SHARD GEN_TEACHER_BUDGET_MS GEN_BEHAVIOUR
+export GEN_BEHAVIOUR_BUDGET_MS GEN_MIX_SEARCH_FRAC GEN_Q_CANDIDATES
+export GEN_Q_ROLLOUT_BEHAVIOUR GEN_Q_ROLLOUT_BUDGET_MS BASE_SEED
+export EPOCHS POLICY_WEIGHT VALUE_WEIGHT Q_WEIGHT AUXILIARY_WEIGHT POLICY_TARGET EARLY_STOP_METRIC
+export AB_PAIRS AB_BUDGET_MS AB_SEED AB_MIN_LEVEL_DELTA RUN_AB CARGO PYTHON
+python3 - "$CONFIG_CANDIDATE" <<'PY'
+import hashlib, json, os, subprocess, sys
+repo = os.environ["REPO"]
+def digest(path):
+    h = hashlib.sha256()
+    with open(os.path.join(repo, path), "rb") as f:
+        h.update(f.read())
+    return h.hexdigest()
+def tree_digest(paths):
+    h = hashlib.sha256()
+    files = []
+    for relative in paths:
+        absolute = os.path.join(repo, relative)
+        if os.path.isdir(absolute):
+            for root, _dirs, names in os.walk(absolute):
+                files.extend(os.path.join(root, name) for name in names)
+        else:
+            files.append(absolute)
+    for absolute in sorted(files):
+        relative = os.path.relpath(absolute, repo)
+        h.update(relative.encode() + b"\0")
+        with open(absolute, "rb") as f:
+            for block in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(block)
+    return h.hexdigest()
+keys = [
+    "NUM_SHARDS", "GAMES_PER_SHARD", "GEN_TEACHER_BUDGET_MS",
+    "GEN_BEHAVIOUR", "GEN_BEHAVIOUR_BUDGET_MS", "GEN_MIX_SEARCH_FRAC",
+    "GEN_Q_CANDIDATES", "GEN_Q_ROLLOUT_BEHAVIOUR", "GEN_Q_ROLLOUT_BUDGET_MS",
+    "BASE_SEED", "EPOCHS", "POLICY_WEIGHT", "VALUE_WEIGHT", "Q_WEIGHT",
+    "AUXILIARY_WEIGHT",
+    "POLICY_TARGET", "EARLY_STOP_METRIC", "AB_PAIRS", "AB_BUDGET_MS",
+    "AB_SEED", "AB_MIN_LEVEL_DELTA", "RUN_AB", "CARGO", "PYTHON",
+]
+config = {key.lower(): os.environ[key] for key in keys}
+config.update({
+    "manifest_version": 1,
+    "git_head": subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+    ).strip(),
+    "generator_sha256": digest("core/examples/gen_training_data.rs"),
+    "feature_code_sha256": digest("core/src/bot/expert.rs"),
+    "trainer_sha256": digest("training/train_expert.py"),
+    "validator_sha256": digest("core/examples/validate_expert_model.rs"),
+    "python_lock_sha256": digest("training/requirements.lock.txt"),
+    "ab_runner_sha256": digest("training/run_model_ab.sh"),
+    "model_control_eval_sha256": digest("core/examples/model_control_eval.rs"),
+    "generator_dependency_tree_sha256": tree_digest([
+        "core/src", "mechanics/src", "core/Cargo.toml", "mechanics/Cargo.toml",
+        "Cargo.toml", "Cargo.lock",
+    ]),
+})
+with open(sys.argv[1], "w") as f:
+    json.dump(config, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+if [[ -f "$CONFIG" ]] && ! cmp -s "$CONFIG" "$CONFIG_CANDIDATE"; then
+  say "ERROR: WORKDIR config differs from this run; use a fresh WORKDIR or restore the original settings."
+  diff -u "$CONFIG" "$CONFIG_CANDIDATE" | tee -a "$LOG" || true
+  exit 2
+fi
+if [[ ! -f "$CONFIG" ]]; then mv "$CONFIG_CANDIDATE" "$CONFIG"; else rm -f "$CONFIG_CANDIDATE"; fi
+
+if [[ "${STATUS:-0}" == "1" ]]; then
   done_shards=0
-  for i in $(seq 0 $((NUM_SHARDS - 1))); do [ -f "$WORKDIR/shard_$i.done" ] && done_shards=$((done_shards + 1)); done
+  for ((i=0; i<NUM_SHARDS; i++)); do
+    [[ -f "$WORKDIR/shard_$i.done" ]] && done_shards=$((done_shards + 1))
+  done
   echo "WORKDIR=$WORKDIR"
-  echo "shards: $done_shards/$NUM_SHARDS done"
-  echo "dataset: $([ -f "$FULL" ] && wc -l < "$FULL" || echo 0) rows ($([ -f "$FULL" ] && echo present || echo missing))"
-  echo "model:   $([ -f "$MODEL" ] && echo present || echo missing)"
-  echo "A/B off: $([ -f "$WORKDIR/ab_off.txt" ] && echo present || echo missing)"
-  echo "A/B on:  $([ -f "$WORKDIR/ab_on.txt" ] && echo present || echo missing)"
+  echo "config_sha256=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$CONFIG")"
+  echo "shards=$done_shards/$NUM_SHARDS"
+  echo "dataset=$([[ -f "$FULL" ]] && echo present || echo missing)"
+  echo "model=$([[ -f "$MODEL" && -f "$MODEL.manifest.json" && -f "$MODEL.golden.json" ]] && echo present || echo missing)"
   exit 0
 fi
 
-say "=== value-head pipeline === WORKDIR=$WORKDIR  shards=${NUM_SHARDS}x${GAMES_PER_SHARD}  teacher=${GEN_TEACHER_BUDGET_MS}ms  mix=${GEN_MIX_SEARCH_FRAC}  par=${PAR}  ncpu=${NCPU}"
-say "(re-run this script any time to RESUME; completed stages are skipped)"
+say "=== action-value pipeline === workdir=$WORKDIR shards=${NUM_SHARDS}x${GAMES_PER_SHARD} q=${GEN_Q_CANDIDATES}/${GEN_Q_ROLLOUT_BEHAVIOUR}"
 
-# ---- stage 0: venv with torch (reboot-safe; one-time) ----
-if [ ! -x "$VENV/bin/python" ]; then
-  say "stage0: creating venv + installing numpy/torch/onnx (one-time, ~minutes)..."
-  python3 -m venv "$VENV" && "$VENV/bin/pip" -q install --upgrade pip >/dev/null 2>&1
-  "$VENV/bin/pip" -q install numpy torch onnx 2>&1 | tail -1 | tee -a "$LOG"
+if [[ ! -x "$VENV/bin/python" ]]; then
+  say "stage0: creating training venv"
+  "$PYTHON" -m venv "$VENV"
+  "$VENV/bin/pip" install -r training/requirements.lock.txt 2>&1 | tee -a "$LOG"
 fi
-"$VENV/bin/python" -c 'import torch, numpy, onnx' 2>/dev/null \
-  && say "stage0: venv OK" || { say "stage0: venv MISSING torch/onnx — fix the venv and re-run"; exit 1; }
+"$VENV/bin/python" -c 'import numpy, onnx, torch' || {
+  say "stage0: venv is incomplete"; exit 1;
+}
+PY_ENV_LOCK="$WORKDIR/python-environment.freeze.txt"
+PY_ENV_CANDIDATE="$WORKDIR/python-environment.candidate.txt"
+"$VENV/bin/python" - "$VENV/bin/pip" >"$PY_ENV_CANDIDATE" <<'PY'
+import platform, subprocess, sys
+print("python=" + sys.version.replace("\n", " "))
+print("platform=" + platform.platform())
+print(subprocess.check_output([sys.argv[1], "freeze", "--all"], text=True), end="")
+PY
+if [[ -f "$PY_ENV_LOCK" ]] && ! cmp -s "$PY_ENV_LOCK" "$PY_ENV_CANDIDATE"; then
+  say "stage0: Python environment drifted from the recorded full freeze"
+  diff -u "$PY_ENV_LOCK" "$PY_ENV_CANDIDATE" | tee -a "$LOG" || true
+  exit 2
+fi
+if [[ ! -f "$PY_ENV_LOCK" ]]; then
+  mv "$PY_ENV_CANDIDATE" "$PY_ENV_LOCK"
+else
+  rm -f "$PY_ENV_CANDIDATE"
+fi
 
-# ---- stage 1: build release (idempotent) ----
-say "stage1: building release examples..."
-$CARGO build --release -p shengji-core --example gen_training_data --example paired_eval 2>&1 | tail -2 | tee -a "$LOG"
-[ -x "$GEN" ] && [ -x "$PEVAL" ] || { say "stage1: build FAILED"; exit 1; }
+say "stage1: building seeded generator and evaluator"
+"${CARGO_CMD[@]}" build --release -p shengji-core \
+  --example gen_training_data --example model_control_eval \
+  --example validate_expert_model 2>&1 | tee -a "$LOG"
+[[ -x "$GEN" && -x "$CONTROL" && -x "$VALIDATOR" ]] || {
+  say "stage1: expected binaries missing"; exit 1;
+}
 
-# ---- stage 2: data-gen shards (parallel, resumable per shard) ----
+artifact_manifest() {
+  local csv="$1" generator_manifest="$2" output="$3" seed="$4"
+  python3 - "$csv" "$generator_manifest" "$output" "$seed" "$CONFIG" <<'PY'
+import hashlib, json, os, sys
+csv, generated, output, seed, config = sys.argv[1:]
+def digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+with open(generated) as f:
+    generator = json.load(f)
+manifest = {
+    "manifest_version": 1,
+    "content_sha256": digest(csv),
+    "bytes": os.path.getsize(csv),
+    "lines": sum(1 for _ in open(csv, "rb")),
+    "seed": int(seed),
+    "config_sha256": digest(config),
+    "generator": generator,
+}
+temporary = output + ".tmp"
+with open(temporary, "w") as f:
+    json.dump(manifest, f, indent=2, sort_keys=True)
+    f.write("\n")
+os.replace(temporary, output)
+PY
+}
+export -f artifact_manifest
+
 gen_shard() {
-  local i="$1"
-  [ -f "$WORKDIR/shard_$i.done" ] && { echo "shard $i: already done"; return 0; }
-  GEN_BEHAVIOUR=mix GEN_MIX_SEARCH_FRAC="$GEN_MIX_SEARCH_FRAC" \
-    GEN_GAMES="$GAMES_PER_SHARD" GEN_TEACHER_BUDGET_MS="$GEN_TEACHER_BUDGET_MS" \
-    GEN_SEED="$((BASE_SEED + i))" GEN_OUT="$WORKDIR/shard_$i.csv" \
+  set -euo pipefail
+  local i="$1" seed=$((BASE_SEED + i))
+  local csv="$WORKDIR/shard_$i.csv"
+  local generated="$WORKDIR/shard_$i.generated.json"
+  local artifact="$WORKDIR/shard_$i.artifact.json"
+  if [[ -f "$WORKDIR/shard_$i.done" && -s "$csv" && -s "$generated" && -s "$artifact" ]]; then
+    echo "shard $i: already complete"
+    return
+  fi
+  rm -f "$WORKDIR/shard_$i.done" "$csv" "$generated" "$artifact"
+  GEN_BEHAVIOUR="$GEN_BEHAVIOUR" \
+    GEN_MIX_SEARCH_FRAC="$GEN_MIX_SEARCH_FRAC" \
+    GEN_GAMES="$GAMES_PER_SHARD" \
+    GEN_TEACHER_BUDGET_MS="$GEN_TEACHER_BUDGET_MS" \
+    GEN_BEHAVIOUR_BUDGET_MS="$GEN_BEHAVIOUR_BUDGET_MS" \
+    GEN_Q_CANDIDATES="$GEN_Q_CANDIDATES" \
+    GEN_Q_ROLLOUT_BEHAVIOUR="$GEN_Q_ROLLOUT_BEHAVIOUR" \
+    GEN_Q_ROLLOUT_BUDGET_MS="$GEN_Q_ROLLOUT_BUDGET_MS" \
+    GEN_SEED="$seed" GEN_OUT="$csv" GEN_MANIFEST="$generated" \
     "$GEN" >"$WORKDIR/shard_$i.gen.log" 2>&1
-  if [ $? -eq 0 ] && [ -s "$WORKDIR/shard_$i.csv" ]; then
-    touch "$WORKDIR/shard_$i.done"; echo "shard $i: OK ($(wc -l < "$WORKDIR/shard_$i.csv") rows)"
-  else echo "shard $i: FAILED (see shard_$i.gen.log)"; fi
+  artifact_manifest "$csv" "$generated" "$artifact" "$seed"
+  touch "$WORKDIR/shard_$i.done"
+  echo "shard $i: OK ($(wc -l <"$csv") lines)"
 }
 export -f gen_shard
-export WORKDIR GAMES_PER_SHARD GEN_TEACHER_BUDGET_MS GEN_MIX_SEARCH_FRAC BASE_SEED GEN
-say "stage2: generating $NUM_SHARDS data shards (parallel x$PAR; resumable)..."
-seq 0 $((NUM_SHARDS - 1)) | xargs -P "$PAR" -I{} bash -c 'gen_shard "$1"' _ {} 2>&1 | tee -a "$LOG"
+export WORKDIR BASE_SEED GEN_BEHAVIOUR GEN_MIX_SEARCH_FRAC GAMES_PER_SHARD
+export GEN_TEACHER_BUDGET_MS GEN_BEHAVIOUR_BUDGET_MS GEN_Q_CANDIDATES
+export GEN_Q_ROLLOUT_BEHAVIOUR GEN_Q_ROLLOUT_BUDGET_MS GEN CONFIG
 
-missing=0
-for i in $(seq 0 $((NUM_SHARDS - 1))); do [ -f "$WORKDIR/shard_$i.done" ] || missing=$((missing + 1)); done
-if [ "$missing" -ne 0 ]; then
-  say "stage2: $missing/$NUM_SHARDS shards still missing — RE-RUN this script to resume them."
-  exit 1
-fi
-
-# ---- stage 3: concatenate shards (cheap; redo each run) ----
-# CRITICAL: each shard numbers its `group` ids from 0, so a naive concat COLLIDES
-# the group namespace — the trainer would merge unrelated decisions under a shared
-# id, see sum(labels)>1, and drop nearly everything. Offset each shard's group id
-# (column 1) by i*1e7 (>> per-shard group count) so groups are globally unique.
-# Only $1 is modified, so the float feature columns are reprinted verbatim.
-#
-# NOTE: the offset is 1e7, NOT 1e9. On Linux the default awk is mawk, which prints
-# integral values > 2^31 (~2.15e9) in scientific notation ("3e+09"); with a 1e9
-# offset, shards 3+ would emit group ids like "3e+09" that the trainer's int()
-# parse rejects, silently dropping most of the data (or erroring). 1e7 keeps every
-# offset < 2^31 for up to ~200 shards while staying far above any per-shard group
-# count, so it is collision-free AND mawk-safe. (macOS BSD awk prints big ints
-# fine, which is why this only bit on Linux.)
-say "stage3: concatenating $NUM_SHARDS shards (with per-shard group-id offsets) -> data_full.csv"
-head -1 "$WORKDIR/shard_0.csv" > "$FULL"
-for i in $(seq 0 $((NUM_SHARDS - 1))); do
-  awk -F, -v OFS=, -v off="$((i * 10000000))" 'NR>1 { $1 = $1 + off; print }' "$WORKDIR/shard_$i.csv" >> "$FULL"
+say "stage2: generating shards with parallelism=$PAR"
+seq 0 $((NUM_SHARDS - 1)) | xargs -P "$PAR" -I{} bash -c 'gen_shard "$1"' _ {} \
+  2>&1 | tee -a "$LOG"
+for ((i=0; i<NUM_SHARDS; i++)); do
+  [[ -f "$WORKDIR/shard_$i.done" ]] || { say "stage2: shard $i failed"; exit 1; }
 done
-say "stage3: dataset has $(wc -l < "$FULL") rows, $(awk -F, 'NR>1{print $1}' "$FULL" | sort -u | wc -l | tr -d ' ') distinct decisions"
 
-# ---- stage 4: train value head (skip if model present) ----
-if [ ! -f "$MODEL" ]; then
-  say "stage4: training value head ($EPOCHS epochs)..."
-  # Train to a .tmp and mv on success, so a kill mid-export can never leave a
-  # corrupt $MODEL that a resume would wrongly skip over.
-  rm -f "$MODEL.tmp"
-  "$VENV/bin/python" training/train_expert.py --data "$FULL" --out "$MODEL.tmp" \
-    --epochs "$EPOCHS" --value-weight 1.0 2>&1 | tee -a "$LOG" | grep -E 'Loaded|Value head|Best val|Exported|epoch'
-  if [ -f "$MODEL.tmp" ]; then mv "$MODEL.tmp" "$MODEL"; else say "stage4: training FAILED (no model written)"; exit 1; fi
-else
-  say "stage4: model present (skip training): $MODEL"
-fi
-
-# ---- stage 5: paired A/B (blend off vs on; parallel; resumable per condition) ----
-run_ab() {
-  local w="$1" tag="$2" res="$WORKDIR/ab_$2.txt"
-  [ -f "$res" ] && { echo "A/B $tag: already done"; return 0; }
-  SHENGJI_EXPERT_MODEL_PATH="$MODEL" SHENGJI_VALUE_WEIGHT="$w" SHENGJI_BOT_BUDGET_MS="$AB_BUDGET_MS" \
-    "$PEVAL" "$AB_PAIRS" "$AB_SEED" expert-easy > "$res.tmp" 2>&1 \
-    && mv "$res.tmp" "$res" && echo "A/B $tag: OK" || echo "A/B $tag: FAILED"
+say "stage3: validating and concatenating collision-free string IDs"
+python3 - "$WORKDIR" "$NUM_SHARDS" "$FULL" "$CONFIG" <<'PY'
+import csv, hashlib, json, os, sys
+workdir, count, output, config = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+temporary = output + ".tmp"
+header = None
+game_ids, groups, sources = set(), set(), []
+game_owner, group_owner = {}, {}
+rows = 0
+with open(temporary, "w", newline="") as out:
+    writer = None
+    for i in range(count):
+        path = os.path.join(workdir, f"shard_{i}.csv")
+        artifact = os.path.join(workdir, f"shard_{i}.artifact.json")
+        with open(artifact) as f:
+            sources.append(json.load(f))
+        with open(path, newline="") as f:
+            reader = csv.DictReader(f)
+            if header is None:
+                header = reader.fieldnames
+                writer = csv.DictWriter(out, fieldnames=header, lineterminator="\n")
+                writer.writeheader()
+            elif reader.fieldnames != header:
+                raise SystemExit(f"header mismatch in {path}")
+            for row in reader:
+                if row["game_id"] in game_owner and game_owner[row["game_id"]] != i:
+                    raise SystemExit(f"cross-shard game_id collision: {row['game_id']}")
+                if row["group"] in group_owner and group_owner[row["group"]] != i:
+                    raise SystemExit(f"cross-shard group collision: {row['group']}")
+                game_owner[row["game_id"]] = i
+                group_owner[row["group"]] = i
+                game_ids.add(row["game_id"])
+                groups.add(row["group"])
+                writer.writerow(row)
+                rows += 1
+os.replace(temporary, output)
+def digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1024*1024), b""):
+            h.update(block)
+    return h.hexdigest()
+manifest = {
+    "manifest_version": 1,
+    "content_sha256": digest(output),
+    "config_sha256": digest(config),
+    "rows": rows,
+    "games": len(game_ids),
+    "decisions": len(groups),
+    "source_content_sha256": [source["content_sha256"] for source in sources],
 }
-export -f run_ab
-export MODEL AB_BUDGET_MS AB_PAIRS AB_SEED PEVAL WORKDIR
-say "stage5: paired A/B — value blend OFF (w=0) vs ON (w=0.5), Expert-vs-Easy, $AB_PAIRS pairs (parallel; resumable)..."
-printf '0 off\n0.5 on\n' | xargs -P 2 -L1 bash -c 'run_ab "$1" "$2"' _ 2>&1 | tee -a "$LOG"
+with open(output + ".manifest.json.tmp", "w") as f:
+    json.dump(manifest, f, indent=2, sort_keys=True)
+    f.write("\n")
+os.replace(output + ".manifest.json.tmp", output + ".manifest.json")
+PY
+say "stage3: $(wc -l <"$FULL") lines; manifest=$FULL.manifest.json"
 
-# ---- summary ----
-say "================= SUMMARY ================="
-for tag in off on; do
-  if [ -f "$WORKDIR/ab_$tag.txt" ]; then
-    say "--- value blend $tag ---"
-    grep -A2 'Expert vs Easy' "$WORKDIR/ab_$tag.txt" | tee -a "$LOG"
+if [[ ! -f "$MODEL" || ! -f "$MODEL.manifest.json" || ! -f "$MODEL.golden.json" ]]; then
+  say "stage4: training policy/state-V/action-Q model"
+  rm -f "$MODEL" "$MODEL.manifest.json" "$MODEL.golden.json"
+  "$VENV/bin/python" training/train_expert.py \
+    --data "$FULL" --out "$MODEL" --epochs "$EPOCHS" \
+    --manifest-out "$MODEL.manifest.json" --golden-out "$MODEL.golden.json" \
+    --policy-weight "$POLICY_WEIGHT" --value-weight "$VALUE_WEIGHT" \
+    --q-weight "$Q_WEIGHT" --policy-target "$POLICY_TARGET" \
+    --auxiliary-weight "$AUXILIARY_WEIGHT" \
+    --early-stop-metric "$EARLY_STOP_METRIC" 2>&1 | tee -a "$LOG"
+  [[ -s "$MODEL" && -s "$MODEL.manifest.json" && -s "$MODEL.golden.json" ]] || {
+    say "stage4: model, manifest, or golden vectors missing"; exit 1;
+  }
+else
+  say "stage4: model + manifest + golden vectors already present"
+fi
+
+say "stage5: validating PyTorch -> ONNX -> tract numerical parity"
+"$VALIDATOR" "$MODEL" "$MODEL.manifest.json" "$MODEL.golden.json" 2>&1 | tee -a "$LOG"
+
+if [[ "$RUN_AB" == "1" && "$AB_PAIRS" -gt 0 ]]; then
+  if [[ -s "$WORKDIR/model-ab/comparison.json" ]] && python3 - "$MODEL" "$WORKDIR/model-ab/comparison.json" <<'PY'
+import hashlib, json, sys
+with open(sys.argv[1], "rb") as f:
+    actual = hashlib.sha256(f.read()).hexdigest()
+with open(sys.argv[2]) as f:
+    expected = json.load(f)["candidate_model_sha256"]
+raise SystemExit(0 if actual == expected else 1)
+PY
+  then
+    say "stage6: model A/B already present"
   else
-    say "--- value blend $tag: MISSING (re-run to finish) ---"
+    say "stage6: two-process matched-deal embedded vs candidate model A/B"
+    AB_PAIRS="$AB_PAIRS" AB_SEED="$AB_SEED" AB_BUDGET_MS="$AB_BUDGET_MS" \
+      AB_MIN_LEVEL_DELTA="$AB_MIN_LEVEL_DELTA" \
+      CARGO="$CARGO" training/run_model_ab.sh "$MODEL" "$WORKDIR/model-ab" \
+      2>&1 | tee -a "$LOG"
   fi
-done
-say "=== DONE === (artifacts in $WORKDIR; model at $MODEL)"
+else
+  say "stage6: skipped (RUN_AB=$RUN_AB AB_PAIRS=$AB_PAIRS)"
+fi
+
+say "=== DONE === dataset=$FULL model=$MODEL manifest=$MODEL.manifest.json"
