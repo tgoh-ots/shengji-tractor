@@ -51,7 +51,7 @@ struct BeliefRow {
 
 fn main() {
     let games = env_usize("BELIEF_GAMES", 100);
-    let seed = env_u64("BELIEF_SEED", 0xBE11_EF);
+    let seed = env_u64("BELIEF_SEED", 0x00BE_11EF);
     let every = env_usize("BELIEF_SNAPSHOT_EVERY", 4).max(1);
     let budget = env_u64("BELIEF_BEHAVIOUR_BUDGET_MS", 20).max(1);
     let out =
@@ -192,7 +192,7 @@ fn play_game(game_index: usize, seed: u64, every: usize, budget: u64) -> Option<
                         play.finish_trick().ok()?;
                     }
                     Some(actor) => {
-                        if decision % every == 0 {
+                        if decision.is_multiple_of(every) {
                             rows.extend(snapshot_rows(play, actor, game_index, seed, snapshot)?);
                             snapshot += 1;
                         }

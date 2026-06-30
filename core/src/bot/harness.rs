@@ -188,8 +188,10 @@ impl HandResult {
 /// `InitializePhase::start` uses `thread_rng`, which we cannot seed). This is the
 /// shared deal every seeded benchmark uses.
 pub fn seeded_draw_phase(decks: &[Deck], rng: &mut StdRng) -> DrawPhase {
-    let mut config = HarnessConfig::default();
-    config.decks = decks.to_vec();
+    let config = HarnessConfig {
+        decks: decks.to_vec(),
+        ..HarnessConfig::default()
+    };
     seeded_draw_phase_with_config(&config, rng)
 }
 

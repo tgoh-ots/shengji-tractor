@@ -179,7 +179,7 @@ fn validate_contract(manifest: &ModelManifest, golden: &Golden) -> TractResult<(
     }
     if golden.legality_mask.iter().any(|row| {
         row.len() != TARGET_DIM
-            || !row.iter().any(|value| *value == 1.0)
+            || !row.contains(&1.0)
             || row.iter().any(|value| *value != 0.0 && *value != 1.0)
     }) {
         anyhow::bail!("invalid belief golden legality mask");

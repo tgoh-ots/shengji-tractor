@@ -472,6 +472,7 @@ async fn register_user<S: Storage<VersionedGame, E>, E: std::fmt::Debug + Send>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_game_for_player<
     S: Storage<VersionedGame, E> + 'static,
     E: Send + std::fmt::Debug + 'static,
@@ -528,6 +529,7 @@ async fn run_game_for_player<
     debug!(logger, "Exiting main game loop");
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_user_action<S: Storage<VersionedGame, E> + 'static, E: Send + 'static>(
     logger: Logger,
     ws_id: usize,

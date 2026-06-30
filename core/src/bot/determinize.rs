@@ -397,6 +397,7 @@ fn proposal_edge_order<R: Rng>(
 /// slots accept any card; player slots reject cards in proven-void suits. Unlike
 /// the former greedy fallback, this can rearrange earlier choices and therefore
 /// never needs to violate a void merely because the first shuffled deal dead-ended.
+#[allow(clippy::too_many_arguments)]
 fn augment_card(
     card_idx: usize,
     cards: &[Card],
@@ -619,24 +620,22 @@ pub fn sample_hidden_hands_with_proposal<R: Rng>(
 
     let mut slots = Vec::with_capacity(pool.len());
     for &(pid, count) in &targets {
-        slots.extend(std::iter::repeat(HiddenCardLocation::Player(pid)).take(count));
+        slots.extend(std::iter::repeat_n(HiddenCardLocation::Player(pid), count));
     }
-    slots.extend(
-        std::iter::repeat(HiddenCardLocation::Kitty).take(
-            kitty_template
-                .iter()
-                .filter(|&&c| c == Card::Unknown)
-                .count(),
-        ),
-    );
-    slots.extend(
-        std::iter::repeat(HiddenCardLocation::Removed).take(
-            removed_template
-                .iter()
-                .filter(|&&c| c == Card::Unknown)
-                .count(),
-        ),
-    );
+    slots.extend(std::iter::repeat_n(
+        HiddenCardLocation::Kitty,
+        kitty_template
+            .iter()
+            .filter(|&&c| c == Card::Unknown)
+            .count(),
+    ));
+    slots.extend(std::iter::repeat_n(
+        HiddenCardLocation::Removed,
+        removed_template
+            .iter()
+            .filter(|&&c| c == Card::Unknown)
+            .count(),
+    ));
 
     // Every configured physical card must have exactly one location. A mismatch
     // catches stale/custom-deck assumptions instead of dropping leftovers.
@@ -746,7 +745,7 @@ pub fn sample_hidden_hands_with_proposal<R: Rng>(
             .ok()?
             .iter()
             .filter(|(card, _)| **card != Card::Unknown)
-            .flat_map(|(&card, &count)| std::iter::repeat(card).take(count))
+            .flat_map(|(&card, &count)| std::iter::repeat_n(card, count))
             .collect::<Vec<_>>();
         hands.add(player.id, visible).ok()?;
         if let Some(cards) = assignment.remove(&player.id) {

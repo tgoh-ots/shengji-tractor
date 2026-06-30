@@ -442,7 +442,7 @@ fn max_throw_units() -> usize {
         .min(8)
 }
 
-fn canonicalize_play(trump: Trump, cards: &mut Vec<Card>) {
+fn canonicalize_play(trump: Trump, cards: &mut [Card]) {
     cards.sort_by(|a, b| {
         trump
             .compare(*a, *b)

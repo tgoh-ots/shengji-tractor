@@ -379,6 +379,7 @@ fn validate_game_rows(rows: &[Row]) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn play_one_hand_collecting(
     run_seed: u64,
     game_index: usize,
