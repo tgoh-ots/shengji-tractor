@@ -1,0 +1,12 @@
+{
+  "bundles": [
+    {
+      "csv": "/absolute/path/to/replay-export.csv",
+      "manifest": "/absolute/path/to/replay-export.csv.manifest.json",
+      "max_games": 100
+    }
+  ],
+  "manifest_version": 1,
+  "max_offline_fraction": 0.1,
+  "selection_seed": 99173
+}

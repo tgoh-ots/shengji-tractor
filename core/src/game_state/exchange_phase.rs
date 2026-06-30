@@ -435,6 +435,16 @@ impl ExchangePhase {
         self.kitty_size
     }
 
+    /// The resolved game mode for this hand.
+    pub fn game_mode(&self) -> &GameMode {
+        &self.game_mode
+    }
+
+    /// Cards intentionally removed by the configured deck/rules.
+    pub fn removed_cards(&self) -> &[Card] {
+        &self.removed_cards
+    }
+
     /// The kitty cards, if they are visible in this (possibly redacted) view.
     /// In a redacted view the kitty is only un-hidden for the current exchanger
     /// before finalization; otherwise the cards are [`Card::Unknown`]. Returns

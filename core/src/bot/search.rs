@@ -55,13 +55,14 @@ use rand::{Rng, SeedableRng};
 
 use shengji_mechanics::types::{Card, PlayerID};
 
-use crate::bot::determinize::{sample_hidden_hands_with_proposal, DeterminizedWorld};
+use crate::bot::determinize::DeterminizedWorld;
+use crate::bot::endgame::{self, ExactEndgameConfig, ExactValueAttempt};
 use crate::bot::expert;
 use crate::bot::heuristics::{self, ScoredPlay};
 use crate::game_state::play_phase::PlayPhase;
 
 fn sample_world<R: Rng>(p: &PlayPhase, me: PlayerID, rng: &mut R) -> Option<DeterminizedWorld> {
-    sample_hidden_hands_with_proposal(p, me, rng, crate::bot::belief::loaded_proposal())
+    crate::bot::belief::sample_persistent_world(p, me, rng)
 }
 
 /// The policy source that supplies the candidate prior (for pruning) and the
@@ -216,6 +217,215 @@ fn puct_enabled() -> bool {
     })
 }
 
+/// Adaptive budgets are deliberately opt-in. The configured `time_budget` stays
+/// an absolute deadline; this feature only returns unused time on routine,
+/// low-uncertainty decisions and can never make a decision slower.
+#[derive(Clone, Copy, Debug)]
+struct AdaptiveBudgetConfig {
+    enabled: bool,
+    min_fraction: f64,
+}
+
+fn adaptive_budget_config() -> AdaptiveBudgetConfig {
+    static CONFIG: OnceLock<AdaptiveBudgetConfig> = OnceLock::new();
+    *CONFIG.get_or_init(|| AdaptiveBudgetConfig {
+        enabled: std::env::var("SHENGJI_ADAPTIVE_BUDGET")
+            .map(|value| !value.is_empty() && value != "0")
+            .unwrap_or(false),
+        min_fraction: std::env::var("SHENGJI_ADAPTIVE_BUDGET_MIN_FRACTION")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.05, 1.0))
+            .unwrap_or(0.35),
+    })
+}
+
+/// Empirical lower-tail risk controls. Defaults are exactly risk-neutral. This
+/// works with every existing leaf (static or learned) because it operates on the
+/// distribution of determinized-world/rollout returns, not on a new model shape.
+#[derive(Clone, Copy, Debug)]
+struct RiskConfig {
+    stddev_penalty: f64,
+    cvar_weight: f64,
+    cvar_alpha: f64,
+}
+
+impl RiskConfig {
+    fn enabled(self) -> bool {
+        self.stddev_penalty > 0.0 || self.cvar_weight > 0.0
+    }
+}
+
+fn risk_config() -> RiskConfig {
+    static CONFIG: OnceLock<RiskConfig> = OnceLock::new();
+    *CONFIG.get_or_init(|| RiskConfig {
+        stddev_penalty: std::env::var("SHENGJI_SEARCH_STDDEV_PENALTY")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.0, 4.0))
+            .unwrap_or(0.0),
+        cvar_weight: std::env::var("SHENGJI_SEARCH_CVAR_WEIGHT")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.0, 1.0))
+            .unwrap_or(0.0),
+        cvar_alpha: std::env::var("SHENGJI_SEARCH_CVAR_ALPHA")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.01, 1.0))
+            .unwrap_or(0.25),
+    })
+}
+
+/// Exact solving is also opt-in and hard-capped a second time in `endgame`.
+fn exact_endgame_config() -> ExactEndgameConfig {
+    static CONFIG: OnceLock<ExactEndgameConfig> = OnceLock::new();
+    *CONFIG.get_or_init(|| {
+        ExactEndgameConfig {
+            max_cards: std::env::var("SHENGJI_EXACT_ENDGAME_CARDS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0),
+            max_nodes: std::env::var("SHENGJI_EXACT_ENDGAME_NODES")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(50_000),
+        }
+        .bounded()
+    })
+}
+
+fn normalized_entropy(scores: &[f64]) -> f64 {
+    if scores.len() < 2 {
+        return 0.0;
+    }
+    let probabilities = softmax(scores);
+    let entropy = probabilities
+        .into_iter()
+        .filter(|probability| *probability > 0.0 && probability.is_finite())
+        .map(|probability| -probability * probability.ln())
+        .sum::<f64>();
+    (entropy / (scores.len() as f64).ln()).clamp(0.0, 1.0)
+}
+
+fn adaptive_fraction_from_signals(
+    min_fraction: f64,
+    uncertainty: f64,
+    pot_importance: f64,
+    threshold_proximity: f64,
+    late_hand: f64,
+) -> f64 {
+    let importance = (0.40 * uncertainty.clamp(0.0, 1.0)
+        + 0.25 * pot_importance.clamp(0.0, 1.0)
+        + 0.20 * threshold_proximity.clamp(0.0, 1.0)
+        + 0.15 * late_hand.clamp(0.0, 1.0))
+    .clamp(0.0, 1.0);
+    min_fraction + (1.0 - min_fraction) * importance
+}
+
+fn adaptive_time_budget(
+    play: &PlayPhase,
+    candidates: &[ScoredPlay],
+    hard_budget: Duration,
+) -> Duration {
+    let config = adaptive_budget_config();
+    if !config.enabled || hard_budget.is_zero() {
+        return hard_budget;
+    }
+
+    let uncertainty = normalized_entropy(
+        &candidates
+            .iter()
+            .map(|candidate| candidate.score)
+            .collect::<Vec<_>>(),
+    );
+    // Forty points on the table is already a major swing in ordinary Tractor;
+    // larger throws simply saturate this importance signal.
+    let pot_points = play
+        .trick()
+        .played_cards()
+        .iter()
+        .flat_map(|played| played.cards.iter())
+        .filter_map(|card| card.points())
+        .sum::<usize>();
+    let pot_importance = (pot_points as f64 / 40.0).clamp(0.0, 1.0);
+
+    let threshold_proximity = play
+        .bot_step_size()
+        .filter(|step| *step > 0)
+        .map(|step| {
+            let (points, _) = play.calculate_points();
+            let remainder = points.rem_euclid(step) as f64;
+            (remainder / step as f64).clamp(0.0, 1.0)
+        })
+        .unwrap_or(0.0);
+
+    // This uses only public hand sizes (redacted hands preserve multiplicity).
+    let players = play.propagated().players().len().max(1);
+    let (_, removed) = play.piles_for_determinization();
+    let initial_per_player = play
+        .configured_cards_for_determinization()
+        .map(|cards| {
+            cards
+                .len()
+                .saturating_sub(play.kitty_size())
+                .saturating_sub(removed.len())
+                / players
+        })
+        .filter(|initial| *initial > 0);
+    let late_hand = initial_per_player
+        .and_then(|initial| {
+            play.hands()
+                .get(play.trick().next_player().unwrap_or(play.landlord()))
+                .ok()
+                .map(|hand| {
+                    let remaining = hand.values().copied().sum::<usize>();
+                    (1.0 - remaining.min(initial) as f64 / initial as f64).clamp(0.0, 1.0)
+                })
+        })
+        // Old serialized rooms can lack enough deck configuration to infer a
+        // denominator safely. Omitting this optional signal is conservative.
+        .unwrap_or(0.0);
+
+    let fraction = adaptive_fraction_from_signals(
+        config.min_fraction,
+        uncertainty,
+        pot_importance,
+        threshold_proximity,
+        late_hand,
+    );
+    hard_budget.mul_f64(fraction.clamp(config.min_fraction, 1.0))
+}
+
+fn risk_adjusted_value(samples: &[f64], config: RiskConfig) -> f64 {
+    if samples.is_empty() {
+        return f64::NEG_INFINITY;
+    }
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    if !config.enabled() {
+        return mean;
+    }
+    let variance = samples
+        .iter()
+        .map(|value| {
+            let delta = value - mean;
+            delta * delta
+        })
+        .sum::<f64>()
+        / samples.len() as f64;
+    let mut lower_tail = samples.to_vec();
+    lower_tail.sort_by(f64::total_cmp);
+    let tail_count =
+        ((config.cvar_alpha * samples.len() as f64).ceil() as usize).clamp(1, samples.len());
+    let cvar = lower_tail[..tail_count].iter().sum::<f64>() / tail_count as f64;
+    (1.0 - config.cvar_weight) * mean + config.cvar_weight * cvar
+        - config.stddev_penalty * variance.sqrt()
+}
+
 fn minmax_normalize(values: &[f64]) -> Option<Vec<f64>> {
     if values.is_empty() || values.iter().any(|value| !value.is_finite()) {
         return None;
@@ -292,9 +502,12 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
         .then(|| root_level_q(p, me, &candidates))
         .flatten();
 
-    // Candidate construction/ranking is part of decision latency too. Charge it
-    // to the configured wall budget before any world simulation begins.
-    config.time_budget = config.time_budget.saturating_sub(decision_start.elapsed());
+    // Candidate construction/ranking is part of decision latency too. Adaptive
+    // allocation may shorten routine decisions, but the caller's configured
+    // budget remains a hard upper bound from `decision_start`.
+    let target_budget = adaptive_time_budget(p, &candidates, config.time_budget);
+    let decision_deadline = decision_start + target_budget;
+    config.time_budget = decision_deadline.saturating_duration_since(Instant::now());
     if config.time_budget.is_zero() {
         return Some(candidates[0].cards.clone());
     }
@@ -315,18 +528,23 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
             root_q_values.as_deref(),
             &config,
             &mut rng,
+            decision_deadline,
         );
     }
 
     let mut totals = vec![0.0f64; candidates.len()];
     let mut counts = vec![0u32; candidates.len()];
+    let risk = risk_config();
+    let mut samples = risk
+        .enabled()
+        .then(|| vec![Vec::<f64>::new(); candidates.len()]);
 
     let start = Instant::now();
     let mut worlds_attempted = 0usize;
     let mut paired_worlds_done = 0usize;
 
     while worlds_attempted < config.max_worlds {
-        if start.elapsed() >= config.time_budget {
+        if Instant::now() >= decision_deadline {
             break;
         }
         worlds_attempted += 1;
@@ -348,7 +566,7 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
             config.rollout_tricks,
             config.rollout_policy,
             rollout_seed,
-            Some(start + config.time_budget),
+            Some(decision_deadline),
         ) else {
             continue;
         };
@@ -358,13 +576,16 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
         for (idx, value) in values.into_iter().enumerate() {
             totals[idx] += value;
             counts[idx] += 1;
+            if let Some(samples) = &mut samples {
+                samples[idx].push(value);
+            }
         }
         paired_worlds_done += 1;
     }
 
     if search_trace_enabled() {
         let elapsed = start.elapsed();
-        let time_bound = elapsed >= config.time_budget;
+        let time_bound = Instant::now() >= decision_deadline;
         eprintln!(
             "[search] seat={} cands={} paired_worlds={} attempts={}/{} elapsed={:.1}ms budget={}ms bound={}",
             me.0,
@@ -389,6 +610,15 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
         .zip(&counts)
         .map(|(&total, &count)| total / count as f64)
         .collect();
+    let estimates = if let Some(samples) = &samples {
+        samples
+            .iter()
+            .map(|candidate_samples| risk_adjusted_value(candidate_samples, risk))
+            .collect::<Vec<_>>()
+    } else {
+        // Preserve the established summation path exactly at neutral defaults.
+        avgs.clone()
+    };
 
     // Pick the best candidate. Candidates are heuristic-sorted, so the earliest
     // index wins ties.
@@ -412,7 +642,7 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
                 xs.iter().map(|&x| (x - lo) / span).collect()
             }
         };
-        let norm_avg = norm(&avgs);
+        let norm_avg = norm(&estimates);
         let norm_heur = norm(&candidates.iter().map(|c| c.score).collect::<Vec<_>>());
         let mut bi = 0;
         let mut best = f64::NEG_INFINITY;
@@ -425,7 +655,7 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
         }
         bi
     } else if config.policy == Policy::Net {
-        let search_norm = minmax_normalize(&avgs);
+        let search_norm = minmax_normalize(&estimates);
         let q_norm = root_q_values.as_deref().and_then(normalize_level_q);
         match (search_norm, q_norm) {
             (Some(search_norm), Some(q_norm)) => {
@@ -436,12 +666,12 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
                 argmax_earliest(&combined)
             }
             (None, Some(q_norm)) => argmax_earliest(&q_norm),
-            _ => argmax_earliest(&avgs),
+            _ => argmax_earliest(&estimates),
         }
     } else {
         let mut bi = 0;
         let mut best = f64::NEG_INFINITY;
-        for (idx, &avg) in avgs.iter().enumerate() {
+        for (idx, &avg) in estimates.iter().enumerate() {
             if avg > best {
                 best = avg;
                 bi = idx;
@@ -510,6 +740,7 @@ fn puct_search(
     root_q: Option<&[f64]>,
     config: &SearchConfig,
     rng: &mut StdRng,
+    deadline: Instant,
 ) -> Option<Vec<Card>> {
     const C_PUCT: f64 = 1.5;
     let n = candidates.len();
@@ -531,6 +762,8 @@ fn puct_search(
         .unwrap_or(uniform);
     let mut q_sum = vec![0.0f64; n];
     let mut counts = vec![0u32; n];
+    let risk = risk_config();
+    let mut samples = risk.enabled().then(|| vec![Vec::<f64>::new(); n]);
 
     // Match the flat path's rollout budget: it does `max_worlds` worlds × `n`
     // candidate rollouts; here each pull is one rollout, so allow `max_worlds·n`.
@@ -541,7 +774,7 @@ fn puct_search(
     // every candidate gets the same world and random stream before UCB may focus
     // on a subset. This removes the old zero-as-Q bias and guarantees at least one
     // comparable sample per candidate when any simulation is possible.
-    if pulls >= n && start.elapsed() < config.time_budget {
+    if pulls >= n && Instant::now() < deadline {
         if let Some(world) = sample_world(p, me, rng) {
             let rollout_seed = rng.gen::<u64>();
             if let Some(values) = evaluate_paired_candidates(
@@ -551,11 +784,14 @@ fn puct_search(
                 config.rollout_tricks,
                 config.rollout_policy,
                 rollout_seed,
-                Some(start + config.time_budget),
+                Some(deadline),
             ) {
                 for (idx, value) in values.into_iter().enumerate() {
                     q_sum[idx] += value;
                     counts[idx] += 1;
+                    if let Some(samples) = &mut samples {
+                        samples[idx].push(value);
+                    }
                 }
             }
         }
@@ -569,7 +805,7 @@ fn puct_search(
     }
 
     for _ in n..pulls {
-        if start.elapsed() >= config.time_budget {
+        if Instant::now() >= deadline {
             break;
         }
         // Min-max normalize the current per-candidate mean values to [0,1] so the
@@ -577,7 +813,14 @@ fn puct_search(
         let means: Vec<f64> = (0..n)
             .map(|i| {
                 if counts[i] > 0 {
-                    q_sum[i] / counts[i] as f64
+                    if risk.enabled() {
+                        risk_adjusted_value(
+                            &samples.as_ref().expect("risk samples enabled")[i],
+                            risk,
+                        )
+                    } else {
+                        q_sum[i] / counts[i] as f64
+                    }
                 } else {
                     0.0
                 }
@@ -611,10 +854,13 @@ fn puct_search(
             config.rollout_tricks,
             config.rollout_policy,
             rng,
-            Some(start + config.time_budget),
+            Some(deadline),
         ) {
             q_sum[best_i] += v;
             counts[best_i] += 1;
+            if let Some(samples) = &mut samples {
+                samples[best_i].push(v);
+            }
         }
     }
 
@@ -636,7 +882,11 @@ fn puct_search(
     let mut best_key = (0u32, f64::NEG_INFINITY);
     for i in 0..n {
         let mean = if counts[i] > 0 {
-            q_sum[i] / counts[i] as f64
+            if risk.enabled() {
+                risk_adjusted_value(&samples.as_ref().expect("risk samples enabled")[i], risk)
+            } else {
+                q_sum[i] / counts[i] as f64
+            }
         } else {
             f64::NEG_INFINITY
         };
@@ -683,7 +933,28 @@ pub fn search_play_perfect_info(
         return Some(candidates.remove(0).cards);
     }
 
-    config.time_budget = config.time_budget.saturating_sub(decision_start.elapsed());
+    let target_budget = adaptive_time_budget(p, &candidates, config.time_budget);
+    let root_deadline = decision_start + target_budget;
+    let exact = exact_endgame_config();
+    if exact.enabled() {
+        if let Some(result) = endgame::solve_root_with_deadline(p, me, exact, Some(root_deadline)) {
+            if search_trace_enabled() {
+                eprintln!(
+                    "[search/exact] seat={} cards={} nodes={} elapsed={:.1}ms value={:.3}",
+                    me.0,
+                    exact.max_cards,
+                    result.nodes,
+                    decision_start.elapsed().as_secs_f64() * 1000.0,
+                    result.value,
+                );
+            }
+            return Some(result.cards);
+        }
+    }
+
+    // An unsuccessful exact attempt is charged to the same absolute deadline;
+    // it never grants the fallback search a fresh budget.
+    config.time_budget = root_deadline.saturating_duration_since(Instant::now());
     if config.time_budget.is_zero() {
         return Some(candidates[0].cards.clone());
     }
@@ -691,14 +962,17 @@ pub fn search_play_perfect_info(
     let mut rng = StdRng::seed_from_u64(config.seed);
 
     // Evaluate complete rounds against the SINGLE true world `p`. Every candidate
-    // in a round gets the same rollout-random stream, and a started round always
-    // finishes, so wall-clock expiry cannot privilege candidates earlier in the
-    // ranking.
-    let start = Instant::now();
+    // in a round gets the same rollout-random stream, and only a fully completed
+    // round is committed, so wall-clock expiry cannot privilege candidates
+    // earlier in the ranking.
     let mut totals = vec![0.0f64; candidates.len()];
+    let risk = risk_config();
+    let mut samples = risk
+        .enabled()
+        .then(|| vec![Vec::<f64>::new(); candidates.len()]);
     let mut rounds = 0u32;
     for _ in 0..config.max_worlds {
-        if start.elapsed() >= config.time_budget {
+        if Instant::now() >= root_deadline {
             break;
         }
         let rollout_seed = rng.gen::<u64>();
@@ -709,12 +983,15 @@ pub fn search_play_perfect_info(
             config.rollout_tricks,
             config.rollout_policy,
             rollout_seed,
-            Some(start + config.time_budget),
+            Some(root_deadline),
         ) else {
             continue;
         };
         for (idx, value) in values.into_iter().enumerate() {
             totals[idx] += value;
+            if let Some(samples) = &mut samples {
+                samples[idx].push(value);
+            }
         }
         rounds += 1;
     }
@@ -725,7 +1002,11 @@ pub fn search_play_perfect_info(
     let mut best_idx = 0usize;
     let mut best_avg = f64::NEG_INFINITY;
     for (idx, total) in totals.into_iter().enumerate() {
-        let avg = total / rounds as f64;
+        let avg = if risk.enabled() {
+            risk_adjusted_value(&samples.as_ref().expect("risk samples enabled")[idx], risk)
+        } else {
+            total / rounds as f64
+        };
         if avg > best_avg {
             best_avg = avg;
             best_idx = idx;
@@ -925,10 +1206,27 @@ fn evaluate_candidate(
     rng: &mut StdRng,
     deadline: Option<Instant>,
 ) -> Option<f64> {
+    // Gate at the common world root so every candidate in a paired comparison
+    // uses the same value units. A large lead must not become "exact" merely
+    // because it sheds enough cards to cross the threshold while a single-card
+    // alternative falls through to a point-valued rollout leaf.
+    let exact = exact_endgame_config();
+    let use_exact = endgame::eligible_for_exact(world, exact);
     let mut sim = world.clone();
     // Play our candidate.
     if sim.play_cards(me, cards).is_err() {
         return None;
+    }
+
+    // In a fully materialized sampled world, replace the noisy rollout/static
+    // leaf with strict minimax once the residual tree is tiny. Honest play never
+    // invokes this on the real hidden hands. An over-budget solve invalidates the
+    // candidate round instead of mixing a partial exact result with rollout units.
+    if use_exact {
+        match endgame::solve_value_if_eligible(&sim, me, exact, deadline) {
+            ExactValueAttempt::Solved(value) => return Some(value),
+            ExactValueAttempt::Aborted | ExactValueAttempt::Ineligible => return None,
+        }
     }
 
     // Roll out a bounded number of tricks with `policy` as every seat's policy,
@@ -1262,7 +1560,10 @@ fn net_value_estimate(sim: &PlayPhase, me: PlayerID) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonicalize_ranked_candidates, ScoredPlay};
+    use super::{
+        adaptive_fraction_from_signals, canonicalize_ranked_candidates, normalized_entropy,
+        risk_adjusted_value, RiskConfig, ScoredPlay,
+    };
     use shengji_mechanics::types::{Card, Number, Suit};
 
     fn card(suit: Suit, number: Number) -> Card {
@@ -1317,5 +1618,45 @@ mod tests {
         assert_eq!(first.len(), 3, "equivalent card multisets are one action");
         assert!(first[0].score >= first[1].score);
         assert!(first[1].score >= first[2].score);
+    }
+
+    #[test]
+    fn adaptive_fraction_is_bounded_and_monotone_in_importance() {
+        let minimum = 0.35;
+        let routine = adaptive_fraction_from_signals(minimum, 0.0, 0.0, 0.0, 0.0);
+        let uncertain = adaptive_fraction_from_signals(minimum, 1.0, 0.0, 0.0, 0.0);
+        let critical = adaptive_fraction_from_signals(minimum, 1.0, 1.0, 1.0, 1.0);
+        assert_eq!(routine, minimum);
+        assert!(uncertain > routine);
+        assert!((critical - 1.0).abs() < f64::EPSILON);
+        assert!(routine >= minimum && critical <= 1.0);
+    }
+
+    #[test]
+    fn candidate_entropy_identifies_contested_choices() {
+        let contested = normalized_entropy(&[0.0, 0.0, 0.0]);
+        let obvious = normalized_entropy(&[20.0, 0.0, 0.0]);
+        assert!((contested - 1.0).abs() < 1e-12);
+        assert!(obvious < 0.01);
+    }
+
+    #[test]
+    fn risk_defaults_to_mean_and_penalizes_lower_tail_variance() {
+        let neutral = RiskConfig {
+            stddev_penalty: 0.0,
+            cvar_weight: 0.0,
+            cvar_alpha: 0.25,
+        };
+        assert_eq!(risk_adjusted_value(&[-2.0, 2.0], neutral), 0.0);
+
+        let cautious = RiskConfig {
+            stddev_penalty: 0.25,
+            cvar_weight: 0.5,
+            cvar_alpha: 0.5,
+        };
+        assert!(
+            risk_adjusted_value(&[-2.0, 2.0], cautious)
+                < risk_adjusted_value(&[0.0, 0.0], cautious)
+        );
     }
 }

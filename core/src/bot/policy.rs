@@ -36,6 +36,7 @@ use shengji_mechanics::trick::TrickUnit;
 use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Rank, Trump};
 
 use crate::bot::heuristics::{self, ScoredPlay};
+use crate::bot::phase;
 use crate::bot::search::{search_play, search_play_perfect_info, Policy, SearchConfig};
 use crate::bot::BotDifficulty;
 use crate::game_state::play_phase::PlayPhase;
@@ -868,14 +869,21 @@ fn reconcile_kitty(
     // terminate. Enoch applies its stricter, point-budgeted burial discipline.
     let mut pool: Vec<Card> = hand_cards.to_vec();
     pool.extend_from_slice(kitty);
-    let desired = if matches!(
+    let advanced = matches!(
         difficulty,
         BotDifficulty::Enoch | BotDifficulty::Grandmaster | BotDifficulty::Omniscient
-    ) {
-        heuristics::choose_kitty_enoch(&pool, trump, kitty_size)
-    } else {
-        heuristics::choose_kitty(&pool, trump, kitty_size)
-    };
+    );
+    // The current learned kitty contract is trained against the plain
+    // heuristic target. Grandmaster uses Enoch's structurally different
+    // baseline, so applying that artifact there would be out-of-distribution.
+    let desired =
+        if difficulty == BotDifficulty::Expert && phase::kitty_domain_supported(p, pool.len()) {
+            phase::choose_kitty(&pool, trump, kitty_size, advanced)
+        } else if advanced {
+            heuristics::choose_kitty_enoch(&pool, trump, kitty_size)
+        } else {
+            heuristics::choose_kitty(&pool, trump, kitty_size)
+        };
 
     // Compute the symmetric difference as multisets: which desired cards are
     // still missing from the kitty (to bury), and which kitty cards are not in
@@ -1000,7 +1008,10 @@ pub fn choose_bid(
     );
 
     // Score each candidate bid by the trump it would establish.
-    let mut best: Option<(f64, shengji_mechanics::bidding::Bid)> = None;
+    // Keep the absolute heuristic score separate from the optional model rank:
+    // listwise logits have arbitrary offset/scale and must never move the
+    // bid-versus-pass threshold.
+    let mut evaluated = Vec::with_capacity(valid.len());
     for bid in valid {
         let candidate_trump = match bid.card {
             Card::SmallJoker | Card::BigJoker => heuristics::trump_for(level, None),
@@ -1014,12 +1025,33 @@ pub fn choose_bid(
         };
         // Prefer fewer cards committed for the same strength (reinforce later).
         strength -= bid.count as f64 * 0.5;
-        match &best {
-            None => best = Some((strength, bid)),
-            Some((bs, _)) if strength > *bs => best = Some((strength, bid)),
-            _ => (),
+        evaluated.push((bid, candidate_trump, strength));
+    }
+    if evaluated.is_empty() {
+        return None;
+    }
+    let heuristic_best_strength = evaluated
+        .iter()
+        .map(|(_, _, strength)| *strength)
+        .reduce(f64::max)
+        .unwrap_or(f64::NEG_INFINITY);
+    // The current bid exporter covers fully-dealt Expert-style states only.
+    // During-draw bids and Enoch/Grandmaster playbook scores remain heuristic
+    // until matching training support exists.
+    let rankings = if difficulty == BotDifficulty::Expert && phase::bid_domain_supported(p) {
+        phase::rank_bid_candidates(p, me, &evaluated)
+    } else {
+        evaluated.iter().map(|(_, _, strength)| *strength).collect()
+    };
+    let mut best_index = 0usize;
+    let mut best_rank = f64::NEG_INFINITY;
+    for (index, rank) in rankings.into_iter().enumerate() {
+        if rank > best_rank {
+            best_rank = rank;
+            best_index = index;
         }
     }
+    let best = Some(evaluated[best_index]);
 
     // Advanced-tier "don't declare too early": before most of the hand has been dealt you
     // can't tell how long the suit will be, so a premature declaration "can make
@@ -1045,8 +1077,8 @@ pub fn choose_bid(
         // the playbook warns about. Demand >=2 trump pairs (or a trump tractor) AND
         // a still-high strength.
         let overwhelming = best
-            .map(|(s, bid)| {
-                if s < 18.0 {
+            .map(|(bid, _, strength)| {
+                if strength < 18.0 {
                     return false;
                 }
                 let candidate_trump = match bid.card {
@@ -1063,9 +1095,10 @@ pub fn choose_bid(
         }
     }
 
-    best.and_then(|(strength, bid)| {
-        // Only bid if the hand is strong enough; otherwise pass.
-        if strength >= 10.0 {
+    best.and_then(|(bid, _, _)| {
+        // The model may choose among legal bid candidates, but it must not
+        // alter the separately calibrated heuristic bid-versus-pass decision.
+        if heuristic_best_strength >= 10.0 {
             Some(bid)
         } else {
             None

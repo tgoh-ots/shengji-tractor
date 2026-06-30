@@ -5,9 +5,15 @@
 //! Everything in this module is derived only from the acting player's redacted
 //! [`PlayPhase`]. Opponents' cards and a hidden kitty are represented there by
 //! [`Card::Unknown`]; this module replaces those placeholders with one sampled
-//! world. Sampling accounts for the exact configured deck multiset, every
-//! publicly played card, public removed cards, pile capacities, and proven suit
-//! voids. It never consults the real hidden hands or kitty.
+//! world. Sampling enforces the exact configured deck multiset, visible cards,
+//! public removed cards, pile capacities, proven effective-suit voids, and the
+//! rejected cards explicitly exposed by failed throws. It never consults the
+//! real hidden hands or kitty.
+//!
+//! This is consistency with the constraints encoded here, not every inference a
+//! perfect rules reasoner could derive. Bid ownership, pair/tractor implications
+//! beyond a proven void, and the failed-throw `better_player` witness are not yet
+//! conditioned into the hidden assignment.
 
 use std::collections::HashMap;
 
@@ -21,7 +27,7 @@ use shengji_mechanics::types::{Card, EffectiveSuit, PlayerID, Trump};
 use crate::game_state::play_phase::{follow_proves_void, PlayPhase};
 
 /// A determinized "world": a complete assignment of every hidden card location
-/// consistent with the acting player's information.
+/// consistent with the public constraints encoded by [`Knowledge`].
 pub struct DeterminizedWorld {
     pub play: PlayPhase,
 }
@@ -547,6 +553,317 @@ fn materialize_unknowns(template: &[Card], sampled: Vec<Card>) -> Option<Vec<Car
     Some(result)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PublicPlayEvidence {
+    id: PlayerID,
+    cards: Vec<Card>,
+    bad_throw_cards: Vec<Card>,
+}
+
+fn public_play_evidence(view: &PlayPhase) -> Vec<PublicPlayEvidence> {
+    view.public_play_history()
+        .iter()
+        .flat_map(|trick| trick.iter())
+        .chain(view.trick().played_cards().iter())
+        .map(|played| PublicPlayEvidence {
+            id: played.id,
+            cards: played.cards.clone(),
+            bad_throw_cards: played.bad_throw_cards.clone(),
+        })
+        .collect()
+}
+
+/// One complete, jointly constrained hypothesis for the cards that remain out
+/// of the observer's sight. A particle stores whole locations, rather than
+/// independent per-card marginals, so deck conservation, hand capacities,
+/// exposed failed-throw holdings, and suit voids remain true together. It does
+/// not add the omitted bid, compound-follow, or `better_player` implications
+/// documented at the module boundary.
+#[derive(Clone, Debug)]
+struct HiddenParticle {
+    hands: HashMap<PlayerID, Vec<Card>>,
+    kitty: Vec<Card>,
+    removed: Vec<Card>,
+}
+
+impl HiddenParticle {
+    fn from_world(
+        view: &PlayPhase,
+        knowledge: &Knowledge,
+        world: &DeterminizedWorld,
+    ) -> Option<Self> {
+        let mut hands = HashMap::new();
+        for &pid in knowledge.hidden_counts.keys() {
+            let cards = world
+                .play
+                .hands()
+                .get(pid)
+                .ok()?
+                .iter()
+                .flat_map(|(&card, &count)| std::iter::repeat_n(card, count))
+                .collect::<Vec<_>>();
+            hands.insert(pid, cards);
+        }
+        let (kitty_template, removed_template) = view.piles_for_determinization();
+        let (world_kitty, world_removed) = world.play.piles_for_determinization();
+        if kitty_template.len() != world_kitty.len()
+            || removed_template.len() != world_removed.len()
+        {
+            return None;
+        }
+        let kitty = kitty_template
+            .iter()
+            .zip(world_kitty)
+            .filter_map(|(&template, &card)| (template == Card::Unknown).then_some(card))
+            .collect();
+        let removed = removed_template
+            .iter()
+            .zip(world_removed)
+            .filter_map(|(&template, &card)| (template == Card::Unknown).then_some(card))
+            .collect();
+        let particle = Self {
+            hands,
+            kitty,
+            removed,
+        };
+        particle.is_compatible(view, knowledge).then_some(particle)
+    }
+
+    fn observe(&mut self, observer: PlayerID, evidence: &[PublicPlayEvidence]) -> bool {
+        for play in evidence {
+            if play.id == observer {
+                continue;
+            }
+            let Some(hand) = self.hands.get_mut(&play.id) else {
+                return false;
+            };
+            for &card in &play.cards {
+                if card == Card::Unknown {
+                    // Identity-hidden play requires a combinatorial transition,
+                    // not an arbitrary deletion. Drop the particle and let the
+                    // exact fresh sampler handle that uncommon ruleset.
+                    return false;
+                }
+                let Some(index) = hand.iter().position(|held| *held == card) else {
+                    return false;
+                };
+                hand.swap_remove(index);
+            }
+        }
+        true
+    }
+
+    fn is_compatible(&self, view: &PlayPhase, knowledge: &Knowledge) -> bool {
+        let (kitty_template, removed_template) = view.piles_for_determinization();
+        if self.kitty.len()
+            != kitty_template
+                .iter()
+                .filter(|card| **card == Card::Unknown)
+                .count()
+            || self.removed.len()
+                != removed_template
+                    .iter()
+                    .filter(|card| **card == Card::Unknown)
+                    .count()
+        {
+            return false;
+        }
+
+        let mut accounted = knowledge.seen.clone();
+        for (&pid, &expected) in &knowledge.hidden_counts {
+            let Some(cards) = self.hands.get(&pid) else {
+                return false;
+            };
+            if cards.len() != expected
+                || cards.iter().any(|&card| {
+                    card == Card::Unknown
+                        || !location_accepts(
+                            HiddenCardLocation::Player(pid),
+                            card,
+                            knowledge.trump,
+                            &knowledge.voids,
+                        )
+                })
+            {
+                return false;
+            }
+            let held = Card::count(cards.iter().copied());
+            if knowledge.known_holding.get(&pid).is_some_and(|required| {
+                required
+                    .iter()
+                    .any(|(card, count)| held.get(card).copied().unwrap_or(0) < *count)
+            }) {
+                return false;
+            }
+            for (&card, &count) in &held {
+                *accounted.entry(card).or_default() += count;
+            }
+        }
+        if self.hands.len() != knowledge.hidden_counts.len()
+            || self
+                .kitty
+                .iter()
+                .chain(&self.removed)
+                .any(|card| *card == Card::Unknown)
+        {
+            return false;
+        }
+        for &card in self.kitty.iter().chain(&self.removed) {
+            *accounted.entry(card).or_default() += 1;
+        }
+        accounted == knowledge.configured_counts
+    }
+
+    fn materialize(&self, view: &PlayPhase, knowledge: &Knowledge) -> Option<DeterminizedWorld> {
+        if !self.is_compatible(view, knowledge) {
+            return None;
+        }
+        let mut hands = Hands::new(view.propagated().players().iter().map(|player| player.id));
+        hands.set_trump(knowledge.trump);
+        for player in view.propagated().players() {
+            let visible = view
+                .hands()
+                .get(player.id)
+                .ok()?
+                .iter()
+                .filter(|(card, _)| **card != Card::Unknown)
+                .flat_map(|(&card, &count)| std::iter::repeat_n(card, count));
+            hands.add(player.id, visible).ok()?;
+            if let Some(hidden) = self.hands.get(&player.id) {
+                hands.add(player.id, hidden.iter().copied()).ok()?;
+            }
+        }
+        let (kitty_template, removed_template) = view.piles_for_determinization();
+        let kitty = materialize_unknowns(kitty_template, self.kitty.clone())?;
+        let removed = materialize_unknowns(removed_template, self.removed.clone())?;
+        Some(DeterminizedWorld {
+            play: view.clone_with_determinized_cards(hands, kitty, removed),
+        })
+    }
+}
+
+/// Experimental sequential Monte-Carlo approximation scoped to one observer
+/// and one hand.
+///
+/// New public plays condition every retained whole-world particle by removing
+/// the revealed cards from the hypothesized holder. Incompatible particles are
+/// discarded; survivors are revalidated against the current exact hard
+/// constraints. Fresh joint-matching samples continuously rejuvenate the
+/// reservoir. The current reveal transition is not multiplicity-weighted for
+/// duplicate physical copies, so this is not an exact posterior and must remain
+/// behind an explicit runtime opt-in. This type contains no true hidden state.
+pub struct PersistentBelief {
+    observer: PlayerID,
+    evidence: Vec<PublicPlayEvidence>,
+    particles: Vec<HiddenParticle>,
+    capacity: usize,
+    fresh_samples_seen: usize,
+}
+
+impl PersistentBelief {
+    pub fn new(observer: PlayerID, capacity: usize) -> Self {
+        Self {
+            observer,
+            evidence: Vec::new(),
+            particles: Vec::new(),
+            capacity: capacity.max(1),
+            fresh_samples_seen: 0,
+        }
+    }
+
+    fn synchronize(&mut self, view: &PlayPhase, knowledge: &Knowledge) {
+        let evidence = public_play_evidence(view);
+        let extends_previous = evidence.len() >= self.evidence.len()
+            && evidence[..self.evidence.len()] == self.evidence;
+        if !extends_previous {
+            // A takeback, restored older snapshot, or a colliding cache key must
+            // never be interpreted as negative evidence about hidden cards.
+            self.particles.clear();
+            self.fresh_samples_seen = 0;
+        } else {
+            let new_evidence = &evidence[self.evidence.len()..];
+            let evidence_changed = !new_evidence.is_empty();
+            let previous_len = self.particles.len();
+            let observer = self.observer;
+            self.particles.retain_mut(|particle| {
+                particle.observe(observer, new_evidence) && particle.is_compatible(view, knowledge)
+            });
+            if evidence_changed || self.particles.len() != previous_len {
+                // Counts from the pre-conditioning reservoir are not valid for
+                // replacement probabilities in the newly conditioned set.
+                self.fresh_samples_seen = self.particles.len();
+            }
+        }
+        self.evidence = evidence;
+    }
+
+    fn insert<R: Rng>(&mut self, particle: HiddenParticle, rng: &mut R) {
+        self.fresh_samples_seen = self.fresh_samples_seen.saturating_add(1);
+        if self.particles.len() < self.capacity {
+            self.particles.push(particle);
+            return;
+        }
+        // Reservoir replacement prevents early-hand particles from permanently
+        // monopolizing the set as fresh exact assignments arrive.
+        let index = rng.gen_range(0..self.fresh_samples_seen);
+        if index < self.capacity {
+            self.particles[index] = particle;
+        }
+    }
+
+    fn existing_world<R: Rng>(
+        &self,
+        view: &PlayPhase,
+        knowledge: &Knowledge,
+        rng: &mut R,
+    ) -> Option<DeterminizedWorld> {
+        self.particles.choose(rng)?.materialize(view, knowledge)
+    }
+
+    pub fn particle_count(&self) -> usize {
+        self.particles.len()
+    }
+}
+
+/// Draw from an experimental persistent-particle approximation mixed with fresh
+/// joint constrained samples. Retained-particle reuse is biased for duplicate
+/// card identities until reveal conditioning is multiplicity-weighted. The
+/// public search entry point therefore calls this only after
+/// `SHENGJI_PERSISTENT_BELIEF=1`. Learned proposals use fresh inference because
+/// their score changes with every new schema-v2 history row.
+pub fn sample_hidden_hands_with_persistent_belief<R: Rng>(
+    view: &PlayPhase,
+    me: PlayerID,
+    rng: &mut R,
+    proposal: Option<&dyn HiddenAssignmentProposal>,
+    belief: &mut PersistentBelief,
+) -> Option<DeterminizedWorld> {
+    if belief.observer != me {
+        return None;
+    }
+    let knowledge = Knowledge::from_play_view(view, me);
+    belief.synchronize(view, &knowledge);
+
+    if proposal.is_none() && !belief.particles.is_empty() && rng.gen_ratio(1, 3) {
+        if let Some(world) = belief.existing_world(view, &knowledge, rng) {
+            return Some(world);
+        }
+    }
+
+    let fresh = sample_hidden_hands_with_proposal(view, me, rng, proposal);
+    if let Some(world) = fresh {
+        if let Some(particle) = HiddenParticle::from_world(view, &knowledge, &world) {
+            belief.insert(particle, rng);
+        }
+        return Some(world);
+    }
+    if proposal.is_none() {
+        belief.existing_world(view, &knowledge, rng)
+    } else {
+        None
+    }
+}
+
 /// Sample a complete assignment of all hidden cards to opponent hands, kitty,
 /// and (if redacted) removed-card positions.
 ///
@@ -763,9 +1080,14 @@ pub fn sample_hidden_hands_with_proposal<R: Rng>(
 mod sampler_calibration_tests {
     use super::{
         observe_revealed_holding, refine_matching, rejection_matching, HiddenCardLocation,
+        HiddenParticle, Knowledge, PersistentBelief,
     };
+    use crate::game_state::play_phase::PlayPhase;
+    use crate::settings::{GameMode, PropagatedState};
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use shengji_mechanics::deck::Deck;
+    use shengji_mechanics::hands::Hands;
     use shengji_mechanics::trick::PlayedCards;
     use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Suit, Trump};
     use std::collections::HashMap;
@@ -802,6 +1124,89 @@ mod sampler_calibration_tests {
         );
         assert_eq!(holdings[&player].get(&three), Some(&1));
         assert!(!holdings[&player].contains_key(&four));
+    }
+
+    #[test]
+    fn persistent_particle_conditions_across_completed_tricks() {
+        let mut propagated = PropagatedState::default();
+        let ids = (0..4)
+            .map(|index| propagated.add_player(format!("p{index}")).unwrap().0)
+            .collect::<Vec<_>>();
+        propagated.set_num_decks(Some(1)).unwrap();
+        let deck = Deck::default();
+        let configured = deck.cards().collect::<Vec<_>>();
+        let kitty = configured[..2].to_vec();
+        let trump = Trump::NoTrump { number: None };
+        let mut hands = Hands::new(ids.iter().copied());
+        hands.set_trump(trump);
+        for (index, cards) in configured[2..].chunks_exact(13).enumerate() {
+            hands.add(ids[index], cards.iter().copied()).unwrap();
+        }
+        let mut real = PlayPhase::new(
+            propagated,
+            1,
+            GameMode::Tractor,
+            hands,
+            kitty.clone(),
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0], ids[2]],
+            vec![],
+            vec![deck],
+            vec![],
+        )
+        .unwrap();
+        let observer = ids[1];
+        let hidden_hands = ids
+            .iter()
+            .copied()
+            .filter(|pid| *pid != observer)
+            .map(|pid| {
+                let cards = real
+                    .hands()
+                    .get(pid)
+                    .unwrap()
+                    .iter()
+                    .flat_map(|(&card, &count)| std::iter::repeat_n(card, count))
+                    .collect();
+                (pid, cards)
+            })
+            .collect();
+        let mut belief = PersistentBelief::new(observer, 8);
+        belief.particles.push(HiddenParticle {
+            hands: hidden_hands,
+            kitty,
+            removed: vec![],
+        });
+
+        for completed in 1..=2 {
+            for _ in 0..ids.len() {
+                let player = real.next_player().unwrap();
+                let legal = real
+                    .hands()
+                    .get(player)
+                    .unwrap()
+                    .keys()
+                    .copied()
+                    .find(|card| real.can_play_cards(player, &[*card]).is_ok())
+                    .expect("a singleton follow must exist");
+                real.play_cards(player, &[legal]).unwrap();
+            }
+            real.finish_trick().unwrap();
+            let mut view = real.clone();
+            view.destructively_redact_for_player(observer);
+            let knowledge = Knowledge::from_play_view(&view, observer);
+            belief.fresh_samples_seen = 99;
+            belief.synchronize(&view, &knowledge);
+            assert_eq!(belief.particle_count(), 1);
+            assert_eq!(belief.fresh_samples_seen, 1);
+            assert_eq!(belief.evidence.len(), completed * ids.len());
+            assert!(belief.particles[0].is_compatible(&view, &knowledge));
+            for (&pid, &count) in &knowledge.hidden_counts {
+                assert_eq!(belief.particles[0].hands[&pid].len(), count);
+            }
+        }
     }
 
     #[test]

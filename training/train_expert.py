@@ -45,6 +45,7 @@ except ModuleNotFoundError:
 @dataclass
 class DecisionGroup:
     game_id: str
+    trajectory_family_id: str
     group_id: str
     x: np.ndarray
     teacher_y: int
@@ -68,6 +69,7 @@ class Dataset:
     game_ids_are_trajectories: bool
     bucket_values: list[int]
     path: str
+    provenance_manifest: dict | None
 
     @property
     def feature_dim(self):
@@ -113,6 +115,7 @@ def load_dataset(path):
 
         dataset_schema = 1
         game_ids_are_trajectories = "game_id" in reader.fieldnames
+        game_to_family = {}
         for row_index, row in enumerate(reader, start=2):
             if not row:
                 continue
@@ -124,6 +127,14 @@ def load_dataset(path):
             if not row.get("game_id"):
                 game_ids_are_trajectories = False
             game_id = row.get("game_id") or f"legacy-group-{group_id}"
+            trajectory_family_id = row.get("trajectory_family_id") or game_id
+            if not trajectory_family_id:
+                raise SystemExit(f"row {row_index}: blank trajectory_family_id")
+            existing_family = game_to_family.setdefault(game_id, trajectory_family_id)
+            if existing_family != trajectory_family_id:
+                raise SystemExit(
+                    f"row {row_index}: game {game_id} maps to multiple trajectory families"
+                )
             try:
                 features = np.asarray(
                     [float(row[name]) for name in feature_names], dtype=np.float32
@@ -138,6 +149,7 @@ def load_dataset(path):
             rows_by_group[group_id].append(
                 {
                     "game_id": game_id,
+                    "trajectory_family_id": trajectory_family_id,
                     "candidate_id": int(row.get("candidate_id") or len(rows_by_group[group_id])),
                     "features": features,
                     "label": int(row["label"]),
@@ -165,6 +177,9 @@ def load_dataset(path):
         game_ids = {row["game_id"] for row in rows}
         if len(game_ids) != 1:
             raise SystemExit(f"group {group_id}: candidates span multiple games")
+        family_ids = {row["trajectory_family_id"] for row in rows}
+        if len(family_ids) != 1:
+            raise SystemExit(f"group {group_id}: candidates span trajectory families")
         values = [row["v_target"] for row in rows if row["v_target"] is not None]
         if values and max(values) - min(values) > 1e-5:
             raise SystemExit(f"group {group_id}: state v_target differs across candidates")
@@ -186,6 +201,7 @@ def load_dataset(path):
         groups.append(
             DecisionGroup(
                 game_id=next(iter(game_ids)),
+                trajectory_family_id=next(iter(family_ids)),
                 group_id=group_id,
                 x=np.stack([row["features"] for row in rows]),
                 teacher_y=next(i for i, row in enumerate(rows) if row["label"] == 1),
@@ -234,6 +250,23 @@ def load_dataset(path):
             ],
             dtype=np.float32,
         )
+    provenance_manifest = None
+    provenance_path = f"{path}.manifest.json"
+    if os.path.isfile(provenance_path):
+        try:
+            with open(provenance_path) as handle:
+                provenance_manifest = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            raise SystemExit(f"Invalid dataset manifest {provenance_path}: {error}") from error
+        expected_hash = provenance_manifest.get("content_sha256")
+        if expected_hash is not None and expected_hash != sha256(path):
+            raise SystemExit(f"Dataset manifest content hash does not match {path}")
+        declared_schema = provenance_manifest.get("dataset_schema_version")
+        if declared_schema is not None and declared_schema != dataset_schema:
+            raise SystemExit("Dataset manifest schema does not match CSV rows")
+        declared_dim = provenance_manifest.get("feature_dim")
+        if declared_dim is not None and declared_dim != len(feature_names):
+            raise SystemExit("Dataset manifest feature dimension does not match CSV")
     return Dataset(
         groups,
         feature_names,
@@ -242,38 +275,43 @@ def load_dataset(path):
         game_ids_are_trajectories,
         bucket_values,
         path,
+        provenance_manifest,
     )
 
 
 def split_by_game(groups, val_frac, seed):
-    """Partition whole trajectories; no game may appear in both sets."""
-    game_ids = sorted({group.game_id for group in groups})
-    if len(game_ids) < 2:
+    """Partition whole trajectory families; augmented copies never leak."""
+    family_ids = sorted({group.trajectory_family_id for group in groups})
+    if len(family_ids) < 2:
         raise SystemExit(
-            "Need at least two game_id values for a leakage-free train/val split. "
+            "Need at least two trajectory families for a leakage-free train/val split. "
             "Generate >=2 schema-v3 games (legacy CSVs cannot recover hand IDs)."
         )
     rng = np.random.default_rng(seed)
-    rng.shuffle(game_ids)
-    n_val = max(1, int(round(len(game_ids) * val_frac)))
-    n_val = min(n_val, len(game_ids) - 1)
-    val_games = set(game_ids[:n_val])
-    train = [group for group in groups if group.game_id not in val_games]
-    val = [group for group in groups if group.game_id in val_games]
-    assert {g.game_id for g in train}.isdisjoint({g.game_id for g in val})
-    return train, val, sorted(set(game_ids) - val_games), sorted(val_games)
+    rng.shuffle(family_ids)
+    n_val = max(1, int(round(len(family_ids) * val_frac)))
+    n_val = min(n_val, len(family_ids) - 1)
+    val_families = set(family_ids[:n_val])
+    train = [group for group in groups if group.trajectory_family_id not in val_families]
+    val = [group for group in groups if group.trajectory_family_id in val_families]
+    assert {g.trajectory_family_id for g in train}.isdisjoint(
+        {g.trajectory_family_id for g in val}
+    )
+    return train, val, sorted(set(family_ids) - val_families), sorted(val_families)
 
 
 def analyze_dataset(dataset, granularities=(2, 1, 0)):
     groups = dataset.groups
     n_rows = sum(group.x.shape[0] for group in groups)
     games = {group.game_id for group in groups}
+    families = {group.trajectory_family_id for group in groups}
     q_rows = sum(np.isfinite(group.q_target).sum() for group in groups)
     q_pairs = sum(np.isfinite(group.q_target).sum() >= 2 for group in groups)
     print("\n=== dataset / target diagnostics ===")
     print(
         f"schema={dataset.dataset_schema_version} feature_schema={dataset.feature_schema_version} "
-        f"dim={dataset.feature_dim}; {len(games)} games, {len(groups)} decisions, "
+        f"dim={dataset.feature_dim}; {len(games)} games/{len(families)} split families, "
+        f"{len(groups)} decisions, "
         f"{n_rows} rows, {q_rows} Q rows, {q_pairs} Q-comparable decisions"
     )
     print(f"random policy top-1 baseline ≈ {len(groups) / max(1, n_rows):.1%}")
@@ -783,6 +821,8 @@ def write_model_manifest(path, golden_path, dataset, outputs, args, split, final
         else "normalized_level_utility"
     )
     output_semantics = ["policy_logit"] + [value_semantic for _ in outputs[1:]]
+    provenance = dataset.provenance_manifest or {}
+    dataset_manifest_path = f"{dataset.path}.manifest.json"
     manifest = {
         "manifest_version": 1,
         "feature_schema_version": dataset.feature_schema_version,
@@ -790,11 +830,32 @@ def write_model_manifest(path, golden_path, dataset, outputs, args, split, final
         "outputs": outputs,
         "output_semantics": output_semantics,
         "contract": "policy+state_v+action_q" if len(outputs) == 3 else "+".join(outputs),
+        "serving_status": "experimental_candidate",
+        "research_only": True,
+        "automatic_production_promotion_allowed": False,
         "model_sha256": sha256(path),
         "golden_path": os.path.basename(golden_path),
         "golden_sha256": sha256(golden_path),
         "dataset_sha256": sha256(dataset.path),
+        "dataset_manifest_sha256": (
+            sha256(dataset_manifest_path) if os.path.isfile(dataset_manifest_path) else None
+        ),
         "dataset_schema_version": dataset.dataset_schema_version,
+        "training_data_provenance": {
+            "research_only": bool(provenance.get("research_only", False)),
+            "automatic_production_promotion_allowed": bool(
+                provenance.get("automatic_production_promotion_allowed", False)
+            ),
+            "source_kinds": sorted(
+                {
+                    source.get("source_kind", "unknown")
+                    for source in provenance.get("sources", [])
+                    if isinstance(source, dict)
+                }
+            ),
+            "augmentation": provenance.get("augmentation"),
+            "offline": provenance.get("offline"),
+        },
         "training": {
             "seed": args.seed,
             "epochs": args.epochs,
@@ -808,11 +869,26 @@ def write_model_manifest(path, golden_path, dataset, outputs, args, split, final
             "early_stop_metric": args.early_stop_metric,
         },
         "split": {
+            # Back-compatible names: before augmentation support one game was
+            # exactly one leakage unit.  Values now count parent trajectories.
             "train_games": len(split[0]),
             "validation_games": len(split[1]),
-            "train_game_id_sha256": hashlib.sha256("\n".join(split[0]).encode()).hexdigest(),
-            "validation_game_id_sha256": hashlib.sha256("\n".join(split[1]).encode()).hexdigest(),
+            "train_game_id_sha256": hashlib.sha256(
+                "\n".join(split[0]).encode()
+            ).hexdigest(),
+            "validation_game_id_sha256": hashlib.sha256(
+                "\n".join(split[1]).encode()
+            ).hexdigest(),
+            "train_trajectory_families": len(split[0]),
+            "validation_trajectory_families": len(split[1]),
+            "train_trajectory_family_id_sha256": hashlib.sha256(
+                "\n".join(split[0]).encode()
+            ).hexdigest(),
+            "validation_trajectory_family_id_sha256": hashlib.sha256(
+                "\n".join(split[1]).encode()
+            ).hexdigest(),
             "game_ids_are_trajectories": dataset.game_ids_are_trajectories,
+            "leakage_unit": "trajectory_family_id",
         },
         "validation_metrics": final_metrics,
         "offline_auxiliary_heads": {
@@ -908,7 +984,7 @@ def main():
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    train, val, train_games, val_games = split_by_game(
+    train, val, train_families, val_families = split_by_game(
         dataset.groups, args.val_frac, args.seed
     )
     has_v = any(group.v_target is not None for group in dataset.groups)
@@ -924,13 +1000,14 @@ def main():
 
     avg_candidates = sum(group.x.shape[0] for group in dataset.groups) / len(dataset.groups)
     print(
-        f"Loaded {len(dataset.groups)} decisions from {len(train_games)+len(val_games)} games: "
+        f"Loaded {len(dataset.groups)} decisions from "
+        f"{len(train_families)+len(val_families)} trajectory families: "
         f"{len(train)} train/{len(val)} val decisions, avg {avg_candidates:.1f} candidates."
     )
     print(
         f"Objectives: policy={args.policy_weight:g}({args.policy_target}) "
         f"state-V={value_weight:g} action-Q={q_weight:g} "
-        f"offline-outcome-aux={args.auxiliary_weight:g}; split is game-disjoint."
+        f"offline-outcome-aux={args.auxiliary_weight:g}; split is parent-trajectory-disjoint."
     )
 
     device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
@@ -1009,7 +1086,7 @@ def main():
         dataset,
         outputs,
         args,
-        (train_games, val_games),
+        (train_families, val_families),
         final_metrics,
     )
     print(f"Exported outputs={outputs} to {os.path.abspath(args.out)}")

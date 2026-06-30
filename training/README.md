@@ -118,12 +118,14 @@ After training it validates tract parity, then launches embedded and candidate
 models in separate processes so model OnceLock state cannot cross arms.
 Identical deals/budgets face the same Easy control. Candidate-minus-embedded
 per-deck win, margin, and level utility get paired bootstrap intervals;
-AB_MIN_LEVEL_DELTA is a quantitative gate.
+AB_MIN_LEVEL_DELTA gates the lower endpoint of the paired level-utility
+bootstrap interval, not the noisier point estimate.
 
 ## Offline belief model
 
 ~~~sh
 BELIEF_GAMES=20 BELIEF_SEED=77 BELIEF_SNAPSHOT_EVERY=4 \
+BELIEF_FEATURE_SCHEMA_VERSION=2 \
 BELIEF_OUT=/tmp/belief.csv \
 cargo +1.92.0 run --release -p shengji-core --example gen_belief_data
 
@@ -133,7 +135,7 @@ python3.13 training/train_belief.py --data /tmp/belief.csv \
 cargo +1.92.0 run --release -p shengji-core \
   --example validate_belief_model -- \
   /tmp/belief.onnx /tmp/belief.onnx.manifest.json \
-  /tmp/belief.onnx.golden.json
+  /tmp/belief.onnx.golden.json /tmp/belief.csv
 ~~~
 
 For each honest snapshot and hidden card copy, the exporter records public
@@ -142,18 +144,43 @@ opposite, previous, kitty), and hard legality mask. The trainer splits by game,
 masks illegal logits, and reports accuracy, NLL, multiclass Brier, ECE, and
 illegal probability mass.
 
-This first contract is intentionally narrow: CSV schema 1, exactly b0..b19,
-target order next/opposite/previous/kitty, and the
-tractor:4p:2x-standard:kitty8:no-removed game contract. Training requires the
-generator sidecar and validates its schema, width, target order, behavior, and
-declared game contract before reading rows. `--allow-unsafe-no-sidecar` exists
-only for exploration and marks the artifact non-servable. Export includes exact feature names and writes
-PyTorch golden vectors; validate_belief_model checks the manifest and numerical
+Two exact feature contracts are supported. Schema v1 is the frozen b0..b19
+aggregate vector; pre-lineage artifacts must be regenerated with the current
+strict manifest. Schema v2 has 128 ordered semantic features: the v1 prefix,
+public progress, four public bid events, and eight public play events. Generate
+v2 explicitly with `BELIEF_FEATURE_SCHEMA_VERSION=2`; the default remains v1
+for compatibility.
+
+The sidecar tuple must be exactly `(manifest, feature schema, dimension)` =
+`(1,1,20)` or `(2,2,128)`, and its ordered `feature_names` must match every CSV
+column and row-level feature schema. Both retain target order
+next/opposite/previous/kitty and the
+tractor:4p:2x-standard:kitty8:no-removed game contract. Training rejects any
+cross-version mixture. The sidecar binds the exact CSV SHA-256 and records the
+generator domain (`bidding=expert;exchange=easy;play=easy`); the model manifest
+also binds the encoder contract and exact Rust encoder-source SHA-256 and carries
+all fields forward. Publicly pinned failed-throw holdings are excluded from
+targets because the constraint solver already assigns them deterministically.
+`--allow-unsafe-no-sidecar` is restricted to v1 exploration and marks the
+artifact non-servable. Export and golden vectors carry the selected schema
+dynamically; validate_belief_model checks artifact hashes, lineage fields, and
 ONNX/tract parity for both feature and legality-mask inputs.
+Pass the dataset as a fourth validator argument to re-hash the CSV and sidecar
+in place.
 
 The manifest marks the result as an experimental serving candidate. The runtime
 loader is opt-in and production defaults it off; promotion still requires
 evaluation of belief-guided determinization.
+
+The network emits per-card destination marginals. Runtime multiplies those
+scores over physical-copy assignments, which does not capture correlations or
+calibrate the realized joint sampler. Treat row metrics as proposal diagnostics,
+not posterior calibration. The retained-particle experiment is separately off
+unless `SHENGJI_PERSISTENT_BELIEF=1`; duplicate-copy reveal conditioning is not
+yet multiplicity-weighted, so fresh constrained sampling remains the default.
+Golden vectors currently prove deterministic tensor/ONNX parity using synthetic
+inputs. The manifest labels that scope explicitly; a mechanics-state-derived
+encoder golden corpus remains required before promotion.
 
 Runtime belief weighting defaults off. A serving-path smoke must explicitly
 enable it, for example:
@@ -165,3 +192,35 @@ SHENGJI_BELIEF_WEIGHT=0.35 SHENGJI_BOT_BUDGET_MS=20 \
 cargo +1.92.0 run --release -p shengji-core \
   --example model_control_eval -- 2 48879
 ~~~
+
+## Bounded expert iteration and replay experiments
+
+The existing value/Q runner is also the execution engine for a bounded
+search-teacher loop. It can deterministically mix trajectory policies by shard,
+train a candidate, compare it with the previous round on matched deals, and use
+that candidate as the next round's search prior:
+
+~~~sh
+python3 training/expert_iteration.py plan \
+  --config training/expert_iteration.example.json
+python3 training/expert_iteration.py run \
+  --config training/expert_iteration.example.json \
+  --workdir "$HOME/.shengji-expert-iteration"
+~~~
+
+Optional seat/suit symmetry audits and replay-verified offline trajectories are
+composed by `training/prepare_expert_data.py`. Augmented copies share a parent
+trajectory split; offline Q values are stripped and offline volume is capped.
+All such paths are research-only and never auto-promote a model. See
+[`docs/expert-iteration-training.md`](../docs/expert-iteration-training.md) for
+the exact configuration, replay attestation, symmetry, resumability, and
+measurement contracts.
+
+Specialized bid and kitty listwise candidates can be trained with
+`training/train_phase.py` after `gen_phase_training_data` emits the documented
+20-feature phase datasets. Listwise outputs are used only for offset/scale-
+invariant rank blending; bid/pass stays heuristic. Runtime is limited to the
+exporter's four-player/two-standard-deck Tractor domain and requires an explicit
+`SHENGJI_PHASE_MODEL_WEIGHT`; unsupported contexts and the default fall back to
+the existing heuristics. See the linked experiment guide for commands and all
+search/belief/phase knobs.

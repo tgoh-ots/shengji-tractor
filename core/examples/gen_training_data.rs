@@ -20,6 +20,8 @@
 //! * `GEN_GAMES` (default 200), `GEN_OUT` (default `training/data.csv`),
 //!   `GEN_SEED` (default `0xD157111`);
 //! * `GEN_BEHAVIOUR=easy|expert|enoch|mix` and `GEN_MIX_SEARCH_FRAC`;
+//! * `GEN_SEAT_BEHAVIOURS` optionally overrides it with exactly four comma-
+//!   separated values, one per seat (for partner/opponent league diversity);
 //! * `GEN_BEHAVIOUR_BUDGET_MS` is the behavior policy's final per-call budget;
 //! * `GEN_TEACHER_BUDGET_MS` (default 400; policy-label quality);
 //! * `GEN_Q_CANDIDATES` (default 2, `0` disables Q generation, `all` evaluates
@@ -61,14 +63,28 @@ enum BehaviourMode {
 
 impl BehaviourMode {
     fn from_env() -> Self {
-        match std::env::var("GEN_BEHAVIOUR").ok().as_deref() {
-            Some("expert") => Self::Tier(BotDifficulty::Expert),
-            Some("enoch") => Self::Tier(BotDifficulty::Enoch),
-            Some("mix") => Self::Mix {
+        Self::parse(
+            std::env::var("GEN_BEHAVIOUR")
+                .ok()
+                .as_deref()
+                .unwrap_or("easy"),
+        )
+    }
+
+    fn parse(value: &str) -> Self {
+        match value {
+            "expert" => Self::Tier(BotDifficulty::Expert),
+            "enoch" => Self::Tier(BotDifficulty::Enoch),
+            "grandmaster" => Self::Tier(BotDifficulty::Grandmaster),
+            "mix" => Self::Mix {
                 tier: BotDifficulty::Expert,
                 frac: env_f64("GEN_MIX_SEARCH_FRAC", 0.5).clamp(0.0, 1.0),
             },
-            _ => Self::Easy,
+            "easy" => Self::Easy,
+            _ => panic!(
+                "unsupported behaviour {:?}; expected easy, expert, enoch, grandmaster, or mix",
+                value
+            ),
         }
     }
 
@@ -95,6 +111,71 @@ impl BehaviourMode {
             }
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct BehaviourPlan {
+    seats: [BehaviourMode; 4],
+    heterogeneous: bool,
+}
+
+impl BehaviourPlan {
+    fn from_env() -> Self {
+        if let Ok(value) = std::env::var("GEN_SEAT_BEHAVIOURS") {
+            let parsed = value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(BehaviourMode::parse)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                parsed.len(),
+                4,
+                "GEN_SEAT_BEHAVIOURS must contain exactly four entries, got {}",
+                parsed.len()
+            );
+            let seats = [parsed[0], parsed[1], parsed[2], parsed[3]];
+            Self {
+                seats,
+                heterogeneous: true,
+            }
+        } else {
+            Self {
+                seats: [BehaviourMode::from_env(); 4],
+                heterogeneous: false,
+            }
+        }
+    }
+
+    fn label(&self) -> String {
+        if self.heterogeneous {
+            format!(
+                "seats[{}]",
+                self.seats
+                    .iter()
+                    .map(|mode| mode.label())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        } else {
+            self.seats[0].label()
+        }
+    }
+
+    fn pick(&self, rng: &mut StdRng) -> [BotDifficulty; 4] {
+        self.seats.map(|mode| mode.pick(rng))
+    }
+}
+
+fn behaviour_for(
+    seats: &[PlayerID],
+    behaviours: &[BotDifficulty; 4],
+    player: PlayerID,
+) -> Option<BotDifficulty> {
+    seats
+        .iter()
+        .position(|seat| *seat == player)
+        .map(|index| behaviours[index])
 }
 
 #[derive(Clone, Copy)]
@@ -208,6 +289,7 @@ struct DatasetManifest {
     decisions: usize,
     q_rows: usize,
     behaviour: String,
+    seat_behaviours: [String; 4],
     mix_search_fraction: f64,
     teacher: &'static str,
     teacher_budget_ms: u64,
@@ -230,7 +312,7 @@ fn main() {
     let out_path = std::env::var("GEN_OUT").unwrap_or_else(|_| "training/data.csv".to_string());
     let manifest_path =
         std::env::var("GEN_MANIFEST").unwrap_or_else(|_| format!("{out_path}.manifest.json"));
-    let behaviour = BehaviourMode::from_env();
+    let behaviour = BehaviourPlan::from_env();
     let q_config = QConfig::from_env();
 
     eprintln!(
@@ -278,10 +360,15 @@ fn main() {
                     continue;
                 }
                 completed_games += 1;
+                // decision_id also advances across observations that are
+                // deliberately dropped (for example, when the teacher action
+                // is outside the bounded candidate set). The manifest count
+                // describes emitted listwise groups, not attempted IDs.
                 total_decisions += rows
-                    .last()
-                    .map(|row| row.decision_id as usize + 1)
-                    .unwrap_or(0);
+                    .iter()
+                    .map(|row| row.group.as_str())
+                    .collect::<BTreeSet<_>>()
+                    .len();
                 q_rows += rows.iter().filter(|row| row.q_target.is_some()).count();
                 total_rows += rows.len();
                 for row in rows {
@@ -313,6 +400,7 @@ fn main() {
         decisions: total_decisions,
         q_rows,
         behaviour: behaviour.label(),
+        seat_behaviours: behaviour.seats.map(BehaviourMode::label),
         mix_search_fraction: env_f64("GEN_MIX_SEARCH_FRAC", 0.5),
         teacher: "omniscient-policy-baseline",
         teacher_budget_ms,
@@ -384,7 +472,7 @@ fn play_one_hand_collecting(
     run_seed: u64,
     game_index: usize,
     game_seed: u64,
-    behaviour_mode: BehaviourMode,
+    behaviour_plan: BehaviourPlan,
     behaviour_budget_ms: u64,
     teacher_budget_ms: u64,
     q_config: QConfig,
@@ -397,7 +485,7 @@ fn play_one_hand_collecting(
     let draw = seeded_draw_phase(&decks, &mut deal_rng);
     let seats: Vec<PlayerID> = draw.propagated().players().iter().map(|p| p.id).collect();
     let mut policy_rng = StdRng::seed_from_u64(game_seed ^ 0xB3A4_91C2_D5E6_F708);
-    let game_behaviour = behaviour_mode.pick(&mut policy_rng);
+    let game_behaviours = behaviour_plan.pick(&mut policy_rng);
     let run_id = format!("seed-{run_seed}");
     let game_id = format!("{run_id}-game-{game_index}");
 
@@ -423,9 +511,11 @@ fn play_one_hand_collecting(
                 } else {
                     let mut bid = false;
                     for &seat in &seats {
-                        if let Some(candidate) =
-                            policy::choose_bid(draw, seat, BotDifficulty::Expert)
-                        {
+                        if let Some(candidate) = policy::choose_bid(
+                            draw,
+                            seat,
+                            behaviour_for(&seats, &game_behaviours, seat)?,
+                        ) {
                             if draw.bid(seat, candidate.card, candidate.count) {
                                 bid = true;
                                 break;
@@ -450,11 +540,12 @@ fn play_one_hand_collecting(
             }
             GameState::Exchange(exchange) => {
                 let landlord = exchange.landlord();
+                let landlord_behaviour = behaviour_for(&seats, &game_behaviours, landlord)?;
                 let view = GameState::Exchange(exchange.clone()).for_player(landlord);
                 match policy::select_action_with_search_budget(
                     &view,
                     landlord,
-                    game_behaviour,
+                    landlord_behaviour,
                     behaviour_budget_ms,
                 )
                 .ok()
@@ -489,11 +580,12 @@ fn play_one_hand_collecting(
                         play.finish_trick().ok()?;
                     }
                     Some(actor) => {
+                        let actor_behaviour = behaviour_for(&seats, &game_behaviours, actor)?;
                         let honest = GameState::Play(play.clone()).for_player(actor);
                         let behaviour_cards = match policy::select_action_with_search_budget(
                             &honest,
                             actor,
-                            game_behaviour,
+                            actor_behaviour,
                             behaviour_budget_ms,
                         )
                         .ok()
@@ -513,7 +605,7 @@ fn play_one_hand_collecting(
                             &game_id,
                             game_seed,
                             decision_id,
-                            game_behaviour,
+                            actor_behaviour,
                             teacher_budget_ms,
                             q_config,
                             &mut game_rows,
@@ -913,6 +1005,32 @@ fn env_f64(name: &str, default: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heterogeneous_behaviour_plan_tracks_each_seat() {
+        let seats = [PlayerID(7), PlayerID(4), PlayerID(9), PlayerID(2)];
+        let behaviours = [
+            BotDifficulty::Easy,
+            BotDifficulty::Expert,
+            BotDifficulty::Enoch,
+            BotDifficulty::Grandmaster,
+        ];
+        for (index, seat) in seats.iter().enumerate() {
+            assert_eq!(
+                behaviour_for(&seats, &behaviours, *seat),
+                Some(behaviours[index])
+            );
+        }
+        assert_eq!(behaviour_for(&seats, &behaviours, PlayerID(99)), None);
+    }
+
+    #[test]
+    fn behaviour_labels_are_manifest_stable() {
+        assert_eq!(BehaviourMode::parse("easy").label(), "easy");
+        assert_eq!(BehaviourMode::parse("expert").label(), "expert");
+        assert_eq!(BehaviourMode::parse("enoch").label(), "enoch");
+        assert_eq!(BehaviourMode::parse("grandmaster").label(), "grandmaster");
+    }
 
     #[test]
     fn game_seeds_are_stable_and_distinct() {

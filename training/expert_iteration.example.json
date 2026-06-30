@@ -1,0 +1,98 @@
+{
+  "defaults": {
+    "ab_budget_ms": 150,
+    "ab_min_level_delta": -0.02,
+    "ab_pairs": 400,
+    "auxiliary_weight": 0.25,
+    "base_seed": 70001,
+    "early_stop_metric": "q",
+    "epochs": 80,
+    "games_per_shard": 250,
+    "num_shards": 16,
+    "policy_target": "teacher",
+    "policy_weight": 1.0,
+    "q_weight": 1.0,
+    "run_ab": 1,
+    "value_weight": 1.0
+  },
+  "manifest_version": 1,
+  "research_only": true,
+  "rounds": [
+    {
+      "league": [
+        {
+          "behaviour": "easy",
+          "behaviour_budget_ms": 5,
+          "name": "exploration-easy",
+          "q_candidates": 2,
+          "q_rollout_behaviour": "easy",
+          "q_rollout_budget_ms": 10,
+          "slots": 1,
+          "teacher_budget_ms": 300
+        },
+        {
+          "behaviour": "mix",
+          "behaviour_budget_ms": 80,
+          "mix_search_fraction": 0.5,
+          "name": "on-policy-mix",
+          "q_candidates": 3,
+          "q_rollout_behaviour": "expert",
+          "q_rollout_budget_ms": 30,
+          "slots": 3,
+          "teacher_budget_ms": 400
+        },
+        {
+          "behaviour": "enoch",
+          "behaviour_budget_ms": 100,
+          "name": "strong-heuristic-anchor",
+          "q_candidates": 3,
+          "q_rollout_behaviour": "enoch",
+          "q_rollout_budget_ms": 30,
+          "slots": 1,
+          "teacher_budget_ms": 400
+        }
+      ],
+      "name": "bootstrap-value-q",
+      "symmetry_augmentation": "identity"
+    },
+    {
+      "league": [
+        {
+          "behaviour": "mix",
+          "behaviour_budget_ms": 120,
+          "mix_search_fraction": 0.8,
+          "name": "candidate-on-policy",
+          "q_candidates": 4,
+          "q_rollout_behaviour": "expert",
+          "q_rollout_budget_ms": 40,
+          "seat_behaviours": [
+            "mix",
+            "enoch",
+            "mix",
+            "grandmaster"
+          ],
+          "slots": 4,
+          "teacher_budget_ms": 500
+        },
+        {
+          "behaviour": "enoch",
+          "behaviour_budget_ms": 100,
+          "name": "enoch-diversity",
+          "q_candidates": 3,
+          "q_rollout_behaviour": "enoch",
+          "q_rollout_budget_ms": 40,
+          "seat_behaviours": [
+            "enoch",
+            "mix",
+            "grandmaster",
+            "mix"
+          ],
+          "slots": 1,
+          "teacher_budget_ms": 500
+        }
+      ],
+      "name": "candidate-distribution",
+      "symmetry_augmentation": "identity"
+    }
+  ]
+}

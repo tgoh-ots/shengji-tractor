@@ -83,6 +83,11 @@ impl DrawPhase {
         &mut self.propagated
     }
 
+    /// The resolved game mode for this hand.
+    pub fn game_mode(&self) -> &GameMode {
+        &self.game_mode
+    }
+
     /// The (possibly redacted) hands drawn so far. Used by the bot policy to
     /// evaluate bidding strength from the acting player's own hand.
     pub fn hands(&self) -> &Hands {

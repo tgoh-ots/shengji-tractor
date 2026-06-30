@@ -10,17 +10,90 @@ import json
 import os
 
 import numpy as np
-import torch
-import torch.nn as nn
+
+try:
+    import torch
+    import torch.nn as nn
+
+    _NN_MODULE = nn.Module
+    _HAS_TORCH = True
+except ModuleNotFoundError:
+    torch = None
+    nn = None
+    _NN_MODULE = object
+    _HAS_TORCH = False
 
 DATASET_SCHEMA_VERSION = 1
-FEATURE_SCHEMA_VERSION = 1
-FEATURE_NAMES = [f"b{i}" for i in range(20)]
+SUPPORTED_FEATURE_SCHEMAS = {(1, 1, 20), (2, 2, 128)}
 TARGET_CLASSES = ["next-seat", "opposite-seat", "previous-seat", "kitty"]
 SUPPORTED_GAME_CONTRACT = "tractor:4p:2x-standard:kitty8:no-removed"
 SUPPORTED_GENERATOR_BEHAVIOUR = "easy-play/expert-bid"
+SUPPORTED_BEHAVIOUR_POLICY_DOMAIN = "bidding=expert;exchange=easy;play=easy"
 MODEL_CONTRACT = "offline_honest_card_location_belief"
 SERVING_STATUS = "experimental_candidate"
+LEGALITY_CONTRACT = "mask=1 iff destination has capacity and no public effective-suit void"
+TARGET_SEMANTICS = (
+    "per-hidden-card destination marginals excluding publicly pinned holdings; rows in a snapshot are correlated physical copies"
+)
+PROPOSAL_FACTORIZATION = (
+    "per-card destination marginals multiplied over physical-copy assignments; approximate joint"
+)
+GOLDEN_VECTOR_CONTRACT = (
+    "synthetic deterministic tensor parity only; state-derived encoder golden pending"
+)
+ENCODER_SOURCE_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "core", "src", "bot", "belief.rs")
+)
+PUBLIC_HISTORY_CONTRACTS = {
+    1: "schema-v1 aggregate public-state features",
+    2: "schema-v1 prefix plus ordered tail of 4 public bids and 8 public plays",
+}
+
+
+def belief_feature_names(feature_schema_version):
+    names = [f"b{i}" for i in range(20)]
+    if feature_schema_version == 1:
+        return names
+    if feature_schema_version != 2:
+        raise SystemExit(f"unsupported belief feature schema {feature_schema_version}")
+    names += [
+        "seq.completed_tricks",
+        "seq.current_trick_occupancy",
+        "seq.bid_count",
+        "seq.failed_throw_count",
+    ]
+    bid_names = [
+        "present",
+        "relative_actor",
+        "sequence_position",
+        "card_identity",
+        "count",
+        "epoch",
+    ]
+    for event in range(4):
+        names += [f"seq.bid_{event}.{name}" for name in bid_names]
+    play_names = [
+        "present",
+        "relative_actor",
+        "trick_recency",
+        "position_in_trick",
+        "card_count",
+        "point_density",
+        "trump_fraction",
+        "led_suit_fraction",
+        "failed_throw_count",
+        "first_effective_suit",
+    ]
+    for event in range(8):
+        names += [f"seq.play_{event}.{name}" for name in play_names]
+    assert len(names) == 128
+    return names
+
+
+def belief_encoder_contract(feature_schema_version):
+    if feature_schema_version in (1, 2):
+        return f"shengji-belief-encoder-v{feature_schema_version}"
+    raise SystemExit(f"unsupported belief encoder schema {feature_schema_version}")
 
 
 def sha256(path):
@@ -29,6 +102,14 @@ def sha256(path):
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def is_sha256(value):
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def validate_dataset_sidecar(path, allow_missing=False):
@@ -40,64 +121,122 @@ def validate_dataset_sidecar(path, allow_missing=False):
             f"belief dataset sidecar is required: {sidecar_path}; "
             "use --allow-unsafe-no-sidecar only for non-serving experiments"
         )
-    with open(sidecar_path) as handle:
-        manifest = json.load(handle)
-    if manifest.get("manifest_version") != 1:
-        raise SystemExit("belief dataset sidecar manifest_version must be 1")
+    try:
+        with open(sidecar_path) as handle:
+            manifest = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"invalid belief dataset sidecar: {error}") from error
     if manifest.get("dataset_schema_version") != DATASET_SCHEMA_VERSION:
         raise SystemExit(
             f"belief dataset sidecar schema must be {DATASET_SCHEMA_VERSION}"
         )
-    if manifest.get("feature_dim") != len(FEATURE_NAMES):
+    schema_tuple = (
+        manifest.get("manifest_version"),
+        manifest.get("feature_schema_version"),
+        manifest.get("feature_dim"),
+    )
+    if schema_tuple not in SUPPORTED_FEATURE_SCHEMAS:
         raise SystemExit(
-            f"belief dataset sidecar feature_dim must be {len(FEATURE_NAMES)}"
+            "belief dataset sidecar (manifest_version, feature_schema_version, feature_dim) "
+            "must be (1,1,20) or (2,2,128)"
         )
+    expected_features = belief_feature_names(manifest["feature_schema_version"])
+    if manifest.get("feature_names") != expected_features:
+        raise SystemExit("belief dataset sidecar feature_names order/semantics mismatch")
+    if manifest.get("encoder_contract") != belief_encoder_contract(
+        manifest["feature_schema_version"]
+    ):
+        raise SystemExit("belief dataset sidecar encoder contract mismatch")
+    declared_encoder_sha256 = manifest.get("encoder_source_sha256")
+    if not is_sha256(declared_encoder_sha256):
+        raise SystemExit("belief dataset sidecar encoder source hash is malformed")
+    if not os.path.exists(ENCODER_SOURCE_PATH):
+        raise SystemExit(f"belief encoder source is unavailable: {ENCODER_SOURCE_PATH}")
+    if declared_encoder_sha256 != sha256(ENCODER_SOURCE_PATH):
+        raise SystemExit("belief dataset was generated by a different encoder source")
     if manifest.get("target_classes") != TARGET_CLASSES:
         raise SystemExit(
             "belief dataset sidecar target_classes order must be "
             + repr(TARGET_CLASSES)
         )
+    if manifest.get("target_semantics") != TARGET_SEMANTICS:
+        raise SystemExit("belief dataset sidecar target semantics mismatch")
+    if manifest.get("publicly_pinned_targets_excluded") is not True:
+        raise SystemExit("belief dataset must exclude publicly pinned holding targets")
+    if manifest.get("legality_contract") != LEGALITY_CONTRACT:
+        raise SystemExit("belief dataset sidecar legality contract mismatch")
+    if manifest.get("public_history_contract") != PUBLIC_HISTORY_CONTRACTS[
+        manifest["feature_schema_version"]
+    ]:
+        raise SystemExit("belief dataset sidecar public-history contract mismatch")
     declared_contract = (
         manifest.get("supported_game_contract")
         or manifest.get("game_contract")
         or manifest.get("game_config")
     )
-    if declared_contract is not None and declared_contract != SUPPORTED_GAME_CONTRACT:
+    if declared_contract != SUPPORTED_GAME_CONTRACT:
         raise SystemExit(
             f"unsupported belief game contract {declared_contract!r}; expected "
             f"{SUPPORTED_GAME_CONTRACT!r}"
         )
     if (
-        manifest.get("behaviour") is not None
-        and manifest["behaviour"] != SUPPORTED_GENERATOR_BEHAVIOUR
+        manifest.get("behaviour") != SUPPORTED_GENERATOR_BEHAVIOUR
     ):
         raise SystemExit(
             f"unsupported belief generator behaviour {manifest['behaviour']!r}; "
             f"expected {SUPPORTED_GENERATOR_BEHAVIOUR!r}"
+        )
+    if manifest.get("behaviour_policy_domain") != SUPPORTED_BEHAVIOUR_POLICY_DOMAIN:
+        raise SystemExit(
+            "belief dataset sidecar behaviour-policy domain mismatch; expected "
+            f"{SUPPORTED_BEHAVIOUR_POLICY_DOMAIN!r}"
         )
     if manifest.get("games_dropped") is not None and (
         not isinstance(manifest["games_dropped"], int)
         or manifest["games_dropped"] < 0
     ):
         raise SystemExit("belief dataset sidecar games_dropped must be nonnegative")
+    requested = manifest.get("games_requested")
+    completed = manifest.get("games_completed")
+    dropped = manifest.get("games_dropped")
+    if (
+        not isinstance(requested, int)
+        or not isinstance(completed, int)
+        or not isinstance(dropped, int)
+        or min(requested, completed, dropped) < 0
+        or completed + dropped != requested
+    ):
+        raise SystemExit("belief dataset sidecar game counts are inconsistent")
+    if not isinstance(manifest.get("rows"), int) or manifest["rows"] < 1:
+        raise SystemExit("belief dataset sidecar rows must be a positive integer")
+    declared_csv_sha256 = manifest.get("csv_sha256")
+    if not is_sha256(declared_csv_sha256):
+        raise SystemExit("belief dataset sidecar csv_sha256 must be lowercase SHA-256")
+    actual_csv_sha256 = sha256(path)
+    if declared_csv_sha256 != actual_csv_sha256:
+        raise SystemExit("belief dataset sidecar CSV SHA-256 mismatch")
     return manifest
 
 
 def load(path, allow_unsafe_no_sidecar=False):
-    validate_dataset_sidecar(path, allow_missing=allow_unsafe_no_sidecar)
+    sidecar = validate_dataset_sidecar(path, allow_missing=allow_unsafe_no_sidecar)
+    feature_schema_version = sidecar["feature_schema_version"] if sidecar else 1
+    expected_features = belief_feature_names(feature_schema_version)
     with open(path, newline="") as handle:
         reader = csv.DictReader(handle)
         fields = reader.fieldnames or []
-        features = sorted(
-            [name for name in fields if name.startswith("b") and name[1:].isdigit()],
-            key=lambda name: int(name[1:]),
-        )
-        if features != FEATURE_NAMES:
-            raise SystemExit(
-                f"belief feature contract must be exactly b0..b{len(FEATURE_NAMES) - 1}"
-            )
+        features = [name for name in fields if name in set(expected_features)]
+        unexpected_features = [
+            name
+            for name in fields
+            if (name.startswith("seq.") or (name.startswith("b") and name[1:].isdigit()))
+            and name not in set(expected_features)
+        ]
+        if features != expected_features or unexpected_features:
+            raise SystemExit("belief CSV feature columns/order do not match declared schema")
         required = {
             "schema_version",
+            "feature_schema_version",
             "game_id",
             "target",
             *[f"mask{i}" for i in range(4)],
@@ -108,13 +247,15 @@ def load(path, allow_unsafe_no_sidecar=False):
         for line, row in enumerate(reader, 2):
             try:
                 schema_version = int(row["schema_version"])
+                row_feature_schema = int(row["feature_schema_version"])
             except (TypeError, ValueError) as error:
-                raise SystemExit(f"invalid belief schema_version on row {line}") from error
+                raise SystemExit(f"invalid belief schema version on row {line}") from error
             feature = [float(row[name]) for name in features]
             mask = [float(row[f"mask{i}"]) for i in range(4)]
             target = int(row["target"])
             if (
                 schema_version != DATASET_SCHEMA_VERSION
+                or row_feature_schema != feature_schema_version
                 or not row["game_id"]
                 or not np.isfinite(feature).all()
                 or target not in range(4)
@@ -128,6 +269,11 @@ def load(path, allow_unsafe_no_sidecar=False):
             targets.append(target)
     if not x:
         raise SystemExit("belief dataset is empty")
+    if sidecar is not None:
+        if sidecar["rows"] != len(x):
+            raise SystemExit("belief dataset sidecar row count does not match CSV")
+        if sidecar["games_completed"] != len(set(games)):
+            raise SystemExit("belief dataset sidecar completed-game count does not match CSV")
     return (
         np.asarray(x, dtype=np.float32),
         np.asarray(masks, dtype=np.float32),
@@ -137,9 +283,9 @@ def load(path, allow_unsafe_no_sidecar=False):
     )
 
 
-def write_golden(model, path):
+def write_golden(model, path, feature_names, manifest_version):
     rng = np.random.default_rng(0xBE11EF)
-    features = rng.uniform(0.0, 1.0, size=(13, len(FEATURE_NAMES))).astype(
+    features = rng.uniform(0.0, 1.0, size=(13, len(feature_names))).astype(
         np.float32
     )
     masks = np.asarray(
@@ -157,8 +303,9 @@ def write_golden(model, path):
     with torch.no_grad():
         logits = model(torch.from_numpy(features), torch.from_numpy(masks)).numpy()
     payload = {
-        "manifest_version": 1,
-        "feature_dim": len(FEATURE_NAMES),
+        "manifest_version": manifest_version,
+        "vector_contract": GOLDEN_VECTOR_CONTRACT,
+        "feature_dim": len(feature_names),
         "target_dim": len(TARGET_CLASSES),
         "atol": 5e-4,
         "rtol": 1e-6,
@@ -185,7 +332,7 @@ def split_games(games, validation_fraction, seed):
     return ~validation, validation, sorted(set(unique) - validation_games), sorted(validation_games)
 
 
-class BeliefNet(nn.Module):
+class BeliefNet(_NN_MODULE):
     def __init__(self, width, hidden):
         super().__init__()
         self.net = nn.Sequential(
@@ -259,6 +406,13 @@ def main():
     )
     dataset_sidecar = f"{args.data}.manifest.json"
     has_dataset_sidecar = os.path.exists(dataset_sidecar)
+    dataset_manifest = (
+        validate_dataset_sidecar(args.data) if has_dataset_sidecar else None
+    )
+    feature_schema_version = (
+        dataset_manifest["feature_schema_version"] if dataset_manifest else 1
+    )
+    manifest_version = dataset_manifest["manifest_version"] if dataset_manifest else 1
     train, validation, train_games, validation_games = split_games(
         games, args.val_frac, args.seed
     )
@@ -269,6 +423,8 @@ def main():
     )
     if args.analyze:
         return
+    if not _HAS_TORCH:
+        raise SystemExit("training requires torch + onnx; install training/requirements.txt")
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     model = BeliefNet(x.shape[1], args.hidden)
@@ -313,23 +469,37 @@ def main():
     )
     os.replace(temporary, args.out)
     golden_path = args.golden_out or f"{args.out}.golden.json"
-    write_golden(model, golden_path)
+    write_golden(model, golden_path, feature_names, manifest_version)
     manifest = {
-        "manifest_version": 1,
+        "manifest_version": manifest_version,
         "contract": MODEL_CONTRACT,
         "dataset_schema_version": DATASET_SCHEMA_VERSION,
-        "feature_schema_version": FEATURE_SCHEMA_VERSION,
-        "feature_dim": len(FEATURE_NAMES),
-        "feature_names": FEATURE_NAMES,
+        "feature_schema_version": feature_schema_version,
+        "feature_dim": len(feature_names),
+        "feature_names": feature_names,
         "supported_game_contract": SUPPORTED_GAME_CONTRACT,
         "inputs": ["features", "legality_mask"],
         "outputs": ["destination_logits"],
         "target_classes": TARGET_CLASSES,
+        "encoder_contract": (
+            dataset_manifest["encoder_contract"] if dataset_manifest else None
+        ),
+        "encoder_source_sha256": (
+            dataset_manifest["encoder_source_sha256"] if dataset_manifest else None
+        ),
+        "golden_vector_contract": GOLDEN_VECTOR_CONTRACT,
+        "training_behaviour_policy_domain": (
+            dataset_manifest["behaviour_policy_domain"] if dataset_manifest else None
+        ),
+        "proposal_factorization": PROPOSAL_FACTORIZATION,
         "hard_legality_mask_value": -1.0e4,
         "model_sha256": sha256(args.out),
         "golden_path": os.path.basename(golden_path),
         "golden_sha256": sha256(golden_path),
         "dataset_sha256": sha256(args.data),
+        "dataset_manifest_declared_csv_sha256": (
+            dataset_manifest["csv_sha256"] if dataset_manifest else None
+        ),
         "dataset_manifest_sha256": (
             sha256(dataset_sidecar) if has_dataset_sidecar else None
         ),
@@ -344,6 +514,9 @@ def main():
             ).hexdigest(),
         },
         "validation_metrics": report,
+        "research_only": True,
+        "auto_promotion": False,
+        "unsafe": not has_dataset_sidecar,
         "serving_status": (
             SERVING_STATUS if has_dataset_sidecar else "unsafe_missing_dataset_manifest"
         ),

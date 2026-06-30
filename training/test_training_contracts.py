@@ -52,16 +52,26 @@ def write_dataset(path, width, include_game=True):
                 writer.writerow(row)
 
 
-def write_belief_dataset(path, width=20, schema_version=1, sidecar=None):
+def write_belief_dataset(
+    path,
+    feature_schema_version=1,
+    schema_version=1,
+    sidecar=None,
+    feature_names=None,
+    row_feature_schema_version=None,
+):
+    if feature_names is None:
+        feature_names = train_belief.belief_feature_names(feature_schema_version)
     fields = [
         "schema_version",
+        "feature_schema_version",
         "game_id",
         "snapshot_id",
         "actor",
         "card_id",
         "target",
         *[f"mask{i}" for i in range(4)],
-        *[f"b{i}" for i in range(width)],
+        *feature_names,
     ]
     with open(path, "w", newline="") as handle:
         writer = csv.DictWriter(handle, fields)
@@ -71,25 +81,42 @@ def write_belief_dataset(path, width=20, schema_version=1, sidecar=None):
                 writer.writerow(
                     {
                         "schema_version": schema_version,
+                        "feature_schema_version": (
+                            feature_schema_version
+                            if row_feature_schema_version is None
+                            else row_feature_schema_version
+                        ),
                         "game_id": f"belief-game-{game}",
                         "snapshot_id": 0,
                         "actor": game,
                         "card_id": target,
                         "target": target,
                         **{f"mask{i}": 1 for i in range(4)},
-                        **{f"b{i}": (i + target) / 20 for i in range(width)},
+                        **{
+                            name: (i + target) / max(1, len(feature_names))
+                            for i, name in enumerate(feature_names)
+                        },
                     }
                 )
     if sidecar is not None:
+        sidecar = dict(sidecar)
+        sidecar.setdefault("csv_sha256", train_belief.sha256(path))
         with open(f"{path}.manifest.json", "w") as handle:
             json.dump(sidecar, handle)
 
 
-def valid_belief_sidecar():
+def valid_belief_sidecar(feature_schema_version=1):
+    feature_names = train_belief.belief_feature_names(feature_schema_version)
     return {
-        "manifest_version": 1,
+        "manifest_version": feature_schema_version,
         "dataset_schema_version": 1,
-        "feature_dim": 20,
+        "feature_schema_version": feature_schema_version,
+        "feature_dim": len(feature_names),
+        "feature_names": feature_names,
+        "encoder_contract": train_belief.belief_encoder_contract(feature_schema_version),
+        "encoder_source_sha256": train_belief.sha256(
+            train_belief.ENCODER_SOURCE_PATH
+        ),
         "target_classes": [
             "next-seat",
             "opposite-seat",
@@ -98,7 +125,19 @@ def valid_belief_sidecar():
         ],
         "supported_game_contract": "tractor:4p:2x-standard:kitty8:no-removed",
         "behaviour": "easy-play/expert-bid",
+        "behaviour_policy_domain": train_belief.SUPPORTED_BEHAVIOUR_POLICY_DOMAIN,
+        "target_semantics": train_belief.TARGET_SEMANTICS,
+        "publicly_pinned_targets_excluded": True,
+        "legality_contract": (
+            "mask=1 iff destination has capacity and no public effective-suit void"
+        ),
+        "public_history_contract": train_belief.PUBLIC_HISTORY_CONTRACTS[
+            feature_schema_version
+        ],
+        "games_requested": 2,
+        "games_completed": 2,
         "games_dropped": 0,
+        "rows": 8,
     }
 
 
@@ -144,17 +183,74 @@ class TrainingContractTests(unittest.TestCase):
             self.assertEqual(set(target), {0, 1, 2, 3})
             self.assertEqual(set(games), {"belief-game-0", "belief-game-1"})
 
+    def test_belief_schema_v2_semantic_features_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "belief-v2.csv")
+            write_belief_dataset(
+                path,
+                feature_schema_version=2,
+                sidecar=valid_belief_sidecar(2),
+            )
+            x, mask, target, games, features = train_belief.load(path)
+            self.assertEqual(features, train_belief.belief_feature_names(2))
+            self.assertEqual(x.shape, (8, 128))
+            self.assertEqual(mask.shape, (8, 4))
+            self.assertEqual(set(target), {0, 1, 2, 3})
+            self.assertEqual(set(games), {"belief-game-0", "belief-game-1"})
+
     def test_belief_rejects_wrong_row_schema_or_width(self):
         with tempfile.TemporaryDirectory() as directory:
             wrong_schema = os.path.join(directory, "wrong-schema.csv")
-            write_belief_dataset(wrong_schema, schema_version=2)
+            write_belief_dataset(
+                wrong_schema,
+                schema_version=2,
+                sidecar=valid_belief_sidecar(),
+            )
             with self.assertRaises(SystemExit):
                 train_belief.load(wrong_schema)
 
             wrong_width = os.path.join(directory, "wrong-width.csv")
-            write_belief_dataset(wrong_width, width=19)
+            wrong_names = [f"b{i}" for i in range(19)]
+            write_belief_dataset(
+                wrong_width,
+                feature_names=wrong_names,
+                sidecar=valid_belief_sidecar(),
+            )
             with self.assertRaises(SystemExit):
                 train_belief.load(wrong_width)
+
+    def test_belief_rejects_schema_tuple_names_and_row_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wrong_tuple = valid_belief_sidecar(2)
+            wrong_tuple["manifest_version"] = 1
+            tuple_path = os.path.join(directory, "wrong-tuple.csv")
+            write_belief_dataset(
+                tuple_path,
+                feature_schema_version=2,
+                sidecar=wrong_tuple,
+            )
+            with self.assertRaises(SystemExit):
+                train_belief.load(tuple_path)
+
+            wrong_names = valid_belief_sidecar(2)
+            wrong_names["feature_names"] = list(reversed(wrong_names["feature_names"]))
+            names_path = os.path.join(directory, "wrong-names.csv")
+            write_belief_dataset(
+                names_path,
+                feature_schema_version=2,
+                sidecar=wrong_names,
+            )
+            with self.assertRaises(SystemExit):
+                train_belief.load(names_path)
+
+            row_path = os.path.join(directory, "wrong-row-schema.csv")
+            write_belief_dataset(
+                row_path,
+                sidecar=valid_belief_sidecar(),
+                row_feature_schema_version=2,
+            )
+            with self.assertRaises(SystemExit):
+                train_belief.load(row_path)
 
     def test_belief_rejects_sidecar_target_order_and_game_contract(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -192,6 +288,20 @@ class TrainingContractTests(unittest.TestCase):
             )
             self.assertEqual(x.shape[1], 20)
             self.assertEqual(features, [f"b{i}" for i in range(20)])
+
+            v2_path = os.path.join(directory, "belief-v2.csv")
+            write_belief_dataset(v2_path, feature_schema_version=2)
+            with self.assertRaises(SystemExit):
+                train_belief.load(v2_path, allow_unsafe_no_sidecar=True)
+
+    def test_belief_sidecar_binds_the_exact_csv_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "belief.csv")
+            write_belief_dataset(path, sidecar=valid_belief_sidecar())
+            with open(path, "a") as handle:
+                handle.write("\n")
+            with self.assertRaises(SystemExit):
+                train_belief.load(path)
 
 
 if __name__ == "__main__":

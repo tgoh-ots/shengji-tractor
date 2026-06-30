@@ -9,11 +9,24 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let pairs = args
         .get(1)
-        .and_then(|value| value.parse().ok())
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .ok()
+                .filter(|pairs| *pairs > 0)
+                .unwrap_or_else(|| panic!("pairs must be a positive integer, got {:?}", value))
+        })
         .unwrap_or(200);
     let seed = args
         .get(2)
-        .and_then(|value| value.parse().ok())
+        .map(|value| {
+            parse_u64(value).unwrap_or_else(|| {
+                panic!(
+                    "seed must be decimal or 0x-prefixed hexadecimal, got {:?}",
+                    value
+                )
+            })
+        })
         .unwrap_or(0x5EED);
     let result = run_paired_ab(
         &Contestant::tier(BotDifficulty::Expert),
@@ -34,4 +47,29 @@ fn main() {
             "per_deck_level_utility": result.per_deck_level_utility,
         })
     );
+}
+
+fn parse_u64(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        value.parse().ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_u64;
+
+    #[test]
+    fn parses_decimal_and_hex_seeds_without_silent_fallback() {
+        assert_eq!(parse_u64("24301"), Some(0x5eed));
+        assert_eq!(parse_u64("0x5EED"), Some(0x5eed));
+        assert_eq!(parse_u64("0X5eed"), Some(0x5eed));
+        assert_eq!(parse_u64("not-a-seed"), None);
+    }
 }
