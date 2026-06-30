@@ -6,7 +6,8 @@
 //!
 //! * `lost-trick WASTE` — on a trick it cannot get on top of, burned a PREMIUM card
 //!   (joker / trump-rank / high trump / side-suit Ace) when a non-premium duck existed (#1/#4)
-//! * `lost-trick POINT-LEAK` — on such a trick, shed points when a 0-point duck existed (#3)
+//! * `opponent-winning POINT-LEAK` — while the other team held the trick and no
+//!   candidate could take it, shed points when a 0-point duck existed (#3)
 //! * `ruff PAIR-FRAGMENTATION` — ruffing a singles lead, broke a trump pair when a
 //!   non-pair-breaking winning ruff existed (#7)
 //! * `failed TRUMP-SET` — selected an avoidable multi-unit trump throw which the
@@ -55,6 +56,7 @@ struct Metrics {
     decisions: usize,
     leads: usize,
     lost: usize,
+    opponent_lost: usize,
     waste: usize,
     point_leak: usize,
     ruff_singles: usize,
@@ -286,6 +288,10 @@ impl Metrics {
 
         if !can_get_on_top {
             self.lost += 1;
+            let partner_winning = pp
+                .trick()
+                .winner_so_far()
+                .is_some_and(|winner| heuristics::same_team(pp, actor, winner));
             let ace_candidate_exists = candidates
                 .iter()
                 .any(|candidate| candidate.iter().any(|&card| is_nontrump_ace(trump, card)));
@@ -309,8 +315,11 @@ impl Metrics {
             if chosen_premium && junk_exists {
                 self.waste += 1;
             }
-            if points_of(chosen) > 0 && candidates.iter().any(|c| points_of(c) == 0) {
-                self.point_leak += 1;
+            if !partner_winning {
+                self.opponent_lost += 1;
+                if points_of(chosen) > 0 && candidates.iter().any(|c| points_of(c) == 0) {
+                    self.point_leak += 1;
+                }
             }
         } else {
             let led_suit = tf.suit();
@@ -377,9 +386,9 @@ fn report(label: &str, m: &Metrics) {
         pct(m.waste, m.lost),
         m.waste,
         m.lost,
-        pct(m.point_leak, m.lost),
+        pct(m.point_leak, m.opponent_lost),
         m.point_leak,
-        m.lost,
+        m.opponent_lost,
         pct(m.fragment, m.ruff_singles),
         m.fragment,
         m.ruff_singles,

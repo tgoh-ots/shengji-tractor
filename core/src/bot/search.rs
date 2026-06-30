@@ -46,6 +46,7 @@
 //! fallback. An optional default-off belief proposal biases only hard-legal
 //! hidden-card assignments.
 
+use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -187,6 +188,32 @@ fn level_value_leaf_enabled() -> bool {
                         | expert::ExpertModelSemantics::V2LevelQ
                 )
             )
+    })
+}
+
+/// Whether the hand-written search leaf uses provisional win/level bands as its
+/// dominant objective (`SHENGJI_PROVISIONAL_LEVEL_OBJECTIVE`, default off). The
+/// all-leaf formulation is retained only for controlled ablation: shallow
+/// incomplete leaves are not terminal forecasts and measured worse than the
+/// established point/control leaf. Typed schema-v2 value heads are unaffected.
+fn provisional_level_objective_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SHENGJI_PROVISIONAL_LEVEL_OBJECTIVE")
+            .map(|value| !value.is_empty() && value != "0")
+            .unwrap_or(false)
+    })
+}
+
+/// Experimental late-root candidate reservation for the endgame ruff/kitty
+/// hypothesis. Default off until the fixed-work and late-state gates establish
+/// value. It changes only root coverage, never rollout value.
+fn late_ruff_reserve_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SHENGJI_LATE_RUFF_RESERVE")
+            .map(|value| !value.is_empty() && value != "0")
+            .unwrap_or(false)
     })
 }
 
@@ -478,6 +505,49 @@ fn argmax_earliest(values: &[f64]) -> usize {
     best_index
 }
 
+fn late_ruff_shape_candidate(
+    p: &PlayPhase,
+    me: PlayerID,
+    candidates: &[ScoredPlay],
+    config: &SearchConfig,
+) -> Option<ScoredPlay> {
+    if !late_ruff_reserve_enabled()
+        || config.policy != Policy::EnochHeuristic
+        || !p.landlords_team().contains(&me)
+    {
+        return None;
+    }
+    let ctx = heuristics::EvalCtx::build_enoch(p, me);
+    // Match the human's genuinely late, valuable-kitty domain. Requiring the
+    // configured rollout horizon to reach the end lets exact engine scoring—not
+    // a hand-written all-trump bonus—judge the reserved plan.
+    if ctx.my_hand_size < 2
+        || ctx.my_hand_size >= 10
+        || config.rollout_tricks < ctx.my_hand_size
+        || ctx.kitty_points.unwrap_or(0) < 10
+    {
+        return None;
+    }
+
+    candidates
+        .iter()
+        .filter_map(|candidate| {
+            let shape = heuristics::post_play_ruff_shape(p, me, &candidate.cards)?;
+            // Keep a real response resource; an empty hand or lone trump is not
+            // the planned matching ruff described by the hypothesis.
+            (shape.trumps >= 2).then_some((candidate, shape))
+        })
+        .min_by_key(|(_, shape)| {
+            (
+                shape.nontrumps,
+                Reverse(shape.largest_trump_unit),
+                Reverse(shape.trump_pair_capacity),
+                Reverse(shape.trumps),
+            )
+        })
+        .map(|(candidate, _)| candidate.clone())
+}
+
 /// Run the determinized search and return the chosen cards, or `None` if no
 /// candidate could be produced (caller should fall back to the heuristic /
 /// dumb policy).
@@ -489,7 +559,20 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
     if candidates.is_empty() {
         return None;
     }
-    candidates.truncate(config.max_candidates.max(1));
+    let max_candidates = config.max_candidates.max(1);
+    let reserved = late_ruff_shape_candidate(p, me, &candidates, &config);
+    candidates.truncate(max_candidates);
+    if let Some(reserved) = reserved {
+        let already_present = candidates
+            .iter()
+            .any(|candidate| candidate.cards == reserved.cards);
+        if !already_present {
+            if candidates.len() == max_candidates {
+                candidates.pop();
+            }
+            candidates.push(reserved);
+        }
+    }
 
     // If there's only one candidate, no need to search.
     if candidates.len() == 1 {
@@ -1418,13 +1501,18 @@ fn rollout(
                 // determinized world, fall back to any legal candidate.
                 if sim.play_cards(actor, &cards).is_err() {
                     // Try other candidates.
-                    let alts = if leading {
+                    let mut alts = if leading {
+                        let ctx = heuristics::EvalCtx::build(sim, actor);
                         heuristics::rollout_lead_candidates(sim, actor)
+                            .into_iter()
+                            .filter(|candidate| {
+                                heuristics::admissible_ranked_lead(&ctx, sim, candidate)
+                            })
+                            .collect()
                     } else {
                         heuristics::rollout_follow_candidates(sim, actor)
                     };
                     let mut ok = false;
-                    let mut alts = alts;
                     alts.shuffle(rng);
                     for alt in alts {
                         if sim.play_cards(actor, &alt).is_ok() {
@@ -1509,17 +1597,18 @@ fn evaluate_position(sim: &PlayPhase, me: PlayerID) -> f64 {
         })
         .unwrap_or(0.0);
 
-    // The hand objective is discontinuous at the turnover boundary: securing
-    // the contract (80 in standard two-deck Tractor) matters more than gambling
-    // that win for the next level at 120. `current_game_score` is intentionally
-    // valid provisionally, so use the exact configured win/level band as the
-    // dominant signal at every leaf, with raw points and retained control only
-    // as within-band tie-breakers. This keeps finished and unfinished candidate
-    // rollouts in one unit system and generalizes to custom scoring settings.
+    // Experimental provisional objective for the 80-before-120 hypothesis.
+    // Treating a shallow cutoff as if scoring stopped there destroys the
+    // incremental point gradient, so this stays default-off behind an explicit
+    // ablation switch.
     let provisional_level_utility = level_utility(sim, me);
-    let static_eval = provisional_level_utility
-        .map(|utility| utility * expert::VALUE_NORM + realized * 0.01 + control)
-        .unwrap_or(realized + control);
+    let static_eval = if provisional_level_objective_enabled() {
+        provisional_level_utility
+            .map(|utility| utility * expert::VALUE_NORM + realized * 0.01 + control)
+            .unwrap_or(realized + control)
+    } else {
+        realized + control
+    };
 
     // A schema-v2 state head predicts the real hand objective (win plus awarded
     // levels). Replace the point-valued leaf wholesale; never multiply it by the
@@ -1634,11 +1723,15 @@ fn net_value_estimate(sim: &PlayPhase, me: PlayerID) -> Option<f64> {
     }
     let actor = sim.trick().next_player()?;
     let leading = sim.trick().played_cards().is_empty();
-    let cands = if leading {
+    let mut cands = if leading {
         heuristics::rollout_lead_candidates(sim, actor)
     } else {
         heuristics::rollout_follow_candidates(sim, actor)
     };
+    if leading {
+        let ctx = heuristics::EvalCtx::build(sim, actor);
+        cands.retain(|cards| heuristics::admissible_ranked_lead(&ctx, sim, cards));
+    }
     if cands.is_empty() {
         return None;
     }

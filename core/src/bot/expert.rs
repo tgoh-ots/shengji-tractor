@@ -418,7 +418,7 @@ pub fn choose_play_expert(p: &PlayPhase, me: PlayerID) -> Option<Vec<Card>> {
 
     // Generate legal candidates with the SAME generators the heuristic uses.
     let candidates: Vec<Vec<Card>> = if leading {
-        heuristics::lead_candidates(p, me)
+        heuristics::admissible_lead_candidates(p, me)
     } else {
         heuristics::follow_candidates(p, me)
     };

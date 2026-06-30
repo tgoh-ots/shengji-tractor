@@ -750,7 +750,7 @@ fn random_legal_play(
 ) -> Option<Vec<Card>> {
     use rand::seq::SliceRandom;
     let mut candidates = if leading {
-        heuristics::lead_candidates(p, me)
+        heuristics::admissible_lead_candidates(p, me)
     } else {
         heuristics::follow_candidates(p, me)
     };
@@ -1179,7 +1179,7 @@ fn dumb_play(p: &PlayPhase, me: PlayerID) -> Option<Vec<Card>> {
     // generator as the final guard so unusual tuple/bomb settings cannot turn a
     // fallback into an illegal bot action.
     let candidates = if leading {
-        heuristics::lead_candidates(p, me)
+        heuristics::admissible_lead_candidates(p, me)
     } else {
         heuristics::follow_candidates(p, me)
     };

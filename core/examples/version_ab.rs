@@ -41,10 +41,27 @@ use shengji_core::bot::harness::{print_paired_ab, run_paired_ab, Contestant, Pla
 use shengji_core::bot::heuristics::HeuristicVersion;
 use shengji_core::bot::BotDifficulty;
 
+fn print_trace(tag: &str, result: &shengji_core::bot::harness::PairedABResult) {
+    assert_eq!(
+        result.complete_pairs, result.pairs,
+        "trace output requires every mirrored deck pair to complete"
+    );
+    for (index, ((win, margin), level)) in result
+        .per_deck_winrate
+        .iter()
+        .zip(&result.per_deck_margin)
+        .zip(&result.per_deck_level_utility)
+        .enumerate()
+    {
+        println!("TRACE\t{tag}\t{index}\t{win:.1}\t{margin:.6}\t{level:.6}");
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let pairs: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(800);
     let base_seed: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0x5EED);
+    let trace = args.get(3).is_some_and(|arg| arg == "--trace");
 
     println!("CROSS-VERSION A/B vs the FROZEN Legacy yardstick (search-less, reproducible)");
     println!(
@@ -89,7 +106,15 @@ fn main() {
         },
     );
 
-    print_paired_ab(&run_paired_ab(&new_heur, &legacy, pairs, base_seed));
+    let heuristic_result = run_paired_ab(&new_heur, &legacy, pairs, base_seed);
+    print_paired_ab(&heuristic_result);
+    if trace {
+        print_trace("heuristic", &heuristic_result);
+    }
     println!();
-    print_paired_ab(&run_paired_ab(&enoch, &legacy, pairs, base_seed));
+    let enoch_result = run_paired_ab(&enoch, &legacy, pairs, base_seed);
+    print_paired_ab(&enoch_result);
+    if trace {
+        print_trace("enoch", &enoch_result);
+    }
 }
