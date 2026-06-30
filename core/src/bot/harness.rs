@@ -322,6 +322,21 @@ pub fn play_cards_for(s: &PlayPhase, actor: PlayerID, brain: &PlayBrain) -> Opti
 /// Returns `None` only on an unexpected engine error (which would itself be a bug)
 /// or if the iteration cap is hit.
 pub fn play_one_hand(seats: &[Seat; 4], rng: &mut StdRng) -> Option<HandResult> {
+    play_one_hand_instrumented(seats, rng, &mut |_, _, _| {})
+}
+
+/// Like [`play_one_hand`], but invokes `on_play(state, actor, chosen_cards)` for
+/// every PLAY-phase decision, right BEFORE the cards hit the table. This lets a
+/// benchmark observe each decision and score its QUALITY directly — a signal
+/// orders of magnitude denser (one datum PER DECISION) and lower-variance than the
+/// one-bit-per-hand win/loss outcome, so it can resolve the rare-situation fixes
+/// (duck-low, don't-fragment-a-pair, ...) that aggregate win-rate cannot. The hook
+/// sees the pre-play `PlayPhase` (its own seat's full state) and the chosen cards.
+pub fn play_one_hand_instrumented<F: FnMut(&PlayPhase, PlayerID, &[Card])>(
+    seats: &[Seat; 4],
+    rng: &mut StdRng,
+    on_play: &mut F,
+) -> Option<HandResult> {
     let decks = vec![Deck::default(), Deck::default()];
     let draw = seeded_draw_phase(&decks, rng);
     let seat_ids: Vec<PlayerID> = draw.propagated().players().iter().map(|p| p.id).collect();
@@ -396,6 +411,7 @@ pub fn play_one_hand(seats: &[Seat; 4], rng: &mut StdRng) -> Option<HandResult> 
                     }
                     Some(actor) => {
                         let cards = play_cards_for(s, actor, &seats[seat_idx(actor)?].play)?;
+                        on_play(s, actor, &cards);
                         s.play_cards(actor, &cards).ok()?;
                     }
                 }
