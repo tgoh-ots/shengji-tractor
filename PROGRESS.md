@@ -86,6 +86,12 @@ operational gotchas (paired_eval is single-threaded, value blend is a no-op at a
 terminal leaf, duplicate-deck scoring bias, OMNI_BUDGET_MULT inflates the teacher,
 WORKDIR staleness, long-job SIGTERM reaping): `docs/grandmaster-and-value-head-findings.md`.**
 
+**Shipped to production** (Fly `version 35`, 2026-06-29) — the 5-tier ladder + the security
+audit build are live at https://shengji-tractor.fly.dev. A full 5-tier round-robin
+(`gm_benchmark`, all 10 pairings) confirms the clean ladder by overall win-rate:
+**Easy 21% < Expert 40% < Enoch 55% ≲ Grandmaster 59% < Omniscient 75%** (matrix +
+per-model characteristics table in `docs/grandmaster-and-value-head-findings.md`).
+
 ### Bot ladder overhaul (earlier major work — shipped)
 The bot tiers were redesigned from `Easy/Hard/Expert/Omniscient` into a cleaner
 **four-tier ladder `Easy < Expert <= Enoch < Omniscient`**. (See `CLAUDE.md` →

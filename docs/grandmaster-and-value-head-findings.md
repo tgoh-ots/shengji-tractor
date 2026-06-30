@@ -37,6 +37,36 @@ Tier ladder (vs the strengthened Enoch from master `7ca6b02`, gm_benchmark, mult
 Ladder: `Easy < Expert << Enoch ≈ Grandmaster < Omniscient`. (Note: vs the *pre*-`7ca6b02`
 Enoch, Grandmaster was ~56% / +6 — the Enoch upgrade closed most of that gap.)
 
+### Full round-robin (all 5 tiers, shipped budgets GM 3× / Omni 5×, n=60/pairing, base 60ms)
+
+Row's win-% vs column (run via `gm_benchmark` with all 10 pairings). n=60/cell → ±~12pp;
+the OVERALL column (n=240 each) and the ordering are the reliable signal.
+
+| | Easy | Expert | Enoch | GM | Omni | **Overall** |
+|---|---|---|---|---|---|---|
+| Easy        |  —   | 30.0 | 23.3 | 18.3 | 13.3 | **21.3%** |
+| Expert      | 70.0 |  —   | 31.7 | 26.7 | 30.0 | **39.6%** |
+| Enoch       | 76.7 | 68.3 |  —   | 48.3 | 28.3 | **55.4%** |
+| Grandmaster | 81.7 | 73.3 | 51.7 |  —   | 28.3 | **58.8%** |
+| Omniscient  | 86.7 | 70.0 | 71.7 | 71.7 |  —   | **75.0%** |
+
+Implied ladder: `Easy(21) < Expert(40) < Enoch(55) ≲ Grandmaster(59) < Omniscient(75)`. Enoch↔GM
+is a head-to-head near-tie (48/52, within noise); GM's overall edge is beating the weaker tiers
+harder. Omniscient (the cheater) dominates all, as it should.
+
+### One-table reference — characteristics / heuristics / play style
+
+| # | Tier | Win% | Sees hands? | Policy & heuristics | Search / memory / budget | Play style |
+|---|---|---|---|---|---|---|
+| 1 | Omniscient | 75 | **YES (cheat)** | Enoch playbook over the TRUE hands | perfect-info, full-hand rollouts, 5× budget (≤15s) | ruthless/near-optimal; the "impossible" opponent |
+| 2 | Grandmaster | 59 | no (samples) | Enoch playbook proposes; commits to full-hand-simulation value (neutral leaf) | ISMCTS, full-hand rollouts, 8 cand/400 worlds, 3× budget, full memory | calculation-driven; breaks the playbook when the sim disagrees |
+| 3 | Enoch | 55 | no (samples) | boss/partner heuristic + human playbook (pair-first declare+flip, scaled kitty burial, no high-trump opens, tractor-first/long-suit leads, partner point-dump, low-trump hand-off, endgame kitty protection) | ISMCTS, 144 worlds/12-trick, perfect play-memory, 1× | disciplined, defensively sound, "by the book" |
+| 4 | Expert (default) | 40 | no (samples) | learned MLP prior (distilled from Omniscient, honest features) + plain heuristic | ISMCTS, 144 worlds/12-trick, limited memory, 1× | net-guided but the net is weak (≈51% teacher top-1) |
+| 5 | Easy | 21 | no | bare heuristic played noisily (ε≈6%, warm softmax) | no search, no card memory | casual human; usually-obvious move with occasional blunders |
+
+All five share one honest evaluator backbone (`heuristics.rs`) + the determinized search
+(`search.rs`); only Omniscient reaches the perfect-info bypass (`observed_state`).
+
 ### Grandmaster (`core/src/bot/policy.rs`, enum in `mod.rs`)
 - It's the Enoch determinized search with: **full-hand rollouts** (`GM_ROLLOUT=0` → roll
   each sampled world to the last card = exact terminal points, no truncation bias),
