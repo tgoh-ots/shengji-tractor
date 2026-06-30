@@ -392,6 +392,27 @@ pub fn play_one_hand_with_config(
     config: &HarnessConfig,
     rng: &mut StdRng,
 ) -> Option<HandResult> {
+    play_one_hand_with_config_instrumented(seats, config, rng, &mut |_, _, _| {})
+}
+
+/// Like [`play_one_hand`], but invokes `on_play(state, actor, chosen_cards)` for
+/// every play decision immediately before the cards hit the table. This exposes
+/// a dense, low-variance decision-quality signal to evaluation tools.
+pub fn play_one_hand_instrumented<F: FnMut(&PlayPhase, PlayerID, &[Card])>(
+    seats: &[Seat; 4],
+    rng: &mut StdRng,
+    on_play: &mut F,
+) -> Option<HandResult> {
+    play_one_hand_with_config_instrumented(seats, &HarnessConfig::default(), rng, on_play)
+}
+
+/// Configurable-table form of [`play_one_hand_instrumented`].
+pub fn play_one_hand_with_config_instrumented<F: FnMut(&PlayPhase, PlayerID, &[Card])>(
+    seats: &[Seat],
+    config: &HarnessConfig,
+    rng: &mut StdRng,
+    on_play: &mut F,
+) -> Option<HandResult> {
     if seats.len() != config.num_players {
         return None;
     }
@@ -477,6 +498,7 @@ pub fn play_one_hand_with_config(
                     }
                     Some(actor) => {
                         let cards = play_cards_for(s, actor, &seats[seat_idx(actor)?].play)?;
+                        on_play(s, actor, &cards);
                         s.play_cards(actor, &cards).ok()?;
                     }
                 }

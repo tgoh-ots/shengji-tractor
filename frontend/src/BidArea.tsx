@@ -222,6 +222,9 @@ const BidArea = (props: IBidAreaProps): JSX.Element => {
               >
                 {t("bid.doneBidding")}
               </button>
+              <span className="text-sm font-medium text-[var(--text-on-felt)]">
+                {t("bid.yourMovePrompt")}
+              </span>
             </div>
           )
         ) : null}

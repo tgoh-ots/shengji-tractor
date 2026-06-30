@@ -167,6 +167,8 @@ const en: Dict = {
   "bid.doneBidding": "Done bidding",
   "bid.undoDoneBidding": "Not done bidding",
   "bid.waitingForOthers": "Waiting for other players to finish bidding…",
+  "bid.yourMovePrompt":
+    "Your move: bid higher above, or click “Done bidding” to let the game continue.",
 
   // Exchange
   "exchange.yourHand": "Your hand",
@@ -330,6 +332,7 @@ const zh: Dict = {
   "bid.doneBidding": "结束叫牌",
   "bid.undoDoneBidding": "继续叫牌",
   "bid.waitingForOthers": "等待其他玩家结束叫牌…",
+  "bid.yourMovePrompt": "轮到你了：在上方加叫，或点击“结束叫牌”让游戏继续。",
 
   "exchange.yourHand": "你的手牌",
   "exchange.discarded": "已埋的牌 {n} / {total}",
