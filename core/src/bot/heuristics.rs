@@ -2349,7 +2349,8 @@ pub fn score_follow(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
                 .configured_counts
                 .iter()
                 .filter(|(card, _)| {
-                    card.points().is_some() && trump.effective_suit(**card) == led_suit
+                    card.points().is_some()
+                        && trump.effective_suit(**card) == led_suit
                         && boss_strength(trump, **card) > current_strength
                 })
                 .map(|(card, configured)| {

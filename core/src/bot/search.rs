@@ -217,6 +217,50 @@ fn late_ruff_reserve_enabled() -> bool {
     })
 }
 
+fn late_ruff_reserve_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SHENGJI_LATE_RUFF_TRACE")
+            .map(|value| !value.is_empty() && value != "0")
+            .unwrap_or(false)
+    })
+}
+
+/// Exact terminal level utility for the narrow human "secure 80 before chasing
+/// 120" window. Unlike the rejected provisional leaf, this is used only when the
+/// common root's rollout horizon can finish every hand; incomplete candidate
+/// rounds are discarded rather than mixed with terminal units.
+fn terminal_level_objective_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SHENGJI_TERMINAL_LEVEL_OBJECTIVE")
+            .map(|value| !value.is_empty() && value != "0")
+            .unwrap_or(true)
+    })
+}
+
+fn use_terminal_level_rollout(root: &PlayPhase, me: PlayerID, rollout_tricks: usize) -> bool {
+    if !terminal_level_objective_enabled() || root.landlords_team().contains(&me) {
+        return false;
+    }
+    let max_hand_size = root
+        .propagated()
+        .players()
+        .iter()
+        .filter_map(|player| root.hands().get(player.id).ok())
+        .map(|hand| hand.values().copied().sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    if max_hand_size == 0 || max_hand_size >= 10 || rollout_tricks < max_hand_size {
+        return false;
+    }
+    let Some(turnover) = root.bot_non_landlord_turnover_score() else {
+        return false;
+    };
+    let (attacker_points, _) = root.calculate_points();
+    (1..=15).contains(&(turnover - attacker_points))
+}
+
 /// Weight of a calibrated schema-v2 Q(o,a) prediction in the final root choice.
 /// Both rollout means and Q are min-max normalized across the same candidate set,
 /// so no point/level units are mixed. Constant Q is ignored rather than allowing
@@ -569,6 +613,13 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
         if !already_present {
             if candidates.len() == max_candidates {
                 candidates.pop();
+            }
+            if late_ruff_reserve_trace_enabled() {
+                eprintln!(
+                    "[late-ruff-reserve] seat={} cards={}",
+                    me.0,
+                    reserved.cards.len()
+                );
             }
             candidates.push(reserved);
         }
@@ -1355,6 +1406,7 @@ fn evaluate_candidate(
     // alternative falls through to a point-valued rollout leaf.
     let exact = exact_endgame_config();
     let use_exact = endgame::eligible_for_exact(world, exact);
+    let use_terminal_level = use_terminal_level_rollout(world, me, rollout_tricks);
     let mut sim = world.clone();
     // Play our candidate.
     if sim.play_cards(me, cards).is_err() {
@@ -1384,6 +1436,13 @@ fn evaluate_candidate(
     let max_plies = players.saturating_mul(rollout_tricks.max(1));
     if !rollout(&mut sim, max_plies, policy, rng, deadline) {
         return None;
+    }
+
+    if use_terminal_level {
+        if !sim.game_finished() {
+            return None;
+        }
+        return level_utility(&sim, me);
     }
 
     Some(evaluate_position(&sim, me))
@@ -1755,7 +1814,8 @@ mod tests {
     use super::{
         adaptive_fraction_from_signals, canonicalize_ranked_candidates, normalized_entropy,
         oriented_level_utility, ranked_candidates, ranked_candidates_perfect_information,
-        remove_known_failed_throws, risk_adjusted_value, Policy, RiskConfig, ScoredPlay,
+        remove_known_failed_throws, risk_adjusted_value, use_terminal_level_rollout, Policy,
+        RiskConfig, ScoredPlay,
     };
     use shengji_mechanics::deck::Deck;
     use shengji_mechanics::hands::Hands;
@@ -2020,5 +2080,81 @@ mod tests {
             sure_turnover_win,
             -oriented_level_utility(false, 0, 0, true)
         );
+    }
+
+    #[test]
+    fn terminal_level_rollout_is_narrowly_gated_to_near_turnover_attackers() {
+        let ids: Vec<PlayerID> = (0..4).map(PlayerID).collect();
+        let mut propagated = PropagatedState::default();
+        propagated.players = ids
+            .iter()
+            .map(|id| Player::new(*id, format!("p{}", id.0)))
+            .collect();
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let mut hands = Hands::new(ids.iter().copied());
+        hands.set_trump(trump);
+        for (id, cards) in [
+            (
+                ids[0],
+                vec![
+                    card(Suit::Spades, Number::Ten),
+                    card(Suit::Clubs, Number::Three),
+                ],
+            ),
+            (
+                ids[1],
+                vec![
+                    card(Suit::Spades, Number::Ace),
+                    card(Suit::Clubs, Number::Four),
+                ],
+            ),
+            (
+                ids[2],
+                vec![
+                    card(Suit::Spades, Number::King),
+                    card(Suit::Clubs, Number::Five),
+                ],
+            ),
+            (
+                ids[3],
+                vec![
+                    card(Suit::Spades, Number::Five),
+                    card(Suit::Clubs, Number::Six),
+                ],
+            ),
+        ] {
+            hands.add(id, cards).unwrap();
+        }
+        let mut play = PlayPhase::new(
+            propagated,
+            1,
+            GameMode::Tractor,
+            hands,
+            vec![],
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0], ids[2]],
+            vec![],
+            vec![Deck::default()],
+            vec![],
+        )
+        .unwrap();
+        for (id, cards) in [
+            (ids[0], vec![card(Suit::Spades, Number::Ten)]),
+            (ids[1], vec![card(Suit::Spades, Number::Ace)]),
+            (ids[2], vec![card(Suit::Spades, Number::King)]),
+            (ids[3], vec![card(Suit::Spades, Number::Five)]),
+        ] {
+            play.play_cards(id, &cards).unwrap();
+        }
+        play.finish_trick().unwrap();
+        assert_eq!(play.calculate_points().0, 25);
+        assert!(use_terminal_level_rollout(&play, ids[1], 1));
+        assert!(!use_terminal_level_rollout(&play, ids[1], 0));
+        assert!(!use_terminal_level_rollout(&play, ids[0], 1));
     }
 }
