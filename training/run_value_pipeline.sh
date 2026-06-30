@@ -103,12 +103,20 @@ fi
 # CRITICAL: each shard numbers its `group` ids from 0, so a naive concat COLLIDES
 # the group namespace — the trainer would merge unrelated decisions under a shared
 # id, see sum(labels)>1, and drop nearly everything. Offset each shard's group id
-# (column 1) by i*1e9 (>> per-shard group count) so groups are globally unique.
+# (column 1) by i*1e7 (>> per-shard group count) so groups are globally unique.
 # Only $1 is modified, so the float feature columns are reprinted verbatim.
+#
+# NOTE: the offset is 1e7, NOT 1e9. On Linux the default awk is mawk, which prints
+# integral values > 2^31 (~2.15e9) in scientific notation ("3e+09"); with a 1e9
+# offset, shards 3+ would emit group ids like "3e+09" that the trainer's int()
+# parse rejects, silently dropping most of the data (or erroring). 1e7 keeps every
+# offset < 2^31 for up to ~200 shards while staying far above any per-shard group
+# count, so it is collision-free AND mawk-safe. (macOS BSD awk prints big ints
+# fine, which is why this only bit on Linux.)
 say "stage3: concatenating $NUM_SHARDS shards (with per-shard group-id offsets) -> data_full.csv"
 head -1 "$WORKDIR/shard_0.csv" > "$FULL"
 for i in $(seq 0 $((NUM_SHARDS - 1))); do
-  awk -F, -v OFS=, -v off="$((i * 1000000000))" 'NR>1 { $1 = $1 + off; print }' "$WORKDIR/shard_$i.csv" >> "$FULL"
+  awk -F, -v OFS=, -v off="$((i * 10000000))" 'NR>1 { $1 = $1 + off; print }' "$WORKDIR/shard_$i.csv" >> "$FULL"
 done
 say "stage3: dataset has $(wc -l < "$FULL") rows, $(awk -F, 'NR>1{print $1}' "$FULL" | sort -u | wc -l | tr -d ' ') distinct decisions"
 
