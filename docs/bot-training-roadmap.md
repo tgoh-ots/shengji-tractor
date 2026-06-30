@@ -7,6 +7,57 @@
 > **Scope:** how to make the Shengji bot models *stronger*, and how to *prove* they got stronger.
 > Grounded in the current code (file:line references throughout). Companion to `PROGRESS.md` and the committed eval baseline `docs/bot-eval-baseline.md`.
 
+## 2026-06-30 playtest session — eval tooling + re-distill finding + go-forward plan
+
+This session shipped playtest fixes (lowest-card-when-losing, safe set throws +
+Ace-attach, non-paired-trump ruff, big-throw point protection, declarer-aware bank
+valuation; plus the bidding-freeze and rank-NT crash fixes — live as v36) and, more
+relevant here, built the measurement tools the roadmap's "make strength measurable
+first" thesis calls for, then used them to test a re-distill.
+
+**New measurement tools (`core/examples/`, on the shared harness):**
+- `version_ab` — asymmetric A/B of the current scorer / Enoch playbook vs the FROZEN
+  `HeuristicVersion::Legacy` yardstick (search-less, mirrored decks, Wilson/bootstrap
+  CIs + MDE). Because Legacy is byte-identical across code versions, running it in a
+  pre-change `git worktree` and the change branch isolates a change's ABSOLUTE effect
+  — the thing the symmetric tier-vs-tier benchmarks (`gm_benchmark`, `tournament`)
+  structurally cannot measure (they apply a shared-scorer change to both sides → it
+  cancels). MDE ≈ ±1.3pp at 1500 paired decks. This session it measured the Enoch
+  playbook changes at **+3.1pp / +3.56 pts vs Legacy** (≈2× MDE) — a real gain
+  `gm_benchmark` had reported as a wash.
+- `decision_metrics` — dense per-decision quality rates (lost-trick waste, point-leak,
+  ruff pair-fragmentation), scoring BOTH scorer versions on COMMON states (matched
+  denominators), via the new `harness::play_one_hand_instrumented` per-decision hook.
+  Orders of magnitude more statistical power than one-bit-per-hand win-rate for the
+  rare-situation fixes. New beat Legacy on all three (waste 1.60→1.35%, point-leak
+  15.1→11.3%, fragmentation 3.77→0.31%).
+
+**Re-distill finding (corroborates the roadmap's central thesis):** a policy-only
+re-distill on the IMPROVED teacher (2,400 games, DAgger `GEN_BEHAVIOUR=mix`, ~137k
+decisions; val top-1 49.7%) came out **statistically TIED with the embedded net**
+(Expert-vs-Easy, net-prior-dominant budget: candidate 56.2% vs embedded 57.2%,
+overlapping CIs; both clearly beat the heuristic-prior fallback 53.6%, confirming the
+candidate loaded). It was therefore **NOT embedded** (the embedded net is unchanged).
+This is direct evidence for the roadmap's claim that **policy behavioral-cloning is
+near its ceiling** — more policy data alone won't move it materially. (Data-gen
+gotcha hit + documented: sharded `gen_training_data` restarts its `group` counter per
+process, so concatenated shards collide on group ids and must be renumbered globally;
+since fixed on master in `b013eb1`.)
+
+**Go-forward plan (the actual strength payoff, unchanged from the 1-month plan, now
+with evidence it's the right bet):**
+1. Run `training/run_value_pipeline.sh` at SCALE (sharded, resumable) to train a
+   **value head** on a large on-policy `GEN_BEHAVIOUR=mix` dataset — the highest-ceiling
+   change (replaces the crude static leaf eval), and the one that targets exactly the
+   "conserve-a-winner-for-later" decisions outcome/cloning signals under-credit.
+2. **Paired-measure** the value-blend weight (`SHENGJI_VALUE_WEIGHT`) and PUCT via
+   `paired_eval … search` + the new `version_ab` / `decision_metrics` tools; embed /
+   enable a setting ONLY if it measurably wins (this session's bar).
+3. Then PUCT progressive widening and the endgame-solver prerequisite (legal-move
+   enumerator), per the items below.
+
+---
+
 ## Execution status (2026-06-29)
 
 **Done (1-day + 1-week):**

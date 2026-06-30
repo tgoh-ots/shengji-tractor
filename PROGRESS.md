@@ -1,14 +1,39 @@
 # Shengji Online — Project Progress & Recovery Log
 
 > Durable status doc so work can resume after a crashed/restarted session.
-> **Last updated: 2026-06-29.** Update this at every milestone boundary.
+> **Last updated: 2026-06-30.** Update this at every milestone boundary.
 >
 > **Status: LIVE & actively iterated** at https://shengji-tractor.fly.dev.
 > The original milestones (M0–M6) are all done; work since then has been a
 > **bot-ladder overhaul**, a round of **UI/game-flow polish**, and a
 > **security/reliability audit + hygiene sweep** (all shipped).
 
-## Current state (2026-06-29)
+## Current state (2026-06-30)
+
+### 2026-06-30 — Playtest fixes (shipped v36) + eval tooling + re-distill finding
+From a round of user playtest feedback (parallel to, and merged with, the
+`codex/bot-overhaul` work in `610607c`/`bd2f3f6`):
+- **Bot play fixes (shipped, live as v36, commit `dc2ce3e`):** never burn a winner
+  (joker / trump-rank / high trump / side-suit Ace) on a lost trick — duck the lowest
+  junk; Enoch/Grandmaster open with safe near-unbeatable set throws (`KK+A`, tractor+A,
+  `KQJ→TT+A`) + always attach the Ace; ruff non-pair throws with NON-paired trump
+  (don't fragment a pair); big-throw discards protect points; non-declarers value the
+  bank from the unseen-card point density. Plus two crash/stuck fixes: the **bidding
+  freeze** (an Enoch flip stranded a human who couldn't respond — a human with no legal
+  bid now counts implicitly done) and the **rank-NT "can't reveal card" error flood**
+  (a pinned bot landlord at NT now picks up the kitty instead of an illegal reveal).
+  All unit-tested; honesty invariant + `baseline_gate` green.
+- **Measurement tooling (commit `97ddc11`):** `core/examples/version_ab` (asymmetric
+  A/B vs the frozen Legacy yardstick — measures the absolute effect a symmetric
+  tier-vs-tier benchmark cancels) and `core/examples/decision_metrics` (dense
+  per-decision quality rates on common states), plus `harness::play_one_hand_instrumented`.
+  These quantified the Enoch changes at **+3.1pp vs Legacy** and the per-decision
+  blunder-rate drops. See `docs/bot-training-roadmap.md` (2026-06-30 section).
+- **Re-distill finding:** a policy-only re-distill on the improved teacher (2,400 games)
+  is statistically TIED with the embedded net → **not embedded** (net unchanged). This
+  corroborates the roadmap's thesis that policy cloning is near its ceiling; the payoff
+  is the **value head on a large `GEN_BEHAVIOUR=mix` dataset** (`run_value_pipeline.sh`),
+  paired-measured before enabling. That is the recorded go-forward plan.
 
 ### 2026-06-29 — Security/reliability audit + hygiene sweep (shipped & deployed)
 A multi-agent code audit (`docs/code-audit-2026-06-29.md`, with a remediation-status

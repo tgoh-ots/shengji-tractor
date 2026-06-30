@@ -117,6 +117,20 @@ SHENGJI_BOT_BUDGET_MS=400 cargo run --release --example paired_eval -- 200 0x5EE
 # out with fixed greedy play, report whether the default burial leaks margin vs
 # alternatives (directs whether a learned kitty model is worth building).
 cargo run --release --example kitty_audit -- 300
+
+# Cross-version A/B vs the FROZEN Legacy yardstick (search-less → reproducible,
+# CPU-load-independent). Measures the ABSOLUTE effect of a scorer/playbook change
+# that tier-vs-tier benchmarks CANCEL (they apply it to both sides). Run it in a
+# pre-change `git worktree` AND the change branch; the delta vs the fixed Legacy
+# ruler is the change's effect (Heur@New and Enoch(greedy) subjects; MDE ≈ ±1.3pp
+# at 1500 paired decks). The asymmetric counterpart to paired_eval's tier matchups.
+cargo run --release --example version_ab -- 1500 0x5EED
+
+# Decision-level quality metrics: scores BOTH scorer versions on COMMON states
+# (matched denominators) for dense per-decision rates — lost-trick waste, point-leak,
+# ruff pair-fragmentation. Far more statistical power than one-bit-per-hand win-rate
+# for rare-situation play fixes. (Uses harness::play_one_hand_instrumented.)
+cargo run --release --example decision_metrics -- new 600 0x5EED
 ```
 
 All of the above share ONE driver — `core/src/bot/harness.rs` (`seeded_draw_phase`
