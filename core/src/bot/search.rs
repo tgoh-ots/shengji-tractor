@@ -61,6 +61,7 @@ use crate::bot::endgame::{self, ExactEndgameConfig, ExactValueAttempt};
 use crate::bot::expert;
 use crate::bot::heuristics::{self, ScoredPlay};
 use crate::game_state::play_phase::PlayPhase;
+use crate::settings::GameMode;
 
 fn sample_world<R: Rng>(p: &PlayPhase, me: PlayerID, rng: &mut R) -> Option<DeterminizedWorld> {
     crate::bot::belief::sample_persistent_world(p, me, rng)
@@ -207,7 +208,9 @@ fn provisional_level_objective_enabled() -> bool {
 
 /// Experimental late-root candidate reservation for the endgame ruff/kitty
 /// hypothesis. Default off until the fixed-work and late-state gates establish
-/// value. It changes only root coverage, never rollout value.
+/// value. In its narrow fully-terminal domain it also switches the entire root
+/// to exact contract/level units, so every candidate—not only the reservation—
+/// is judged on the final kitty-aware result.
 fn late_ruff_reserve_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -235,22 +238,100 @@ fn terminal_level_objective_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         std::env::var("SHENGJI_TERMINAL_LEVEL_OBJECTIVE")
             .map(|value| !value.is_empty() && value != "0")
-            .unwrap_or(true)
+            .unwrap_or(false)
     })
 }
 
-fn use_terminal_level_rollout(root: &PlayPhase, me: PlayerID, rollout_tricks: usize) -> bool {
-    if !terminal_level_objective_enabled() || root.landlords_team().contains(&me) {
-        return false;
-    }
-    let max_hand_size = root
-        .propagated()
+fn max_public_hand_size(root: &PlayPhase) -> Option<usize> {
+    root.propagated()
         .players()
         .iter()
-        .filter_map(|player| root.hands().get(player.id).ok())
-        .map(|hand| hand.values().copied().sum::<usize>())
-        .max()
-        .unwrap_or(0);
+        .try_fold(0usize, |largest, player| {
+            let hand = root.hands().get(player.id).ok()?;
+            Some(largest.max(hand.values().copied().sum::<usize>()))
+        })
+}
+
+fn standard_refinement_domain(root: &PlayPhase) -> bool {
+    root.num_decks() == 2
+        && root.propagated().players().len() == 4
+        && matches!(root.game_mode(), GameMode::Tractor)
+}
+
+fn late_ruff_rollout_domain(
+    root: &PlayPhase,
+    me: PlayerID,
+    rollout_tricks: usize,
+    reserve_enabled: bool,
+) -> bool {
+    if !reserve_enabled || !standard_refinement_domain(root) || !root.landlords_team().contains(&me)
+    {
+        return false;
+    }
+    let Some(max_hand_size) = max_public_hand_size(root) else {
+        return false;
+    };
+    if !(2..10).contains(&max_hand_size) || rollout_tricks < max_hand_size {
+        return false;
+    }
+    heuristics::EvalCtx::build_enoch(root, me)
+        .kitty_points
+        .unwrap_or(0)
+        >= 10
+}
+
+fn force_late_ruff_terminal(
+    root: &PlayPhase,
+    me: PlayerID,
+    config: &SearchConfig,
+    reserve_enabled: bool,
+) -> bool {
+    reserve_enabled
+        && config.policy == Policy::EnochHeuristic
+        && late_ruff_rollout_domain(root, me, config.rollout_tricks, reserve_enabled)
+}
+
+fn use_terminal_level_rollout(
+    root: &PlayPhase,
+    me: PlayerID,
+    rollout_tricks: usize,
+    force_late_ruff_terminal: bool,
+) -> bool {
+    use_terminal_level_rollout_with_flags(
+        root,
+        me,
+        rollout_tricks,
+        terminal_level_objective_enabled(),
+        force_late_ruff_terminal,
+    )
+}
+
+fn use_terminal_level_rollout_with_flags(
+    root: &PlayPhase,
+    me: PlayerID,
+    rollout_tricks: usize,
+    terminal_enabled: bool,
+    force_late_ruff_terminal: bool,
+) -> bool {
+    if !standard_refinement_domain(root) {
+        return false;
+    }
+    // The opt-in ruff-shape experiment is useful only if every candidate is
+    // judged by the exact terminal contract outcome, including the final-kitty
+    // multiplier. Keep that objective common to the entire root; never give the
+    // reserved candidate bespoke value units.
+    if force_late_ruff_terminal {
+        return true;
+    }
+    if !terminal_enabled {
+        return false;
+    }
+    if root.landlords_team().contains(&me) {
+        return false;
+    }
+    let Some(max_hand_size) = max_public_hand_size(root) else {
+        return false;
+    };
     if max_hand_size == 0 || max_hand_size >= 10 || rollout_tricks < max_hand_size {
         return false;
     }
@@ -549,26 +630,14 @@ fn argmax_earliest(values: &[f64]) -> usize {
     best_index
 }
 
-fn late_ruff_shape_candidate(
+fn late_ruff_shape_candidate_with_flags(
     p: &PlayPhase,
     me: PlayerID,
     candidates: &[ScoredPlay],
     config: &SearchConfig,
+    reserve_enabled: bool,
 ) -> Option<ScoredPlay> {
-    if !late_ruff_reserve_enabled()
-        || config.policy != Policy::EnochHeuristic
-        || !p.landlords_team().contains(&me)
-    {
-        return None;
-    }
-    let ctx = heuristics::EvalCtx::build_enoch(p, me);
-    // Match the human's genuinely late, valuable-kitty domain. Requiring the
-    // configured rollout horizon to reach the end lets exact engine scoring—not
-    // a hand-written all-trump bonus—judge the reserved plan.
-    if ctx.my_hand_size < 2
-        || ctx.my_hand_size >= 10
-        || config.rollout_tricks < ctx.my_hand_size
-        || ctx.kitty_points.unwrap_or(0) < 10
+    if config.max_candidates.max(1) < 2 || !force_late_ruff_terminal(p, me, config, reserve_enabled)
     {
         return None;
     }
@@ -604,7 +673,12 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
         return None;
     }
     let max_candidates = config.max_candidates.max(1);
-    let reserved = late_ruff_shape_candidate(p, me, &candidates, &config);
+    let reserve_enabled = late_ruff_reserve_enabled();
+    let late_ruff_terminal = force_late_ruff_terminal(p, me, &config, reserve_enabled);
+    let terminal_level_root =
+        use_terminal_level_rollout(p, me, config.rollout_tricks, late_ruff_terminal);
+    let reserved =
+        late_ruff_shape_candidate_with_flags(p, me, &candidates, &config, reserve_enabled);
     candidates.truncate(max_candidates);
     if let Some(reserved) = reserved {
         let already_present = candidates
@@ -662,7 +736,10 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
             root_q_values.as_deref(),
             &config,
             &mut rng,
-            decision_deadline,
+            PuctRunContext {
+                deadline: decision_deadline,
+                force_late_ruff_terminal: late_ruff_terminal,
+            },
         );
     }
 
@@ -697,10 +774,13 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
             &world.play,
             me,
             &candidates,
-            config.rollout_tricks,
-            config.rollout_policy,
+            RolloutEvalConfig {
+                tricks: config.rollout_tricks,
+                policy: config.rollout_policy,
+                force_late_ruff_terminal: late_ruff_terminal,
+                deadline: Some(decision_deadline),
+            },
             rollout_seed,
-            Some(decision_deadline),
         ) else {
             continue;
         };
@@ -756,7 +836,7 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
 
     // Pick the best candidate. Candidates are heuristic-sorted, so the earliest
     // index wins ties.
-    let best_idx = if config.policy == Policy::EnochHeuristic {
+    let best_idx = if config.policy == Policy::EnochHeuristic && !terminal_level_root {
         // Enoch: the static leaf evaluator ([`evaluate_position`]) is playbook-
         // BLIND (points + generic control only), so on its own the search can
         // silently override the Enoch playbook among near-equal candidates — e.g.
@@ -817,6 +897,20 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
     Some(candidates[best_idx].cards.clone())
 }
 
+#[derive(Clone, Copy)]
+struct RolloutEvalConfig {
+    tricks: usize,
+    policy: Policy,
+    force_late_ruff_terminal: bool,
+    deadline: Option<Instant>,
+}
+
+#[derive(Clone, Copy)]
+struct PuctRunContext {
+    deadline: Instant,
+    force_late_ruff_terminal: bool,
+}
+
 /// Evaluate a complete candidate round against one world with common random
 /// numbers. A round is all-or-nothing so callers never compare means based on
 /// different world sets merely because the wall clock expired between candidates.
@@ -824,10 +918,8 @@ fn evaluate_paired_candidates(
     world: &PlayPhase,
     me: PlayerID,
     candidates: &[ScoredPlay],
-    rollout_tricks: usize,
-    rollout_policy: Policy,
+    eval: RolloutEvalConfig,
     rollout_seed: u64,
-    deadline: Option<Instant>,
 ) -> Option<Vec<f64>> {
     let mut values = Vec::with_capacity(candidates.len());
     for candidate in candidates {
@@ -839,10 +931,8 @@ fn evaluate_paired_candidates(
             world,
             me,
             &candidate.cards,
-            rollout_tricks,
-            rollout_policy,
+            eval,
             &mut candidate_rng,
-            deadline,
         )?);
     }
     Some(values)
@@ -874,7 +964,7 @@ fn puct_search(
     root_q: Option<&[f64]>,
     config: &SearchConfig,
     rng: &mut StdRng,
-    deadline: Instant,
+    run: PuctRunContext,
 ) -> Option<Vec<Card>> {
     const C_PUCT: f64 = 1.5;
     let n = candidates.len();
@@ -908,17 +998,20 @@ fn puct_search(
     // every candidate gets the same world and random stream before UCB may focus
     // on a subset. This removes the old zero-as-Q bias and guarantees at least one
     // comparable sample per candidate when any simulation is possible.
-    if pulls >= n && Instant::now() < deadline {
+    if pulls >= n && Instant::now() < run.deadline {
         if let Some(world) = sample_world(p, me, rng) {
             let rollout_seed = rng.gen::<u64>();
             if let Some(values) = evaluate_paired_candidates(
                 &world.play,
                 me,
                 candidates,
-                config.rollout_tricks,
-                config.rollout_policy,
+                RolloutEvalConfig {
+                    tricks: config.rollout_tricks,
+                    policy: config.rollout_policy,
+                    force_late_ruff_terminal: run.force_late_ruff_terminal,
+                    deadline: Some(run.deadline),
+                },
                 rollout_seed,
-                Some(deadline),
             ) {
                 for (idx, value) in values.into_iter().enumerate() {
                     q_sum[idx] += value;
@@ -939,7 +1032,7 @@ fn puct_search(
     }
 
     for _ in n..pulls {
-        if Instant::now() >= deadline {
+        if Instant::now() >= run.deadline {
             break;
         }
         // Min-max normalize the current per-candidate mean values to [0,1] so the
@@ -985,10 +1078,13 @@ fn puct_search(
             &world.play,
             me,
             &candidates[best_i].cards,
-            config.rollout_tricks,
-            config.rollout_policy,
+            RolloutEvalConfig {
+                tricks: config.rollout_tricks,
+                policy: config.rollout_policy,
+                force_late_ruff_terminal: run.force_late_ruff_terminal,
+                deadline: Some(run.deadline),
+            },
             rng,
-            Some(deadline),
         ) {
             q_sum[best_i] += v;
             counts[best_i] += 1;
@@ -1116,10 +1212,13 @@ pub fn search_play_perfect_info(
             p,
             me,
             &candidates,
-            config.rollout_tricks,
-            config.rollout_policy,
+            RolloutEvalConfig {
+                tricks: config.rollout_tricks,
+                policy: config.rollout_policy,
+                force_late_ruff_terminal: false,
+                deadline: Some(root_deadline),
+            },
             rollout_seed,
-            Some(root_deadline),
         ) else {
             continue;
         };
@@ -1395,10 +1494,8 @@ fn evaluate_candidate(
     world: &PlayPhase,
     me: PlayerID,
     cards: &[Card],
-    rollout_tricks: usize,
-    policy: Policy,
+    eval: RolloutEvalConfig,
     rng: &mut StdRng,
-    deadline: Option<Instant>,
 ) -> Option<f64> {
     // Gate at the common world root so every candidate in a paired comparison
     // uses the same value units. A large lead must not become "exact" merely
@@ -1406,7 +1503,8 @@ fn evaluate_candidate(
     // alternative falls through to a point-valued rollout leaf.
     let exact = exact_endgame_config();
     let use_exact = endgame::eligible_for_exact(world, exact);
-    let use_terminal_level = use_terminal_level_rollout(world, me, rollout_tricks);
+    let use_terminal_level =
+        use_terminal_level_rollout(world, me, eval.tricks, eval.force_late_ruff_terminal);
     let mut sim = world.clone();
     // Play our candidate.
     if sim.play_cards(me, cards).is_err() {
@@ -1418,7 +1516,7 @@ fn evaluate_candidate(
     // invokes this on the real hidden hands. An over-budget solve invalidates the
     // candidate round instead of mixing a partial exact result with rollout units.
     if use_exact {
-        match endgame::solve_value_if_eligible(&sim, me, exact, deadline) {
+        match endgame::solve_value_if_eligible(&sim, me, exact, eval.deadline) {
             ExactValueAttempt::Solved(value) => return Some(value),
             ExactValueAttempt::Aborted | ExactValueAttempt::Ineligible => return None,
         }
@@ -1433,8 +1531,8 @@ fn evaluate_candidate(
     // `saturating_mul` so a `rollout_tricks` of `usize::MAX` (the Omniscient
     // "roll out the whole hand" sentinel) caps at `usize::MAX` plies instead of
     // overflowing; the rollout loop terminates anyway once the hand is finished.
-    let max_plies = players.saturating_mul(rollout_tricks.max(1));
-    if !rollout(&mut sim, max_plies, policy, rng, deadline) {
+    let max_plies = players.saturating_mul(eval.tricks.max(1));
+    if !rollout(&mut sim, max_plies, eval.policy, rng, eval.deadline) {
         return None;
     }
 
@@ -1812,11 +1910,15 @@ fn net_value_estimate(sim: &PlayPhase, me: PlayerID) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        adaptive_fraction_from_signals, canonicalize_ranked_candidates, normalized_entropy,
-        oriented_level_utility, ranked_candidates, ranked_candidates_perfect_information,
-        remove_known_failed_throws, risk_adjusted_value, use_terminal_level_rollout, Policy,
-        RiskConfig, ScoredPlay,
+        adaptive_fraction_from_signals, canonicalize_ranked_candidates, evaluate_candidate,
+        force_late_ruff_terminal, late_ruff_shape_candidate_with_flags, max_public_hand_size,
+        normalized_entropy, oriented_level_utility, ranked_candidates,
+        ranked_candidates_perfect_information, remove_known_failed_throws, risk_adjusted_value,
+        use_terminal_level_rollout_with_flags, Policy, RiskConfig, RolloutEvalConfig, ScoredPlay,
+        SearchConfig,
     };
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
     use shengji_mechanics::deck::Deck;
     use shengji_mechanics::hands::Hands;
     use shengji_mechanics::player::Player;
@@ -1891,6 +1993,198 @@ mod tests {
             vec![],
         )
         .unwrap();
+        (play, ids)
+    }
+
+    fn late_ruff_position() -> (PlayPhase, Vec<PlayerID>, Vec<ScoredPlay>) {
+        let ids: Vec<PlayerID> = (0..4).map(PlayerID).collect();
+        let mut propagated = PropagatedState::default();
+        propagated.players = ids
+            .iter()
+            .map(|id| Player::new(*id, format!("p{}", id.0)))
+            .collect();
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let club_three = card(Suit::Clubs, Number::Three);
+        let club_four = card(Suit::Clubs, Number::Four);
+        let low_trump = card(Suit::Hearts, Number::Three);
+        let mut hands = Hands::new(ids.iter().copied());
+        hands.set_trump(trump);
+        hands
+            .add(ids[0], [club_three, club_four, low_trump, low_trump])
+            .unwrap();
+        hands
+            .add(
+                ids[1],
+                [
+                    card(Suit::Diamonds, Number::Three),
+                    card(Suit::Diamonds, Number::Four),
+                    card(Suit::Spades, Number::Three),
+                    card(Suit::Spades, Number::Four),
+                ],
+            )
+            .unwrap();
+        hands
+            .add(
+                ids[2],
+                [
+                    card(Suit::Diamonds, Number::Five),
+                    card(Suit::Diamonds, Number::Six),
+                    card(Suit::Spades, Number::Five),
+                    card(Suit::Spades, Number::Six),
+                ],
+            )
+            .unwrap();
+        hands
+            .add(
+                ids[3],
+                [
+                    card(Suit::Diamonds, Number::Seven),
+                    card(Suit::Diamonds, Number::Eight),
+                    card(Suit::Spades, Number::Seven),
+                    card(Suit::Spades, Number::Eight),
+                ],
+            )
+            .unwrap();
+        let play = PlayPhase::new(
+            propagated,
+            2,
+            GameMode::Tractor,
+            hands,
+            vec![card(Suit::Clubs, Number::Ten)],
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0], ids[2]],
+            vec![],
+            vec![Deck::default(), Deck::default()],
+            vec![],
+        )
+        .unwrap();
+        let candidates = vec![
+            ScoredPlay {
+                cards: vec![low_trump],
+                score: 100.0,
+            },
+            ScoredPlay {
+                cards: vec![club_three, club_four],
+                score: 0.0,
+            },
+        ];
+        (play, ids, candidates)
+    }
+
+    fn terminal_ruff_tradeoff_position(point_rich_pot: bool) -> (PlayPhase, Vec<PlayerID>) {
+        let ids: Vec<PlayerID> = (0..4).map(PlayerID).collect();
+        let mut propagated = PropagatedState::default();
+        propagated.players = ids
+            .iter()
+            .map(|id| Player::new(*id, format!("p{}", id.0)))
+            .collect();
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let current_cards = if point_rich_pot {
+            [
+                card(Suit::Clubs, Number::King),
+                card(Suit::Clubs, Number::King),
+                card(Suit::Clubs, Number::Ten),
+            ]
+        } else {
+            [
+                card(Suit::Clubs, Number::Four),
+                card(Suit::Clubs, Number::Ace),
+                card(Suit::Clubs, Number::Three),
+            ]
+        };
+        let partner_final = if point_rich_pot {
+            card(Suit::Spades, Number::Four)
+        } else {
+            card(Suit::Spades, Number::Ten)
+        };
+        let mut hands = Hands::new(ids.iter().copied());
+        hands.set_trump(trump);
+        hands
+            .add(
+                ids[0],
+                [
+                    card(Suit::Diamonds, Number::Five),
+                    current_cards[0],
+                    partner_final,
+                ],
+            )
+            .unwrap();
+        hands
+            .add(
+                ids[1],
+                [
+                    card(Suit::Diamonds, Number::Ace),
+                    current_cards[1],
+                    card(Suit::Spades, Number::Ace),
+                ],
+            )
+            .unwrap();
+        hands
+            .add(
+                ids[2],
+                [
+                    card(Suit::Diamonds, Number::Ten),
+                    card(Suit::Diamonds, Number::Three),
+                    Card::BigJoker,
+                ],
+            )
+            .unwrap();
+        hands
+            .add(
+                ids[3],
+                [
+                    card(Suit::Diamonds, Number::Six),
+                    current_cards[2],
+                    card(Suit::Hearts, Number::Three),
+                ],
+            )
+            .unwrap();
+        let kitty = vec![
+            card(Suit::Clubs, Number::Ten),
+            card(Suit::Clubs, Number::Seven),
+            card(Suit::Clubs, Number::Eight),
+            card(Suit::Clubs, Number::Nine),
+            card(Suit::Diamonds, Number::Seven),
+            card(Suit::Diamonds, Number::Eight),
+            card(Suit::Diamonds, Number::Nine),
+            card(Suit::Spades, Number::Seven),
+        ];
+        let mut play = PlayPhase::new(
+            propagated,
+            2,
+            GameMode::Tractor,
+            hands,
+            kitty,
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0], ids[2]],
+            vec![],
+            vec![Deck::default(), Deck::default()],
+            vec![],
+        )
+        .unwrap();
+        // Seed the attackers with 15 points, just below the first 40-point
+        // landlord-level boundary, and make player 1 the next leader.
+        for (id, cards) in [
+            (ids[0], vec![card(Suit::Diamonds, Number::Five)]),
+            (ids[1], vec![card(Suit::Diamonds, Number::Ace)]),
+            (ids[2], vec![card(Suit::Diamonds, Number::Ten)]),
+            (ids[3], vec![card(Suit::Diamonds, Number::Six)]),
+        ] {
+            play.play_cards(id, &cards).unwrap();
+        }
+        play.finish_trick().unwrap();
+        assert_eq!(play.calculate_points().0, 15);
+        play.play_cards(ids[1], &[current_cards[1]]).unwrap();
         (play, ids)
     }
 
@@ -2063,6 +2357,107 @@ mod tests {
     }
 
     #[test]
+    fn late_ruff_reservation_requires_a_real_search_slot() {
+        let (play, ids, candidates) = late_ruff_position();
+        assert_eq!(max_public_hand_size(&play), Some(4));
+        let config = SearchConfig {
+            max_candidates: 2,
+            rollout_tricks: 4,
+            policy: Policy::EnochHeuristic,
+            // Grandmaster's real wiring: Enoch root proposals, neutral rollouts.
+            rollout_policy: Policy::Heuristic,
+            ..SearchConfig::default()
+        };
+        assert!(force_late_ruff_terminal(&play, ids[0], &config, true));
+        let selected =
+            late_ruff_shape_candidate_with_flags(&play, ids[0], &candidates, &config, true)
+                .expect("late standard Tractor position should reserve the ruff shape");
+        assert_eq!(selected.cards, candidates[1].cards);
+
+        let one_slot = SearchConfig {
+            max_candidates: 1,
+            ..config
+        };
+        assert!(
+            late_ruff_shape_candidate_with_flags(&play, ids[0], &candidates, &one_slot, true,)
+                .is_none()
+        );
+
+        // Enabling reservation also switches the entire common root to exact
+        // terminal contract units; disabling it leaves a defender on the normal
+        // point/control leaf.
+        assert!(use_terminal_level_rollout_with_flags(
+            &play, ids[0], 4, true, true,
+        ));
+        assert!(!use_terminal_level_rollout_with_flags(
+            &play, ids[0], 4, true, false,
+        ));
+
+        let wrong_root = SearchConfig {
+            policy: Policy::Heuristic,
+            rollout_policy: Policy::EnochHeuristic,
+            ..config
+        };
+        assert!(!force_late_ruff_terminal(&play, ids[0], &wrong_root, true,));
+    }
+
+    #[test]
+    fn terminal_scoring_balances_ruff_shape_against_threshold_points() {
+        let shed = card(Suit::Diamonds, Number::Three);
+        let ruff = Card::BigJoker;
+        let eval = RolloutEvalConfig {
+            tricks: 2,
+            policy: Policy::Heuristic,
+            force_late_ruff_terminal: true,
+            deadline: None,
+        };
+
+        let (empty_pot, ids) = terminal_ruff_tradeoff_position(false);
+        let shed_empty = evaluate_candidate(
+            &empty_pot,
+            ids[2],
+            &[shed],
+            eval,
+            &mut StdRng::seed_from_u64(1),
+        )
+        .expect("the shed line should reach a terminal score");
+        let ruff_empty = evaluate_candidate(
+            &empty_pot,
+            ids[2],
+            &[ruff],
+            eval,
+            &mut StdRng::seed_from_u64(1),
+        )
+        .expect("the ruff line should reach a terminal score");
+        assert!(
+            shed_empty > ruff_empty,
+            "shedding the last nontrump must protect the valuable final kitty"
+        );
+
+        let (point_rich, ids) = terminal_ruff_tradeoff_position(true);
+        let shed_points = evaluate_candidate(
+            &point_rich,
+            ids[2],
+            &[shed],
+            eval,
+            &mut StdRng::seed_from_u64(1),
+        )
+        .expect("the shed line should reach a terminal score");
+        let ruff_points = evaluate_candidate(
+            &point_rich,
+            ids[2],
+            &[ruff],
+            eval,
+            &mut StdRng::seed_from_u64(1),
+        )
+        .expect("the ruff line should reach a terminal score");
+        assert!(
+            ruff_points > shed_points,
+            "capturing a threshold-crossing pot must override hand shaping"
+        );
+    }
+
+    #[test]
     fn win_boundary_dominates_gambling_for_the_next_level() {
         // Attacker perspective: below turnover is a loss; turnover is a win;
         // the next band is a larger win. A sure basic win must beat a 50/50
@@ -2100,29 +2495,33 @@ mod tests {
             (
                 ids[0],
                 vec![
+                    card(Suit::Clubs, Number::Ten),
                     card(Suit::Spades, Number::Ten),
-                    card(Suit::Clubs, Number::Three),
+                    card(Suit::Diamonds, Number::Three),
                 ],
             ),
             (
                 ids[1],
                 vec![
+                    card(Suit::Clubs, Number::King),
                     card(Suit::Spades, Number::Ace),
-                    card(Suit::Clubs, Number::Four),
+                    card(Suit::Diamonds, Number::Four),
                 ],
             ),
             (
                 ids[2],
                 vec![
+                    card(Suit::Clubs, Number::King),
                     card(Suit::Spades, Number::King),
-                    card(Suit::Clubs, Number::Five),
+                    card(Suit::Diamonds, Number::Five),
                 ],
             ),
             (
                 ids[3],
                 vec![
+                    card(Suit::Clubs, Number::Ten),
                     card(Suit::Spades, Number::Five),
-                    card(Suit::Clubs, Number::Six),
+                    card(Suit::Diamonds, Number::Six),
                 ],
             ),
         ] {
@@ -2130,7 +2529,7 @@ mod tests {
         }
         let mut play = PlayPhase::new(
             propagated,
-            1,
+            2,
             GameMode::Tractor,
             hands,
             vec![],
@@ -2139,22 +2538,40 @@ mod tests {
             ids[0],
             vec![ids[0], ids[2]],
             vec![],
-            vec![Deck::default()],
+            vec![Deck::default(), Deck::default()],
             vec![],
         )
         .unwrap();
         for (id, cards) in [
-            (ids[0], vec![card(Suit::Spades, Number::Ten)]),
-            (ids[1], vec![card(Suit::Spades, Number::Ace)]),
-            (ids[2], vec![card(Suit::Spades, Number::King)]),
-            (ids[3], vec![card(Suit::Spades, Number::Five)]),
+            (ids[0], vec![card(Suit::Clubs, Number::Ten)]),
+            (ids[1], vec![card(Suit::Clubs, Number::King)]),
+            (ids[2], vec![card(Suit::Clubs, Number::King)]),
+            (ids[3], vec![card(Suit::Clubs, Number::Ten)]),
         ] {
             play.play_cards(id, &cards).unwrap();
         }
         play.finish_trick().unwrap();
-        assert_eq!(play.calculate_points().0, 25);
-        assert!(use_terminal_level_rollout(&play, ids[1], 1));
-        assert!(!use_terminal_level_rollout(&play, ids[1], 0));
-        assert!(!use_terminal_level_rollout(&play, ids[0], 1));
+        for (id, cards) in [
+            (ids[1], vec![card(Suit::Spades, Number::Ace)]),
+            (ids[2], vec![card(Suit::Spades, Number::King)]),
+            (ids[3], vec![card(Suit::Spades, Number::Five)]),
+            (ids[0], vec![card(Suit::Spades, Number::Ten)]),
+        ] {
+            play.play_cards(id, &cards).unwrap();
+        }
+        play.finish_trick().unwrap();
+        assert_eq!(play.calculate_points().0, 65);
+        assert!(use_terminal_level_rollout_with_flags(
+            &play, ids[1], 1, true, false,
+        ));
+        assert!(!use_terminal_level_rollout_with_flags(
+            &play, ids[1], 1, false, false,
+        ));
+        assert!(!use_terminal_level_rollout_with_flags(
+            &play, ids[1], 0, true, false,
+        ));
+        assert!(!use_terminal_level_rollout_with_flags(
+            &play, ids[0], 1, true, false,
+        ));
     }
 }

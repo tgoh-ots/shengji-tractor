@@ -8,7 +8,7 @@
 //! effect without moving the control policy.
 //!
 //! Usage:
-//!   cargo run --release --example refinement_search_ab -- [pairs] [seed] [worlds] [mode] [rollout]
+//!   cargo run --release --example refinement_search_ab -- [pairs] [seed] [worlds] [mode] [rollout] [candidates]
 
 use std::env;
 use std::time::Duration;
@@ -61,25 +61,32 @@ fn main() {
         .find(|arg| arg.as_str() != "--trace")
         .and_then(|arg| arg.parse().ok())
         .unwrap_or(4);
+    let max_candidates = args
+        .iter()
+        .skip(6)
+        .find(|arg| arg.as_str() != "--trace")
+        .and_then(|arg| arg.parse().ok())
+        .unwrap_or(4);
     let (policy, rollout_policy) = match mode {
         "heuristic" => (Policy::Heuristic, Policy::Heuristic),
         "expert" => (Policy::Net, Policy::Heuristic),
         "enoch" => (Policy::EnochHeuristic, Policy::EnochHeuristic),
+        "grandmaster" => (Policy::EnochHeuristic, Policy::Heuristic),
         other => panic!(
-            "unknown search mode {:?}; use heuristic, expert, or enoch",
+            "unknown search mode {:?}; use heuristic, expert, enoch, or grandmaster",
             other
         ),
     };
 
     let search = Contestant::new(
-        format!("Search@{worlds}w"),
+        format!("Search@{worlds}w/{max_candidates}c"),
         Seat {
             play: PlayBrain::Search(SearchConfig {
                 // The world cap, not time, must bind for reproducible comparison.
                 // Deliberately generous: the fixed world cap, not wall-clock
                 // contention, must bind in a cross-checkout comparison.
                 time_budget: Duration::from_secs(30),
-                max_candidates: 4,
+                max_candidates,
                 max_worlds: worlds,
                 rollout_tricks,
                 seed,
@@ -100,7 +107,7 @@ fn main() {
     );
 
     println!(
-        "FIXED-WORK REFINEMENT SEARCH A/B: pairs={pairs} seed={seed:#x} worlds={worlds} cands=4 rollout={rollout_tricks} mode={mode}"
+        "FIXED-WORK REFINEMENT SEARCH A/B: pairs={pairs} seed={seed:#x} worlds={worlds} cands={max_candidates} rollout={rollout_tricks} mode={mode}"
     );
     let result = run_paired_ab(&search, &legacy, pairs, seed);
     print_paired_ab(&result);
