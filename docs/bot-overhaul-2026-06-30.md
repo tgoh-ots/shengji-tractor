@@ -1,4 +1,11 @@
-# Bot system overhaul: findings, implementation, and next bets
+# Bot system overhaul: findings, implementation, and next bets (Historical)
+
+> **Roadmap status:** the implementation record and measured findings in this
+> document are retained, but its “next bets” and promotion sequence are
+> superseded by the
+> [2026-07-02 strongest-bot program](strategy/strongest-bot-program-2026-07-02.md).
+> In particular, do not infer that the old state-V-first recipe is still the
+> recommended next experiment.
 
 ## Outcome
 
@@ -240,7 +247,7 @@ measure strategy-fusion and belief-model error, provide an approximate best
 response, and validate whether RIS-MCTS or learned beliefs move toward the known
 solution. Treat it as a diagnostic laboratory, not a production training path.
 
-## Promotion sequence
+## Historical promotion sequence (superseded)
 
 1. Generate a release-mode schema-3 corpus with mixed strong behavior, multiple
    counterfactual candidates, and several shared worlds per observation.

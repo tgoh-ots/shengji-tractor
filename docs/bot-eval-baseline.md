@@ -3,9 +3,12 @@
 > Measured 2026-06 on the paired-on-mirrored-deck harness
 > (`core/src/bot/harness.rs`). This is the reference the non-inferiority gate
 > (`core/tests/baseline_gate.rs`) and the `paired_eval` example check against.
-> Companion to `docs/bot-training-roadmap.md` (the "measurement substrate").
+> This remains a historical baseline and harness reference; its old
+> non-inferiority floors are not sufficient for a new superiority claim. The
+> authoritative current protocol is the
+> [2026-07-02 strongest-bot program](strategy/strongest-bot-program-2026-07-02.md).
 
-## How strength is measured now
+## How strength was measured in this baseline
 
 `harness::run_paired_ab` plays each deck seed in **both** orientations (A as the
 landlord team, then B as the landlord team, on the **identical** deal). Pairing the

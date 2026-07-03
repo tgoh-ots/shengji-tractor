@@ -1,5 +1,11 @@
 # Human strategy refinement evaluation — 2026-06-30
 
+> **Historical evaluation record.** The evaluated refinement commits were later
+> incorporated into `master`; this document is evidence, not the current
+> execution plan. Follow the Enoch-first
+> [2026-07-02 strongest-bot program](strongest-bot-program-2026-07-02.md) for
+> subsequent work and strength gates.
+
 ## Decision
 
 The tactical refinements are a credible improvement over `master` at `d1e55d1`.

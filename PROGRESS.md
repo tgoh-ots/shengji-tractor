@@ -1,7 +1,11 @@
 # Shengji Online — Project Progress & Recovery Log
 
 > Durable status doc so work can resume after a crashed/restarted session.
-> **Last updated: 2026-06-30.** Update this at every milestone boundary.
+> **Last updated: 2026-07-02.** This is a historical chronology, not the current
+> bot execution roadmap. Use
+> [`docs/strategy/strongest-bot-program-2026-07-02.md`](docs/strategy/strongest-bot-program-2026-07-02.md)
+> for current Enoch-first sequencing and gates. Update this at every milestone
+> boundary.
 >
 > **Status: LIVE & actively iterated** at https://shengji-tractor.fly.dev.
 > The original milestones (M0–M6) are all done; work since then has been a
@@ -46,12 +50,15 @@ From a round of user playtest feedback (parallel to, and merged with, the
   tier-vs-tier benchmark cancels) and `core/examples/decision_metrics` (dense
   per-decision quality rates on common states), plus `harness::play_one_hand_instrumented`.
   These quantified the Enoch changes at **+3.1pp vs Legacy** and the per-decision
-  blunder-rate drops. See `docs/bot-training-roadmap.md` (2026-06-30 section).
+  blunder-rate drops. The deprecated `docs/bot-training-roadmap.md` preserves the
+  2026-06-30 evidence.
 - **Re-distill finding:** a policy-only re-distill on the improved teacher (2,400 games)
   is statistically TIED with the embedded net → **not embedded** (net unchanged). This
-  corroborates the roadmap's thesis that policy cloning is near its ceiling; the payoff
-  is the **value head on a large `GEN_BEHAVIOUR=mix` dataset** (`run_value_pipeline.sh`),
-  paired-measured before enabling. That is the recorded go-forward plan.
+  corroborated the old roadmap's thesis that policy cloning was near its ceiling.
+  At the time, the recorded next bet was a value head on a large
+  `GEN_BEHAVIOUR=mix` dataset. Later state-V and V/Q gates were adverse, so that
+  value-first recommendation is superseded by the 2026-07-02 Enoch-first plan
+  linked at the top of this file.
 
 ### 2026-06-29 — Security/reliability audit + hygiene sweep (shipped & deployed)
 A multi-agent code audit (`docs/code-audit-2026-06-29.md`, with a remediation-status

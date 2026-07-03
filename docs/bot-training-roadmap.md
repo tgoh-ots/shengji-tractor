@@ -1,13 +1,19 @@
-# Bot Training Improvement Roadmap
+# Bot Training Improvement Roadmap (Deprecated)
 
-> **Status:** historical 2026-06-29 roadmap. The 2026-06-30 implementation
-> supersedes several details below; see [bot-overhaul-2026-06-30.md](bot-overhaul-2026-06-30.md)
-> for the current architecture, completed work, remaining risks, and alternative
-> training bets. · **Drafted:** 2026-06-28
+> **DEPRECATED AS AN EXECUTION PLAN (2026-07-02).** This document is retained
+> only for historical findings, completed-tooling provenance, and prior
+> experiment results. The authoritative bot-strength roadmap is
+> [Strongest-bot program: Enoch, Grandmaster v2, and Expert v2](strategy/strongest-bot-program-2026-07-02.md).
+> Do not execute this document's unchecked items, ordering, estimated gains, or
+> promotion recommendations. Where the documents conflict—especially on
+> value-head priority, training targets, experiment order, or strength
+> gates—the 2026-07-02 roadmap controls. Completed measurements and named tools
+> below remain valid historical evidence, not current instructions.
+> **Drafted:** 2026-06-28
 > **Scope:** how to make the Shengji bot models *stronger*, and how to *prove* they got stronger.
 > Grounded in the current code (file:line references throughout). Companion to `PROGRESS.md` and the committed eval baseline `docs/bot-eval-baseline.md`.
 
-## 2026-06-30 playtest session — eval tooling + re-distill finding + go-forward plan
+## Historical 2026-06-30 session — eval tooling and superseded go-forward plan
 
 This session shipped playtest fixes (lowest-card-when-losing, safe set throws +
 Ace-attach, non-paired-trump ruff, big-throw point protection, declarer-aware bank
@@ -44,8 +50,7 @@ gotcha hit + documented: sharded `gen_training_data` restarts its `group` counte
 process, so concatenated shards collide on group ids and must be renumbered globally;
 since fixed on master in `b013eb1`.)
 
-**Go-forward plan (the actual strength payoff, unchanged from the 1-month plan, now
-with evidence it's the right bet):**
+**Historical go-forward plan (superseded by the 2026-07-02 roadmap):**
 1. Run `training/run_value_pipeline.sh` at SCALE (sharded, resumable) to train a
    **value head** on a large on-policy `GEN_BEHAVIOUR=mix` dataset — the highest-ceiling
    change (replaces the crude static leaf eval), and the one that targets exactly the
@@ -194,7 +199,7 @@ Assumes the 1-day work is done. **Sequence matters.**
 
 ---
 
-## The 1-month plan — raise the ceiling (now falsifiable)
+## Historical 1-month plan — superseded
 
 Assumes the substrate exists, so these are now measurable bets. Sequenced by dependency.
 
@@ -256,7 +261,7 @@ Assumes the substrate exists, so these are now measurable bets. Sequenced by dep
 
 ---
 
-## Where the largest improvement comes from
+## Historical priority ranking — superseded
 
 In order:
 
@@ -275,7 +280,7 @@ decide.
 
 ---
 
-## AVOID — judged non-starters / traps
+## Historical “avoid” list — do not apply as current guidance
 
 Don't burn the month on these:
 

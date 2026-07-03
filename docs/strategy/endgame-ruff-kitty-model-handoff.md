@@ -1,9 +1,17 @@
 # Endgame ruff, throw, and kitty strategy: model handoff
 
+> **DEPRECATED AS AN EXECUTION PLAN (2026-07-02).** Its mechanics analysis and
+> tactical findings remain useful, but its implementation order has been folded
+> into the Enoch-first
+> [strongest-bot program](strongest-bot-program-2026-07-02.md). The later
+> [human-refinement evaluation](human-refinement-evaluation-2026-06-30.md)
+> records which initial experiments landed and what they measured. Do not treat
+> this handoff's “next session” instructions as current work.
+>
 > Session handoff from 2026-06-30. This note follows the unsafe Joker-throw fix
 > in commit `4f9e5a8` and records a subsequent strategy discussion. It separates
 > exact engine rules from useful human heuristics, audits current bot coverage,
-> and gives the next implementation session a prioritized plan.
+> and records the implementation plan proposed at that time.
 
 ## Executive summary
 
@@ -240,7 +248,7 @@ hard-capped at 12 total remaining cards. A four-card-per-seat finale has 16 card
 and is ineligible. Benchmark before raising the general cap; a dedicated
 terminal-candidate fast path may be cheaper than broadening minimax.
 
-## Recommended implementation order
+## Historical implementation order (superseded)
 
 ### Phase A: heuristic and search behavior
 

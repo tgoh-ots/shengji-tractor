@@ -188,9 +188,16 @@ cd frontend && yarn types && yarn prettier --write && yarn lint --fix
 The Expert tier's prior is a small MLP distilled from the Omniscient teacher.
 Pipeline: Rust self-play data export → PyTorch training → ONNX → embedded in Rust
 (`include_bytes!`, run via `tract-onnx` — no C/onnxruntime dependency, builds in
-the musl deploy image). **This section (CLAUDE.md) is the source of truth for the
-current pipeline**; `training/README.md` is older high-level background and may lag
-(e.g. the value head, DAgger, and the runner are documented here, not there).
+the musl deploy image).
+
+> **Strategy status (2026-07-02):** the commands below document the legacy
+> distillation/value tooling; they are not the current campaign order. The
+> deployed `c813c8a` artifact is schema-v2/dim-49 and policy-only, while later
+> state-V and combined V/Q gates were adverse. Do not launch a value-first
+> campaign from this section. Follow the Enoch-first
+> [`docs/strategy/strongest-bot-program-2026-07-02.md`](docs/strategy/strongest-bot-program-2026-07-02.md)
+> and use `training/README.md` plus `docs/expert-iteration-training.md` for the
+> current typed contracts and operator commands.
 ```bash
 # 1. Generate distillation data. Writes training/data.csv (group, f0..f35, label,
 #    value). GEN_TEACHER_BUDGET_MS (default 400) sets the teacher search budget =
@@ -234,19 +241,23 @@ parallel (sharded data-gen via `GEN_SEED`), reboot-safe runner. Re-run it to RES
 (completed shards/train/A/B are skipped via markers in `$HOME/.shengji-value-run`);
 `STATUS=1 bash training/run_value_pipeline.sh` reports progress.
 
-CONTRACT: `FEATURE_DIM` (currently 36) is defined in `core/src/bot/expert.rs`
-(`candidate_features`) AND hardcoded in `train_expert.py`; the value-augmented CSV
-has `1 + FEATURE_DIM + 1 (label) + 1 (value)` columns (the trainer also accepts the
-legacy policy-only width). The SAME `candidate_features` builds both the training
-rows and the inference vector, so the encoding can't drift — but if you change it,
-bump it in both places and retrain. The VALUE head: `gen_training_data` emits the
+CONTRACT: `FEATURE_DIM` is the 36-feature legacy prefix and
+`TRAINING_FEATURE_DIM` is the 49-feature schema-v2 contract in
+`core/src/bot/expert.rs`; the trainer accepts and validates the declared schema.
+CSV width is `1 + declared feature dimension + label + declared optional targets`.
+The exporter and inference path select `candidate_features` or
+`candidate_features_v2` from the typed schema, so a feature change requires a
+schema/dimension bump, regenerated data, retraining, and new manifest/goldens.
+The VALUE head: `gen_training_data` emits the
 realized terminal margin (oriented per acting team), normalized by
 `expert::VALUE_NORM` (the single Rust-side scale, shared by data-gen + the
 `search::evaluate_position` blend; the Python trainer is scale-free); inference
 reads ONNX output[1] and blends it behind `SHENGJI_VALUE_WEIGHT` with a static-eval
 fallback (a policy-only model → no value output → blend auto-disabled). The
 embedded model is policy-only by default, so the value path ships INERT until you
-train + embed a value-head net. See `docs/bot-training-roadmap.md` (1-month plan).
+train + embed a value-head net. The old value-head-first recommendation in
+`docs/bot-training-roadmap.md` is deprecated; use the current strongest-bot
+program linked above.
 
 ## Architecture
 
