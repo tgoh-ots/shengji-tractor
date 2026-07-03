@@ -1,0 +1,73 @@
+{
+  "artifacts": {
+    "candidate_result_sha256": "c33a1328c4b371dd2441a3c343913feda49c9954a4f82f8333402d20b45b6944",
+    "comparison_sha256": "f9272d7bb42303c06b3f2cd68c5e9620e3e2a124bc36c2ee32d045ab3695ee08",
+    "embedded_result_sha256": "c5846a5b8c38d42ed30f5fa1bb0eb1801bf8afe0d4b425578e43730abfc5de2a",
+    "frozen_binaries_manifest_sha256": "96e9bdde66d3c4b208cfc8582cb4e5c95c725003ffd18b78a8df42ee7cb6304c",
+    "input_artifacts_manifest_sha256": "e35a36f78ea717e81c0ae85bf57a4fd3854082cdae6b71e54c97a8315437069e",
+    "protocol_sha256": "d90c8c7620efd08a89fe49e06bc496f14266074a20ac39840bda0896502cfe29",
+    "status_sha256": "542688c55d22dca4f6c7345055287cd476a5fac65927f534c90382a1071bf754",
+    "terminal_artifacts_manifest_sha256": "ff3a2cc3422f11a81b29d47a8668dda874dea6833b9643f0f607d3f76ef7f7e1"
+  },
+  "automatic_production_promotion_allowed": false,
+  "candidate": {
+    "golden_sha256": "32d4adadb7d4811ab8fb74b42d7e5f46358e700ebcce8185d16e54ddbaab8c55",
+    "manifest_sha256": "308fc3f2fcd06a60ffe9613f1772313537d45ea00f556f1e353e582eb5dc334c",
+    "model_sha256": "e4204bef3c39ea7785934fb6644de3a6daa8a8a18e627116e4026bfba6ca671c",
+    "outputs": [
+      "score"
+    ],
+    "variant": "policy-only"
+  },
+  "completed_utc": "2026-07-03T02:32:39Z",
+  "evaluation": {
+    "arm_stderr_empty": true,
+    "budget_ms": 150,
+    "candidate_complete_pairs": 800,
+    "candidate_failed_hands": 0,
+    "embedded_complete_pairs": 800,
+    "embedded_failed_hands": 0,
+    "exact_in_memory_comparison_rebuild_equal": true,
+    "pairs_per_arm": 800,
+    "seed": 2870636803
+  },
+  "gate": {
+    "minimum_level_delta": -0.02,
+    "observed_lower95": 0.001875,
+    "passed": true
+  },
+  "launch_agent_unloaded_after_completion": true,
+  "lineage": {
+    "embedded_model_sha256_after_run": "04f678dec5329a23ef33735acfacd45b7c0815154012507bb2d74dc6bde23df4",
+    "initial_background_qos_preflight_audit": "preflight-attempt-00.audit.json",
+    "source_commit": "00331cf83d39047115bf41367979ae3b768333ef",
+    "tracked_source_clean_after_run": true
+  },
+  "manifest_version": 1,
+  "metrics": {
+    "level_utility": {
+      "candidate_minus_embedded": 0.040625,
+      "paired_bootstrap95": [
+        0.001875,
+        0.080625
+      ]
+    },
+    "point_margin": {
+      "candidate_minus_embedded": 1.1125,
+      "paired_bootstrap95": [
+        -0.221875,
+        2.4875
+      ]
+    },
+    "winrate": {
+      "candidate_minus_embedded": 0.023125,
+      "paired_bootstrap95": [
+        -0.00125,
+        0.04875
+      ]
+    }
+  },
+  "promotion_or_deployment_performed": false,
+  "research_only": true,
+  "status": "complete-gate-passed-no-promotion"
+}

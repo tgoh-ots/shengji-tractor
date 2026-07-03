@@ -7,14 +7,22 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::BufReader;
+use std::path::Path;
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tract_onnx::prelude::*;
 
 #[derive(Deserialize)]
 struct ModelManifest {
     feature_dim: usize,
     outputs: Vec<String>,
+    #[serde(default)]
+    model_sha256: Option<String>,
+    #[serde(default)]
+    golden_path: Option<String>,
+    #[serde(default)]
+    golden_sha256: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -25,6 +33,11 @@ struct Golden {
     rtol: f32,
     inputs: Vec<Vec<f32>>,
     outputs: BTreeMap<String, Vec<f32>>,
+}
+
+fn sha256_file(path: &str) -> TractResult<String> {
+    let bytes = std::fs::read(path)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn main() -> TractResult<()> {
@@ -45,6 +58,39 @@ fn main() -> TractResult<()> {
     let manifest: ModelManifest =
         serde_json::from_reader(BufReader::new(File::open(&manifest_path)?))?;
     let golden: Golden = serde_json::from_reader(BufReader::new(File::open(&golden_path)?))?;
+    if let Some(expected) = &manifest.model_sha256 {
+        let actual = sha256_file(&model_path)?;
+        if &actual != expected {
+            anyhow::bail!(
+                "model SHA-256 {} != manifest model_sha256 {}",
+                actual,
+                expected
+            );
+        }
+    }
+    if let Some(expected) = &manifest.golden_sha256 {
+        let actual = sha256_file(&golden_path)?;
+        if &actual != expected {
+            anyhow::bail!(
+                "golden SHA-256 {} != manifest golden_sha256 {}",
+                actual,
+                expected
+            );
+        }
+    }
+    if let Some(expected) = &manifest.golden_path {
+        let actual_name = Path::new(&golden_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow::anyhow!("golden path has no UTF-8 file name"))?;
+        if actual_name != expected {
+            anyhow::bail!(
+                "golden file name {} != manifest golden_path {}",
+                actual_name,
+                expected
+            );
+        }
+    }
     if golden.manifest_version != 1 {
         anyhow::bail!(
             "unsupported golden manifest version {}",

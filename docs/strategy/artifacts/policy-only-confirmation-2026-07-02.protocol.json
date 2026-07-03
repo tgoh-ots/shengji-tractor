@@ -1,0 +1,64 @@
+{
+  "automatic_production_promotion_allowed": false,
+  "baseline": {
+    "kind": "embedded-model",
+    "model_sha256": "04f678dec5329a23ef33735acfacd45b7c0815154012507bb2d74dc6bde23df4"
+  },
+  "candidate": {
+    "golden_path": "/Users/tgoh/.shengji-policy-ablation-20260702T153120Z-00331cf/variants/policy-only/model.onnx.golden.json",
+    "golden_sha256": "32d4adadb7d4811ab8fb74b42d7e5f46358e700ebcce8185d16e54ddbaab8c55",
+    "manifest_path": "/Users/tgoh/.shengji-policy-ablation-20260702T153120Z-00331cf/variants/policy-only/model.onnx.manifest.json",
+    "manifest_sha256": "308fc3f2fcd06a60ffe9613f1772313537d45ea00f556f1e353e582eb5dc334c",
+    "model_path": "/Users/tgoh/.shengji-policy-ablation-20260702T153120Z-00331cf/variants/policy-only/model.onnx",
+    "model_sha256": "e4204bef3c39ea7785934fb6644de3a6daa8a8a18e627116e4026bfba6ca671c",
+    "outputs": [
+      "score"
+    ],
+    "variant": "policy-only"
+  },
+  "decision_rule": {
+    "comparison": "candidate-minus-embedded",
+    "metric": "paired-bootstrap-95-lower-bound-of-level-utility",
+    "minimum_level_delta": -0.02,
+    "pass_if": "observed lower95 >= -0.02"
+  },
+  "evaluation": {
+    "arms": "sequential-isolated-processes",
+    "bootstrap_replicates": 5000,
+    "bootstrap_rng_seed": "0xAB51",
+    "budget_ms": 150,
+    "effective_environment": {
+      "candidate_only": {
+        "SHENGJI_EXPERT_MODEL_MANIFEST": "/Users/tgoh/.shengji-policy-ablation-20260702T153120Z-00331cf/variants/policy-only/model.onnx.manifest.json",
+        "SHENGJI_EXPERT_MODEL_PATH": "/Users/tgoh/.shengji-policy-ablation-20260702T153120Z-00331cf/variants/policy-only/model.onnx"
+      },
+      "common": {
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "SHENGJI_BOT_BUDGET_MS": "150",
+        "TZ": "UTC"
+      },
+      "inherit_ambient_environment": false,
+      "per_arm_private_tmpdir": true
+    },
+    "pairs_per_arm": 800,
+    "seed": "0xAB1A7103"
+  },
+  "experiment_class": "independent-confirmatory-replication",
+  "interpretation": {
+    "no_optional_stopping": true,
+    "prior_400_pair_result_is_not_extended": true,
+    "report_pass_or_fail_even_if_near_threshold": true
+  },
+  "lineage": {
+    "parent_failed_gate_path": "/Users/tgoh/.shengji-policy-ablation-20260702T153120Z-00331cf/final-gate/comparison.failed.json",
+    "parent_failed_gate_sha256": "d5e9fa7c993f85de58c044b2bfe08cefdedc2cb09c48df95056c05c294317a20",
+    "parent_selection_path": "/Users/tgoh/.shengji-policy-ablation-20260702T153120Z-00331cf/selection.json",
+    "parent_selection_sha256": "c77e051319b02623bb4aa0be1dfa7f33f651cbba547ae5b1b542b4fe76fdfb07",
+    "source_commit": "00331cf83d39047115bf41367979ae3b768333ef"
+  },
+  "manifest_version": 1,
+  "promotion_or_deployment_after_result": "forbidden; report to human only",
+  "research_only": true
+}

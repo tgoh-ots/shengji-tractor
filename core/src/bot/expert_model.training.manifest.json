@@ -6,7 +6,7 @@
   "dataset_sha256": "8797203e3a70caae5661c380b740a8e02cb9a30ea2aa96fb0fb919c4d4ea0aeb",
   "feature_dim": 49,
   "feature_schema_version": 2,
-  "golden_path": "expert_model.onnx.golden.json",
+  "golden_path": "model.onnx.golden.json",
   "golden_sha256": "32d4adadb7d4811ab8fb74b42d7e5f46358e700ebcce8185d16e54ddbaab8c55",
   "level_utility": {
     "clamp": [
@@ -52,13 +52,8 @@
   "outputs": [
     "score"
   ],
-  "promotion": {
-    "approval": "explicit_human",
-    "attestation_path": "expert_model.promotion.json",
-    "source_candidate_manifest_sha256": "308fc3f2fcd06a60ffe9613f1772313537d45ea00f556f1e353e582eb5dc334c"
-  },
-  "research_only": false,
-  "serving_status": "embedded_production",
+  "research_only": true,
+  "serving_status": "experimental_candidate",
   "split": {
     "game_ids_are_trajectories": true,
     "leakage_unit": "trajectory_family_id",

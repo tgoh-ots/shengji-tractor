@@ -1,0 +1,54 @@
+{
+  "approval": {
+    "approved_at_utc": "2026-07-03T04:14:49Z",
+    "authority": "explicit_human",
+    "automatic_production_promotion_allowed": false,
+    "instruction": "commit then deploy",
+    "promotion_commit": "the Git commit containing this attestation"
+  },
+  "candidate": {
+    "golden_sha256": "32d4adadb7d4811ab8fb74b42d7e5f46358e700ebcce8185d16e54ddbaab8c55",
+    "model_sha256": "e4204bef3c39ea7785934fb6644de3a6daa8a8a18e627116e4026bfba6ca671c",
+    "outputs": [
+      "score"
+    ],
+    "source_commit": "00331cf83d39047115bf41367979ae3b768333ef",
+    "training_manifest_sha256": "308fc3f2fcd06a60ffe9613f1772313537d45ea00f556f1e353e582eb5dc334c",
+    "variant": "policy-only"
+  },
+  "confirmation": {
+    "audit_sha256": "7b33d282eeff5a2c6a157244b604398a9a283c937edb5db5a745cf5e356dd6b7",
+    "budget_ms": 150,
+    "candidate_failed_hands": 0,
+    "comparison_sha256": "f9272d7bb42303c06b3f2cd68c5e9620e3e2a124bc36c2ee32d045ab3695ee08",
+    "embedded_failed_hands": 0,
+    "gate": {
+      "metric": "candidate_minus_baseline_level_utility_bootstrap95_lower",
+      "minimum": -0.02,
+      "observed": 0.001875,
+      "passed": true
+    },
+    "level_utility": {
+      "candidate_minus_embedded": 0.040625,
+      "paired_bootstrap95": [
+        0.001875,
+        0.080625
+      ]
+    },
+    "pairs_per_arm": 800,
+    "protocol_sha256": "d90c8c7620efd08a89fe49e06bc496f14266074a20ac39840bda0896502cfe29",
+    "seed": 2870636803
+  },
+  "manifest_version": 1,
+  "production_artifact": {
+    "manifest_sha256": "5afac1fb447c09f18f1c2e9371419f7f652130321be128d1c9be60a5be7731a9",
+    "serving_status": "embedded_production",
+    "source_candidate_manifest_preserved_as": "expert_model.training.manifest.json"
+  },
+  "rollback": {
+    "fly_image": "registry.fly.io/shengji-tractor:deployment-01KWDCJ3FM59FQWNGAVMN4NBFZ",
+    "fly_image_digest": "sha256:1b38f50665afbf61d588742bf7dbc60bfdfb8d482fb7cfee48adf33e8be2528b",
+    "fly_release": 39,
+    "previous_embedded_model_sha256": "04f678dec5329a23ef33735acfacd45b7c0815154012507bb2d74dc6bde23df4"
+  }
+}

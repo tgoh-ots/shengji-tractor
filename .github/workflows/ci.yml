@@ -69,6 +69,16 @@ jobs:
       - name: Build backend binary
         run: cargo build --bin shengji
 
+      - name: Validate Expert promotion evidence
+        run: python3 training/validate_expert_promotion.py
+
+      - name: Validate embedded Expert model integrity and parity
+        run: |
+          cargo run -p shengji-core --example validate_expert_model -- \
+            core/src/bot/expert_model.onnx \
+            core/src/bot/expert_model.onnx.manifest.json \
+            core/src/bot/expert_model.onnx.golden.json
+
       # Fast test subset: mechanics + core lib tests, EXCLUDING the slow
       # self-play / difficulty-ladder tests (they each run many full simulated
       # games and take minutes in a debug build). The heaviest ladder test is

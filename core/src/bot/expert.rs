@@ -67,11 +67,11 @@ use crate::game_state::play_phase::PlayPhase;
 /// heuristic.
 pub const FEATURE_DIM: usize = 36;
 
-/// Feature width emitted by the v2 action-value data pipeline. The embedded
-/// production model remains on [`FEATURE_DIM`] (schema v1), so the existing
-/// policy baseline is byte-for-byte compatible. Candidate models declare their
-/// schema in a companion `MODEL.onnx.manifest.json`; inference selects the
-/// matching encoder instead of guessing from an ONNX graph.
+/// Feature width emitted by the v2 action-value data pipeline and consumed by
+/// the promoted embedded production policy. Models declare their schema in a
+/// companion `MODEL.onnx.manifest.json`; inference selects the matching encoder
+/// instead of guessing from an ONNX graph. [`FEATURE_DIM`] remains the frozen
+/// width for legacy schema-v1 models and the v2 prefix.
 pub const TRAINING_FEATURE_DIM: usize = 49;
 
 /// Version of [`candidate_features_v2`]. Bump this whenever a v2 feature changes
@@ -1187,15 +1187,26 @@ mod model_path_tests {
         assert_eq!(valid.feature_dim, TRAINING_FEATURE_DIM);
     }
 
-    /// Backward-compat (the load-bearing value-head safety property): the SHIPPED
-    /// embedded model is policy-only, so output index 1 (value) must be ABSENT.
-    /// `value_candidates_net` → `run_model_output(.., 1)` therefore returns `None`,
-    /// which transparently disables the value blend and keeps the static leaf eval.
+    /// Load-bearing production contract: the SHIPPED schema-v2 model is
+    /// policy-only, so output index 1 (value) must be ABSENT. Parse the real
+    /// companion manifest rather than forcing the legacy 36-feature contract.
+    /// `value_candidates_net` → `run_model_output(.., 1)` therefore returns
+    /// `None`, which transparently disables the value blend and keeps the
+    /// static leaf eval.
     #[test]
     fn embedded_model_has_no_value_output() {
-        let model = model_from_bytes(MODEL_BYTES).expect("embedded model should load");
+        let manifest = parse_manifest(EMBEDDED_MODEL_MANIFEST)
+            .expect("embedded model manifest should satisfy the runtime contract");
+        let feature_dim = manifest.feature_dim;
+        let model = model_from_bytes_with_manifest(MODEL_BYTES, manifest)
+            .expect("embedded model should load with its declared schema");
+        assert_eq!(
+            semantics_for(&model),
+            ExpertModelSemantics::V2Policy,
+            "promoted embedded model must use the schema-v2 policy-only contract"
+        );
         let n = 2;
-        let flat = vec![0.0f32; n * FEATURE_DIM];
+        let flat = vec![0.0f32; n * feature_dim];
         assert!(
             run_model_output(&model, &flat, n, 0).is_some(),
             "embedded model must have a policy output (index 0)"
