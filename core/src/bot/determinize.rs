@@ -11,9 +11,10 @@
 //! real hidden hands or kitty.
 //!
 //! This is consistency with the constraints encoded here, not every inference a
-//! perfect rules reasoner could derive. Bid ownership, pair/tractor implications
-//! beyond a proven void, and the failed-throw `better_player` witness are not yet
-//! conditioned into the hidden assignment.
+//! perfect rules reasoner could derive. Week-1 feature controls independently add
+//! bid ownership, authoritative compound-follow implications, failed-throw
+//! `better_player` witnesses, and Finding-Friends occurrences; the frozen default
+//! retains the earlier conservation/void/failed-card constraints.
 
 use std::collections::HashMap;
 
@@ -21,10 +22,12 @@ use rand::seq::{index, SliceRandom};
 use rand::Rng;
 
 use shengji_mechanics::hands::Hands;
-use shengji_mechanics::trick::PlayedCards;
+use shengji_mechanics::trick::{PlayCards, PlayedCards, Trick, TrickFormat};
 use shengji_mechanics::types::{Card, EffectiveSuit, PlayerID, Trump};
 
+use crate::bot::enoch::EnochFeatures;
 use crate::game_state::play_phase::{follow_proves_void, PlayPhase};
+use crate::settings::GameMode;
 
 /// A determinized "world": a complete assignment of every hidden card location
 /// consistent with the public constraints encoded by [`Knowledge`].
@@ -41,6 +44,9 @@ pub struct Knowledge {
     pub voids: HashMap<PlayerID, Vec<EffectiveSuit>>,
     /// Number of unknown card placeholders in each opponent hand.
     pub hidden_counts: HashMap<PlayerID, usize>,
+    /// Identity-hidden cards that have already left all hands. They consume
+    /// configured physical copies but are never assigned back to a live hand.
+    pub unknown_public_cards: usize,
     /// Public lower bounds on cards still held by a seat. A failed throw reveals
     /// every rejected card even though those cards return to the thrower's hand.
     pub known_holding: HashMap<PlayerID, HashMap<Card, usize>>,
@@ -73,6 +79,9 @@ fn observe_revealed_holding(
     // The rejected portion remains held. Repeated revelations are lower bounds,
     // so take the maximum rather than double-counting copies.
     for (card, count) in Card::count(played.bad_throw_cards.iter().copied()) {
+        if card == Card::Unknown {
+            continue;
+        }
         let known = holding.entry(card).or_default();
         *known = (*known).max(count);
     }
@@ -85,6 +94,17 @@ impl Knowledge {
     /// not of the root ranking policy or bot tier: every honest player saw every
     /// completed play and every off-suit follow.
     pub fn from_play_view(p: &PlayPhase, me: PlayerID) -> Self {
+        Self::from_play_view_with_features(p, me, EnochFeatures::empty())
+    }
+
+    /// Feature-gated Week-1 counterpart. The default constructor above remains
+    /// byte-for-byte Enoch-0 behavior; candidate evidence cannot leak into the
+    /// frozen control arm.
+    pub fn from_play_view_with_features(
+        p: &PlayPhase,
+        me: PlayerID,
+        features: EnochFeatures,
+    ) -> Self {
         let trump = p.trick().trump();
         let configured_cards = p.configured_cards_for_determinization().unwrap_or_default();
         let configured_counts = Card::count(configured_cards.iter().copied());
@@ -100,6 +120,8 @@ impl Knowledge {
         let hands = p.hands();
         let mut seen: HashMap<Card, usize> = HashMap::new();
         let mut hidden_counts: HashMap<PlayerID, usize> = HashMap::new();
+        let mut unknown_public_cards = 0usize;
+        let mut visible_public_plays: HashMap<Card, usize> = HashMap::new();
 
         let note_visible = |seen: &mut HashMap<Card, usize>, card: Card, count: usize| {
             if card != Card::Unknown {
@@ -129,11 +151,53 @@ impl Knowledge {
         // distinct locations: current cards enter the history only at trick end.
         for played in p.trick().played_cards() {
             for &card in &played.cards {
-                note_visible(&mut seen, card, 1);
+                if card == Card::Unknown {
+                    unknown_public_cards += 1;
+                } else {
+                    note_visible(&mut seen, card, 1);
+                    *visible_public_plays.entry(card).or_default() += 1;
+                }
             }
         }
         for (&card, &count) in p.played_this_hand() {
-            note_visible(&mut seen, card, count);
+            if card == Card::Unknown {
+                unknown_public_cards += count;
+            } else {
+                note_visible(&mut seen, card, count);
+                *visible_public_plays.entry(card).or_default() += count;
+            }
+        }
+
+        if features.contains(EnochFeatures::FRIEND_REVELATION) {
+            // A revealed friend proves the called occurrence left a hand even in
+            // rooms that hide the completed play identities. Skipped occurrences
+            // are public too. Fix only the deficit beyond already-visible plays;
+            // the remaining anonymous positions stay sampled as out-of-hand
+            // cards, so no player identity or unplayed holding is invented.
+            let mut called_lower_bounds: HashMap<Card, usize> = HashMap::new();
+            if let GameMode::FindingFriends { friends, .. } = p.game_mode() {
+                for friend in friends {
+                    let occurred = if friend.player_id.is_some() {
+                        friend.initial_skip.saturating_add(1)
+                    } else {
+                        friend.initial_skip.saturating_sub(friend.skip)
+                    };
+                    let lower = called_lower_bounds.entry(friend.card).or_default();
+                    *lower = (*lower).max(occurred);
+                }
+            }
+            let mut bounds = called_lower_bounds.into_iter().collect::<Vec<_>>();
+            bounds.sort_by_key(|(card, _)| card.as_char());
+            for (card, lower_bound) in bounds {
+                let visible = visible_public_plays.get(&card).copied().unwrap_or(0);
+                let recovered = lower_bound
+                    .saturating_sub(visible)
+                    .min(unknown_public_cards);
+                if recovered > 0 {
+                    note_visible(&mut seen, card, recovered);
+                    unknown_public_cards -= recovered;
+                }
+            }
         }
 
         // Out-of-hand piles may contain a mixture of known cards and Unknown
@@ -152,12 +216,16 @@ impl Knowledge {
             note_visible(&mut seen, card, 1);
         }
 
-        let known_holding = Self::infer_revealed_holdings(p, me);
+        let mut known_holding = Self::infer_revealed_holdings(p, me);
+        if features.contains(EnochFeatures::BID_OWNERSHIP) {
+            Self::merge_bid_holdings(p, me, &mut known_holding);
+        }
 
         Knowledge {
             seen,
             voids: Self::infer_voids(p, me),
             hidden_counts,
+            unknown_public_cards,
             known_holding,
             trump,
             num_decks: p.num_decks(),
@@ -165,6 +233,67 @@ impl Knowledge {
             total_cards,
             total_points,
             total_trumps,
+        }
+    }
+
+    /// A public bid proves that its owner held the shown physical copies at the
+    /// time of the declaration. Only bids from the final exchange epoch by a
+    /// non-exchanger are safe current-hand constraints: an earlier exchanger may
+    /// have moved the card through the kitty. Copies publicly played since the
+    /// bid are subtracted before the lower bound is merged.
+    fn merge_bid_holdings(
+        p: &PlayPhase,
+        me: PlayerID,
+        holdings: &mut HashMap<PlayerID, HashMap<Card, usize>>,
+    ) {
+        if !p.public_history_complete() {
+            // An old snapshot has unattributed played cards. Any of them could
+            // have consumed the declared copy, so no current lower bound is safe.
+            return;
+        }
+        let Some(final_epoch) = p.public_bids().iter().map(|bid| bid.epoch).max() else {
+            return;
+        };
+        let mut played_by_seat: HashMap<PlayerID, HashMap<Card, usize>> = HashMap::new();
+        let mut unknown_by_seat: HashMap<PlayerID, usize> = HashMap::new();
+        for played in p
+            .public_play_history()
+            .iter()
+            .flatten()
+            .chain(p.trick().played_cards())
+        {
+            let counts = played_by_seat.entry(played.id).or_default();
+            for (card, count) in Card::count(played.cards.iter().copied()) {
+                if card == Card::Unknown {
+                    *unknown_by_seat.entry(played.id).or_default() += count;
+                } else {
+                    *counts.entry(card).or_default() += count;
+                }
+            }
+        }
+
+        for bid in p.public_bids() {
+            if bid.epoch != final_epoch || bid.id == me || bid.id == p.exchanger() {
+                continue;
+            }
+            let already_played = played_by_seat
+                .get(&bid.id)
+                .and_then(|cards| cards.get(&bid.card))
+                .copied()
+                .unwrap_or(0);
+            let possibly_played_hidden = unknown_by_seat.get(&bid.id).copied().unwrap_or(0);
+            let remaining = bid
+                .count
+                .saturating_sub(already_played.saturating_add(possibly_played_hidden));
+            if remaining == 0 {
+                continue;
+            }
+            let known = holdings
+                .entry(bid.id)
+                .or_default()
+                .entry(bid.card)
+                .or_default();
+            *known = (*known).max(remaining);
         }
     }
 
@@ -274,6 +403,7 @@ pub enum HiddenCardLocation {
     Player(PlayerID),
     Kitty,
     Removed,
+    PublicPlayed,
 }
 
 /// Honest context exposed to an optional hidden-location proposal model.
@@ -341,7 +471,9 @@ fn location_accepts(
             .get(&pid)
             .map(|suits| suits.contains(&trump.effective_suit(card)))
             .unwrap_or(false),
-        HiddenCardLocation::Kitty | HiddenCardLocation::Removed => true,
+        HiddenCardLocation::Kitty
+        | HiddenCardLocation::Removed
+        | HiddenCardLocation::PublicPlayed => true,
     }
 }
 
@@ -578,7 +710,7 @@ fn public_play_evidence(view: &PlayPhase) -> Vec<PublicPlayEvidence> {
 /// independent per-card marginals, so deck conservation, hand capacities,
 /// exposed failed-throw holdings, and suit voids remain true together. It does
 /// not add the omitted bid, compound-follow, or `better_player` implications
-/// documented at the module boundary.
+/// selected by the per-search Week-1 evidence mask.
 #[derive(Clone, Debug)]
 struct HiddenParticle {
     hands: HashMap<PlayerID, Vec<Card>>,
@@ -825,6 +957,230 @@ impl PersistentBelief {
     }
 }
 
+fn restore_public_play(
+    hands: &mut HashMap<PlayerID, HashMap<Card, usize>>,
+    tainted: &mut Vec<PlayerID>,
+    played: &PlayedCards,
+) {
+    if played.cards.contains(&Card::Unknown) {
+        if !tainted.contains(&played.id) {
+            tainted.push(played.id);
+        }
+        return;
+    }
+    let hand = hands.entry(played.id).or_default();
+    for (card, count) in Card::count(played.cards.iter().copied()) {
+        *hand.entry(card).or_default() += count;
+    }
+}
+
+fn witness_can_halt_throw(
+    view: &PlayPhase,
+    hands: &HashMap<PlayerID, HashMap<Card, usize>>,
+    leader: &PlayedCards,
+    witness: PlayerID,
+) -> bool {
+    if witness == leader.id
+        || leader.bad_throw_cards.is_empty()
+        || leader
+            .cards
+            .iter()
+            .chain(&leader.bad_throw_cards)
+            .any(|card| *card == Card::Unknown)
+    {
+        return false;
+    }
+    let Some(leader_hand) = hands.get(&leader.id) else {
+        return false;
+    };
+    let Some(witness_hand) = hands.get(&witness) else {
+        return false;
+    };
+    let Some(attempted_format) = leader.attempted_format.as_ref() else {
+        // Older public histories did not retain a human's format hint. Replaying
+        // with a newly chosen decomposition could false-reject the true deal, so
+        // omit this correlated constraint for that historical event.
+        return true;
+    };
+    let mut mechanics_hands = Hands::new([leader.id, witness]);
+    mechanics_hands.set_trump(view.trump());
+    let leader_cards = Card::cards(leader_hand.iter()).copied().collect::<Vec<_>>();
+    let witness_cards = Card::cards(witness_hand.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    if mechanics_hands.add(leader.id, leader_cards).is_err()
+        || mechanics_hands.add(witness, witness_cards).is_err()
+    {
+        return false;
+    }
+    let mut attempted = leader.cards.clone();
+    attempted.extend_from_slice(&leader.bad_throw_cards);
+    let rules = view.propagated();
+    let mut trick = Trick::new(view.trump(), [leader.id, witness], rules.bomb_policy);
+    if trick
+        .play_cards(PlayCards {
+            id: leader.id,
+            hands: &mut mechanics_hands,
+            cards: &attempted,
+            trick_draw_policy: rules.trick_draw_policy,
+            throw_eval_policy: rules.throw_evaluation_policy,
+            format_hint: Some(attempted_format.units()),
+            hide_throw_halting_player: false,
+            tractor_requirements: rules.tractor_requirements,
+            bomb_policy: rules.bomb_policy,
+            compound_formats: rules.compound_formats.clone(),
+        })
+        .is_err()
+    {
+        return false;
+    }
+    trick
+        .played_cards()
+        .first()
+        .and_then(|played| played.better_player)
+        == Some(witness)
+}
+
+fn validate_public_trick_reverse(
+    view: &PlayPhase,
+    plays: &[PlayedCards],
+    format: Option<&TrickFormat>,
+    hands: &mut HashMap<PlayerID, HashMap<Card, usize>>,
+    tainted: &mut Vec<PlayerID>,
+    features: EnochFeatures,
+) -> bool {
+    for (index, played) in plays.iter().enumerate().rev() {
+        restore_public_play(hands, tainted, played);
+        if index > 0
+            && features.contains(EnochFeatures::COMPOUND_FOLLOW)
+            && !tainted.contains(&played.id)
+        {
+            let Some(format) = format else {
+                // An old snapshot lacks the authoritative decomposition. It is
+                // safer to omit this evidence than reconstruct a potentially
+                // different user-selected throw format.
+                continue;
+            };
+            let Some(hand) = hands.get(&played.id) else {
+                return false;
+            };
+            if !format.is_legal_play(
+                hand,
+                &played.cards,
+                view.propagated().trick_draw_policy,
+                view.propagated().bomb_policy,
+            ) {
+                return false;
+            }
+        }
+        if index == 0 && features.contains(EnochFeatures::FAILED_THROW_WITNESS) {
+            if let Some(witness) = played.better_player {
+                if !tainted.contains(&played.id)
+                    && !tainted.contains(&witness)
+                    && !witness_can_halt_throw(view, hands, played, witness)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+fn friend_revelation_is_consistent(view: &PlayPhase) -> bool {
+    let GameMode::FindingFriends { friends, .. } = view.game_mode() else {
+        return true;
+    };
+    let public_plays = view
+        .public_play_history()
+        .iter()
+        .flatten()
+        .chain(view.trick().played_cards())
+        .collect::<Vec<_>>();
+    if public_plays
+        .iter()
+        .any(|played| played.cards.contains(&Card::Unknown))
+    {
+        return true;
+    }
+    friends.iter().all(|friend| {
+        let owners = public_plays
+            .iter()
+            .flat_map(|played| {
+                played
+                    .cards
+                    .iter()
+                    .filter(move |card| **card == friend.card)
+                    .map(move |_| played.id)
+            })
+            .collect::<Vec<_>>();
+        match friend.player_id {
+            // NoDoubleJoin can consume one or more called occurrences without
+            // assigning this slot. A later occurrence may therefore be the one
+            // that publicly revealed `owner`.
+            Some(owner) => owners
+                .iter()
+                .skip(friend.initial_skip)
+                .any(|candidate| *candidate == owner),
+            // Under NoDoubleJoin a called occurrence by somebody already on the
+            // landlord team intentionally leaves `player_id` unset. Absence is
+            // therefore not a hard negative ownership constraint.
+            None => true,
+        }
+    })
+}
+
+fn history_constraints_satisfied(
+    view: &PlayPhase,
+    world: &PlayPhase,
+    features: EnochFeatures,
+) -> bool {
+    if features.contains(EnochFeatures::FRIEND_REVELATION) && !friend_revelation_is_consistent(view)
+    {
+        return false;
+    }
+    if !features.contains(EnochFeatures::COMPOUND_FOLLOW)
+        && !features.contains(EnochFeatures::FAILED_THROW_WITNESS)
+    {
+        return true;
+    }
+
+    let mut hands = HashMap::new();
+    for player in world.propagated().players() {
+        let Ok(hand) = world.hands().get(player.id) else {
+            return false;
+        };
+        hands.insert(
+            player.id,
+            hand.iter()
+                .filter(|(card, _)| **card != Card::Unknown)
+                .map(|(card, count)| (*card, *count))
+                .collect(),
+        );
+    }
+    let mut tainted = Vec::new();
+    if !validate_public_trick_reverse(
+        view,
+        view.trick().played_cards(),
+        view.trick().trick_format(),
+        &mut hands,
+        &mut tainted,
+        features,
+    ) {
+        return false;
+    }
+    for (index, plays) in view.public_play_history().iter().enumerate().rev() {
+        let format = view
+            .public_trick_formats()
+            .get(index)
+            .and_then(Option::as_ref);
+        if !validate_public_trick_reverse(view, plays, format, &mut hands, &mut tainted, features) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Draw from an experimental persistent-particle approximation mixed with fresh
 /// joint constrained samples. Retained-particle reuse is biased for duplicate
 /// card identities until reveal conditioning is multiplicity-weighted. The
@@ -886,7 +1242,43 @@ pub fn sample_hidden_hands_with_proposal<R: Rng>(
     rng: &mut R,
     proposal: Option<&dyn HiddenAssignmentProposal>,
 ) -> Option<DeterminizedWorld> {
-    let knowledge = Knowledge::from_play_view(view, me);
+    sample_hidden_hands_with_proposal_and_features(view, me, rng, proposal, EnochFeatures::empty())
+}
+
+/// Sample a world under an explicit Enoch-1 public-evidence ablation. Correlated
+/// history constraints are rejection conditions over otherwise exact physical
+/// assignments. The caller owns the bounded retry/deadline loop, so one rejected
+/// assignment cannot overrun a decision budget invisibly.
+pub fn sample_hidden_hands_with_features<R: Rng>(
+    view: &PlayPhase,
+    me: PlayerID,
+    rng: &mut R,
+    features: EnochFeatures,
+) -> Option<DeterminizedWorld> {
+    sample_hidden_hands_with_features_and_proposal(view, me, rng, features, None)
+}
+
+/// Feature-aware sampler with the same optional learned proposal used by the
+/// control path. This keeps hard-evidence ablations from silently changing the
+/// base assignment distribution whenever a proposal artifact is loaded.
+pub fn sample_hidden_hands_with_features_and_proposal<R: Rng>(
+    view: &PlayPhase,
+    me: PlayerID,
+    rng: &mut R,
+    features: EnochFeatures,
+    proposal: Option<&dyn HiddenAssignmentProposal>,
+) -> Option<DeterminizedWorld> {
+    sample_hidden_hands_with_proposal_and_features(view, me, rng, proposal, features)
+}
+
+fn sample_hidden_hands_with_proposal_and_features<R: Rng>(
+    view: &PlayPhase,
+    me: PlayerID,
+    rng: &mut R,
+    proposal: Option<&dyn HiddenAssignmentProposal>,
+    features: EnochFeatures,
+) -> Option<DeterminizedWorld> {
+    let knowledge = Knowledge::from_play_view_with_features(view, me, features);
     let configured_cards = view.configured_cards_for_determinization()?;
     let (kitty_template, removed_template) = view.piles_for_determinization();
     let kitty_template = kitty_template.to_vec();
@@ -952,6 +1344,10 @@ pub fn sample_hidden_hands_with_proposal<R: Rng>(
             .iter()
             .filter(|&&c| c == Card::Unknown)
             .count(),
+    ));
+    slots.extend(std::iter::repeat_n(
+        HiddenCardLocation::PublicPlayed,
+        knowledge.unknown_public_cards,
     ));
 
     // Every configured physical card must have exactly one location. A mismatch
@@ -1037,13 +1433,18 @@ pub fn sample_hidden_hands_with_proposal<R: Rng>(
     let mut assignment = fixed_assignment;
     let mut sampled_kitty = Vec::new();
     let mut sampled_removed = Vec::new();
+    let mut sampled_public_played = Vec::new();
     for (&location, card_idx) in slots.iter().zip(slot_to_card.into_iter()) {
         let card = pool[card_idx?];
         match location {
             HiddenCardLocation::Player(pid) => assignment.get_mut(&pid)?.push(card),
             HiddenCardLocation::Kitty => sampled_kitty.push(card),
             HiddenCardLocation::Removed => sampled_removed.push(card),
+            HiddenCardLocation::PublicPlayed => sampled_public_played.push(card),
         }
+    }
+    if sampled_public_played.len() != knowledge.unknown_public_cards {
+        return None;
     }
 
     for (&pid, &expected) in &original_hidden_counts {
@@ -1073,22 +1474,28 @@ pub fn sample_hidden_hands_with_proposal<R: Rng>(
     let kitty = materialize_unknowns(&kitty_template, sampled_kitty)?;
     let removed = materialize_unknowns(&removed_template, sampled_removed)?;
     let play = view.clone_with_determinized_cards(hands, kitty, removed);
-    Some(DeterminizedWorld { play })
+    history_constraints_satisfied(view, &play, features).then_some(DeterminizedWorld { play })
 }
 
 #[cfg(test)]
 mod sampler_calibration_tests {
     use super::{
-        observe_revealed_holding, refine_matching, rejection_matching, HiddenCardLocation,
-        HiddenParticle, Knowledge, PersistentBelief,
+        friend_revelation_is_consistent, history_constraints_satisfied, observe_revealed_holding,
+        refine_matching, rejection_matching, sample_hidden_hands_with_features,
+        validate_public_trick_reverse, witness_can_halt_throw, HiddenCardLocation, HiddenParticle,
+        Knowledge, PersistentBelief,
     };
+    use crate::bot::enoch::EnochFeatures;
     use crate::game_state::play_phase::PlayPhase;
-    use crate::settings::{GameMode, PropagatedState};
+    use crate::settings::{Friend, GameMode, MultipleJoinPolicy, PropagatedState};
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use shengji_mechanics::bidding::Bid;
     use shengji_mechanics::deck::Deck;
     use shengji_mechanics::hands::Hands;
-    use shengji_mechanics::trick::PlayedCards;
+    use shengji_mechanics::trick::{
+        CompoundFormats, PlayedCards, TractorRequirements, TrickFormat, TrickUnit,
+    };
     use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Suit, Trump};
     use std::collections::HashMap;
 
@@ -1111,6 +1518,7 @@ mod sampler_calibration_tests {
                 cards: vec![],
                 bad_throw_cards: vec![three, three, four],
                 better_player: None,
+                attempted_format: None,
             },
         );
         observe_revealed_holding(
@@ -1120,10 +1528,552 @@ mod sampler_calibration_tests {
                 cards: vec![three, four],
                 bad_throw_cards: vec![],
                 better_player: None,
+                attempted_format: None,
             },
         );
         assert_eq!(holdings[&player].get(&three), Some(&1));
         assert!(!holdings[&player].contains_key(&four));
+    }
+
+    #[test]
+    fn bid_ownership_is_an_isolated_current_holding_constraint() {
+        let mut propagated = PropagatedState::default();
+        let ids = (0..4)
+            .map(|index| propagated.add_player(format!("p{index}")).unwrap().0)
+            .collect::<Vec<_>>();
+        propagated.set_num_decks(Some(1)).unwrap();
+        let deck = Deck::default();
+        let configured = deck.cards().collect::<Vec<_>>();
+        let kitty = configured[..2].to_vec();
+        let trump = Trump::NoTrump { number: None };
+        let mut hands = Hands::new(ids.iter().copied());
+        hands.set_trump(trump);
+        for (index, cards) in configured[2..].chunks_exact(13).enumerate() {
+            hands.add(ids[index], cards.iter().copied()).unwrap();
+        }
+        let bidder = ids[2];
+        let bid_card = hands.get(bidder).unwrap().keys().copied().next().unwrap();
+        let exchanger_bid_card = hands.get(ids[0]).unwrap().keys().copied().next().unwrap();
+        let mut view = PlayPhase::new(
+            propagated,
+            1,
+            GameMode::Tractor,
+            hands,
+            kitty,
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0], ids[2]],
+            vec![],
+            vec![deck],
+            vec![
+                Bid {
+                    id: ids[0],
+                    card: exchanger_bid_card,
+                    count: 1,
+                    epoch: 0,
+                },
+                Bid {
+                    id: bidder,
+                    card: bid_card,
+                    count: 1,
+                    epoch: 0,
+                },
+            ],
+        )
+        .unwrap();
+        let observer = ids[1];
+        view.destructively_redact_for_player(observer);
+
+        let control = Knowledge::from_play_view(&view, observer);
+        assert!(!control.known_holding.contains_key(&bidder));
+        let candidate =
+            Knowledge::from_play_view_with_features(&view, observer, EnochFeatures::BID_OWNERSHIP);
+        assert_eq!(candidate.known_holding[&bidder][&bid_card], 1);
+
+        // The exchanger may have buried the shown card, so the same public bid
+        // must never become an unsound current-hand constraint for that seat.
+        let exchanger_view =
+            Knowledge::from_play_view_with_features(&view, observer, EnochFeatures::BID_OWNERSHIP);
+        assert!(!exchanger_view.known_holding.contains_key(&ids[0]));
+
+        // A legacy snapshot with unattributed play history cannot prove that a
+        // declared copy is still held. The feature must fail open and leave a
+        // physically valid world sample available.
+        let mut incomplete_json = serde_json::to_value(&view).unwrap();
+        incomplete_json["public_history_complete"] = serde_json::Value::Bool(false);
+        let incomplete: PlayPhase = serde_json::from_value(incomplete_json).unwrap();
+        let incomplete_knowledge = Knowledge::from_play_view_with_features(
+            &incomplete,
+            observer,
+            EnochFeatures::BID_OWNERSHIP,
+        );
+        assert!(!incomplete_knowledge.known_holding.contains_key(&bidder));
+        assert!(sample_hidden_hands_with_features(
+            &incomplete,
+            observer,
+            &mut StdRng::seed_from_u64(17),
+            EnochFeatures::BID_OWNERSHIP,
+        )
+        .is_some());
+    }
+
+    fn ambiguous_hinted_throw_position() -> (PlayPhase, Vec<PlayerID>) {
+        let mut propagated = PropagatedState::default();
+        let ids = (0..4)
+            .map(|index| propagated.add_player(format!("p{index}")).unwrap().0)
+            .collect::<Vec<_>>();
+        // Five decks make the deliberately ambiguous holding physically valid:
+        // the leader owns three copies of the four and the witness owns two.
+        propagated.set_num_decks(Some(5)).unwrap();
+        let trump = Trump::NoTrump { number: None };
+        let card = |number| Card::Suited {
+            suit: Suit::Clubs,
+            number,
+        };
+        let attempted = [
+            card(Number::Three),
+            card(Number::Three),
+            card(Number::Four),
+            card(Number::Four),
+            card(Number::Four),
+        ];
+        let hint = TrickUnit::find_plays(
+            trump,
+            TractorRequirements::default(),
+            attempted.iter().copied(),
+        )
+        .into_iter()
+        .find(|units| {
+            units.len() == 2
+                && units
+                    .iter()
+                    .all(|unit| matches!(unit, TrickUnit::Repeated { .. }))
+                && units.iter().map(TrickUnit::size).sum::<usize>() == attempted.len()
+        })
+        .expect("a pair plus triple is a valid alternative to tractor plus singleton");
+
+        let mut hands = Hands::new(ids.iter().copied());
+        hands.set_trump(trump);
+        hands.add(ids[0], attempted).unwrap();
+        hands
+            .add(ids[1], [card(Number::Four), card(Number::Four)])
+            .unwrap();
+        hands
+            .add(ids[2], [card(Number::Five), card(Number::Five)])
+            .unwrap();
+        hands
+            .add(ids[3], [card(Number::Six), card(Number::Six)])
+            .unwrap();
+        let mut play = PlayPhase::new(
+            propagated,
+            5,
+            GameMode::Tractor,
+            hands,
+            vec![],
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0], ids[2]],
+            vec![],
+            vec![Deck::default(); 5],
+            vec![],
+        )
+        .unwrap();
+        play.play_cards_with_hint(ids[0], &attempted, Some(&hint))
+            .unwrap();
+        let lead = &play.trick().played_cards()[0];
+        assert_eq!(lead.better_player, Some(ids[1]));
+        assert!(lead.attempted_format.is_some());
+        assert_eq!(lead.cards.len(), 2);
+        assert_eq!(lead.bad_throw_cards.len(), 3);
+        play.play_cards(ids[1], &[card(Number::Four), card(Number::Four)])
+            .unwrap();
+        play.play_cards(ids[2], &[card(Number::Five), card(Number::Five)])
+            .unwrap();
+        play.play_cards(ids[3], &[card(Number::Six), card(Number::Six)])
+            .unwrap();
+        play.finish_trick().unwrap();
+        (play, ids)
+    }
+
+    #[test]
+    fn true_world_survives_reverse_validation_of_an_ambiguous_hinted_throw() {
+        let (real, ids) = ambiguous_hinted_throw_position();
+        let mut view = real.clone();
+        view.destructively_redact_for_player(ids[2]);
+        let features = EnochFeatures::FAILED_THROW_WITNESS.union(EnochFeatures::COMPOUND_FOLLOW);
+        assert!(history_constraints_satisfied(&view, &real, features));
+    }
+
+    #[test]
+    fn hidden_throw_cards_taint_history_instead_of_rejecting_the_true_world() {
+        let (real, ids) = ambiguous_hinted_throw_position();
+        let mut view = real.clone();
+        view.propagated_mut().hide_played_cards(true).unwrap();
+        view.destructively_redact_for_player(ids[2]);
+        assert!(view
+            .public_play_history()
+            .iter()
+            .flatten()
+            .flat_map(|played| played.cards.iter().chain(&played.bad_throw_cards))
+            .all(|card| *card == Card::Unknown));
+
+        let knowledge = Knowledge::from_play_view(&view, ids[2]);
+        assert!(knowledge
+            .known_holding
+            .values()
+            .all(|holding| !holding.contains_key(&Card::Unknown)));
+        let features = EnochFeatures::FAILED_THROW_WITNESS.union(EnochFeatures::COMPOUND_FOLLOW);
+        assert!(history_constraints_satisfied(&view, &real, features));
+    }
+
+    #[test]
+    fn friend_revelation_accepts_pending_and_no_double_join_occurrences() {
+        let mut propagated = PropagatedState::default();
+        let ids = (0..4)
+            .map(|index| propagated.add_player(format!("p{index}")).unwrap().0)
+            .collect::<Vec<_>>();
+        propagated.set_num_decks(Some(2)).unwrap();
+        propagated
+            .set_multiple_join_policy(MultipleJoinPolicy::NoDoubleJoin)
+            .unwrap();
+        let trump = Trump::NoTrump { number: None };
+        let club = |number| Card::Suited {
+            suit: Suit::Clubs,
+            number,
+        };
+        let diamond = |number| Card::Suited {
+            suit: Suit::Diamonds,
+            number,
+        };
+        let called = club(Number::Three);
+        let mut hands = Hands::new(ids.iter().copied());
+        hands.set_trump(trump);
+        for (id, cards) in [
+            (
+                ids[0],
+                vec![called, club(Number::Seven), diamond(Number::Three)],
+            ),
+            (
+                ids[1],
+                vec![club(Number::Four), called, diamond(Number::Four)],
+            ),
+            (
+                ids[2],
+                vec![
+                    club(Number::Five),
+                    club(Number::Eight),
+                    diamond(Number::Five),
+                ],
+            ),
+            (
+                ids[3],
+                vec![club(Number::Six), club(Number::Six), diamond(Number::Six)],
+            ),
+        ] {
+            hands.add(id, cards).unwrap();
+        }
+        let mut play = PlayPhase::new(
+            propagated,
+            2,
+            GameMode::FindingFriends {
+                num_friends: 1,
+                friends: vec![Friend {
+                    card: called,
+                    skip: 0,
+                    initial_skip: 0,
+                    player_id: None,
+                }],
+            },
+            hands,
+            vec![],
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0]],
+            vec![],
+            vec![Deck::default(), Deck::default()],
+            vec![],
+        )
+        .unwrap();
+
+        play.play_cards(ids[0], &[called]).unwrap();
+        assert!(friend_revelation_is_consistent(&play));
+        for (id, card) in [
+            (ids[1], club(Number::Four)),
+            (ids[2], club(Number::Five)),
+            (ids[3], club(Number::Six)),
+        ] {
+            play.play_cards(id, &[card]).unwrap();
+        }
+        play.finish_trick().unwrap();
+        let GameMode::FindingFriends { friends, .. } = play.game_mode() else {
+            unreachable!()
+        };
+        assert!(friends[0].player_id.is_none());
+        assert!(friend_revelation_is_consistent(&play));
+
+        for (id, card) in [
+            (ids[3], club(Number::Six)),
+            (ids[0], club(Number::Seven)),
+            (ids[1], called),
+            (ids[2], club(Number::Eight)),
+        ] {
+            play.play_cards(id, &[card]).unwrap();
+        }
+        play.finish_trick().unwrap();
+        let GameMode::FindingFriends { friends, .. } = play.game_mode() else {
+            unreachable!()
+        };
+        assert_eq!(friends[0].player_id, Some(ids[1]));
+        assert!(friend_revelation_is_consistent(&play));
+
+        let mut hidden = play.clone();
+        hidden.propagated_mut().hide_played_cards(true).unwrap();
+        hidden.destructively_redact_for_player(ids[2]);
+        assert!(friend_revelation_is_consistent(&hidden));
+        let baseline = Knowledge::from_play_view(&hidden, ids[2]);
+        let friend_evidence = Knowledge::from_play_view_with_features(
+            &hidden,
+            ids[2],
+            EnochFeatures::FRIEND_REVELATION,
+        );
+        assert_eq!(
+            friend_evidence.seen.get(&called).copied().unwrap_or(0),
+            baseline.seen.get(&called).copied().unwrap_or(0) + 1,
+            "the public join must recover the hidden called-card occurrence"
+        );
+        assert_eq!(
+            friend_evidence.unknown_public_cards + 1,
+            baseline.unknown_public_cards
+        );
+    }
+
+    #[test]
+    fn identity_hidden_completed_cards_are_conserved_out_of_live_hands() {
+        let mut propagated = PropagatedState::default();
+        let ids = (0..4)
+            .map(|index| propagated.add_player(format!("p{index}")).unwrap().0)
+            .collect::<Vec<_>>();
+        propagated.set_num_decks(Some(1)).unwrap();
+        let deck = Deck::default();
+        let configured = deck.cards().collect::<Vec<_>>();
+        let kitty = configured[..2].to_vec();
+        let trump = Trump::NoTrump { number: None };
+        let mut hands = Hands::new(ids.iter().copied());
+        hands.set_trump(trump);
+        for (index, cards) in configured[2..].chunks_exact(13).enumerate() {
+            hands.add(ids[index], cards.iter().copied()).unwrap();
+        }
+        let mut play = PlayPhase::new(
+            propagated,
+            1,
+            GameMode::Tractor,
+            hands,
+            kitty,
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0], ids[2]],
+            vec![],
+            vec![deck],
+            vec![],
+        )
+        .unwrap();
+        let lead = *play.hands().get(ids[0]).unwrap().keys().next().unwrap();
+        play.play_cards(ids[0], &[lead]).unwrap();
+        let led_suit = play.trick().trick_format().unwrap().suit();
+        for &id in &ids[1..] {
+            let hand = play.hands().get(id).unwrap();
+            let follow = hand
+                .keys()
+                .copied()
+                .find(|card| trump.effective_suit(*card) == led_suit)
+                .or_else(|| hand.keys().copied().next())
+                .unwrap();
+            play.play_cards(id, &[follow]).unwrap();
+        }
+        play.finish_trick().unwrap();
+        play.propagated_mut().hide_played_cards(true).unwrap();
+        play.destructively_redact_for_player(ids[1]);
+        let knowledge = Knowledge::from_play_view(&play, ids[1]);
+        assert_eq!(knowledge.unknown_public_cards, 4);
+        let world = sample_hidden_hands_with_features(
+            &play,
+            ids[1],
+            &mut StdRng::seed_from_u64(0x000A_110C),
+            EnochFeatures::empty(),
+        )
+        .expect("anonymous played-card slots must preserve a feasible world");
+        for id in ids {
+            assert_eq!(
+                world.play.hands().get(id).unwrap().values().sum::<usize>(),
+                12
+            );
+        }
+    }
+
+    #[test]
+    fn compound_follow_rejects_a_sampled_pair_contradicting_public_singles() {
+        let mut propagated = PropagatedState::default();
+        let ids = (0..4)
+            .map(|index| propagated.add_player(format!("p{index}")).unwrap().0)
+            .collect::<Vec<_>>();
+        propagated.set_num_decks(Some(1)).unwrap();
+        let deck = Deck::default();
+        let configured = deck.cards().collect::<Vec<_>>();
+        let kitty = configured[..2].to_vec();
+        let trump = Trump::NoTrump { number: None };
+        let mut mechanics_hands = Hands::new(ids.iter().copied());
+        mechanics_hands.set_trump(trump);
+        for (index, cards) in configured[2..].chunks_exact(13).enumerate() {
+            mechanics_hands
+                .add(ids[index], cards.iter().copied())
+                .unwrap();
+        }
+        let view = PlayPhase::new(
+            propagated,
+            1,
+            GameMode::Tractor,
+            mechanics_hands,
+            kitty,
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0], ids[2]],
+            vec![],
+            vec![deck],
+            vec![],
+        )
+        .unwrap();
+        let card = |number| Card::Suited {
+            suit: Suit::Clubs,
+            number,
+        };
+        let three = card(Number::Three);
+        let four = card(Number::Four);
+        let five = card(Number::Five);
+        let six = card(Number::Six);
+        let format = TrickFormat::from_cards(
+            trump,
+            TractorRequirements::default(),
+            &[three, three],
+            None,
+            CompoundFormats::default(),
+        )
+        .unwrap();
+        let plays = vec![
+            PlayedCards {
+                id: ids[0],
+                cards: vec![three, three],
+                bad_throw_cards: vec![],
+                better_player: None,
+                attempted_format: None,
+            },
+            PlayedCards {
+                id: ids[1],
+                cards: vec![five, six],
+                bad_throw_cards: vec![],
+                better_player: None,
+                attempted_format: None,
+            },
+        ];
+
+        let mut contradictory = HashMap::from([
+            (ids[0], HashMap::new()),
+            (ids[1], HashMap::from([(four, 2)])),
+        ]);
+        assert!(!validate_public_trick_reverse(
+            &view,
+            &plays,
+            Some(&format),
+            &mut contradictory,
+            &mut vec![],
+            EnochFeatures::COMPOUND_FOLLOW,
+        ));
+
+        let mut compatible = HashMap::from([(ids[0], HashMap::new()), (ids[1], HashMap::new())]);
+        assert!(validate_public_trick_reverse(
+            &view,
+            &plays,
+            Some(&format),
+            &mut compatible,
+            &mut vec![],
+            EnochFeatures::COMPOUND_FOLLOW,
+        ));
+    }
+
+    #[test]
+    fn failed_throw_witness_must_be_able_to_halt_the_attempted_unit() {
+        let mut propagated = PropagatedState::default();
+        let ids = (0..4)
+            .map(|index| propagated.add_player(format!("p{index}")).unwrap().0)
+            .collect::<Vec<_>>();
+        propagated.set_num_decks(Some(1)).unwrap();
+        let deck = Deck::default();
+        let configured = deck.cards().collect::<Vec<_>>();
+        let kitty = configured[..2].to_vec();
+        let trump = Trump::NoTrump { number: None };
+        let mut mechanics_hands = Hands::new(ids.iter().copied());
+        mechanics_hands.set_trump(trump);
+        for (index, cards) in configured[2..].chunks_exact(13).enumerate() {
+            mechanics_hands
+                .add(ids[index], cards.iter().copied())
+                .unwrap();
+        }
+        let view = PlayPhase::new(
+            propagated,
+            1,
+            GameMode::Tractor,
+            mechanics_hands,
+            kitty,
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0], ids[2]],
+            vec![],
+            vec![deck],
+            vec![],
+        )
+        .unwrap();
+        let card = |number| Card::Suited {
+            suit: Suit::Clubs,
+            number,
+        };
+        let three = card(Number::Three);
+        let four = card(Number::Four);
+        let five = card(Number::Five);
+        let leader = PlayedCards {
+            id: ids[0],
+            cards: vec![three, three],
+            bad_throw_cards: vec![five],
+            better_player: Some(ids[1]),
+            attempted_format: TrickFormat::from_cards(
+                trump,
+                TractorRequirements::default(),
+                &[three, three, five],
+                None,
+                CompoundFormats::default(),
+            )
+            .ok(),
+        };
+        let can_halt = HashMap::from([
+            (ids[0], HashMap::from([(three, 2), (five, 1)])),
+            (ids[1], HashMap::from([(four, 2)])),
+        ]);
+        assert!(witness_can_halt_throw(&view, &can_halt, &leader, ids[1]));
+
+        let cannot_halt = HashMap::from([
+            (ids[0], HashMap::from([(three, 2), (five, 1)])),
+            (ids[1], HashMap::from([(three, 1)])),
+        ]);
+        assert!(!witness_can_halt_throw(
+            &view,
+            &cannot_halt,
+            &leader,
+            ids[1],
+        ));
     }
 
     #[test]
@@ -1194,6 +2144,8 @@ mod sampler_calibration_tests {
                 real.play_cards(player, &[legal]).unwrap();
             }
             real.finish_trick().unwrap();
+            assert_eq!(real.public_trick_formats().len(), completed);
+            assert!(real.public_trick_formats()[completed - 1].is_some());
             let mut view = real.clone();
             view.destructively_redact_for_player(observer);
             let knowledge = Knowledge::from_play_view(&view, observer);

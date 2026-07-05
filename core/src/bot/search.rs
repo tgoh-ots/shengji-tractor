@@ -54,17 +54,163 @@ use std::time::{Duration, Instant};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+use shengji_mechanics::trick::TrickUnit;
 use shengji_mechanics::types::{Card, PlayerID};
 
 use crate::bot::determinize::DeterminizedWorld;
 use crate::bot::endgame::{self, ExactEndgameConfig, ExactValueAttempt};
+use crate::bot::enoch::EnochFeatures;
 use crate::bot::expert;
 use crate::bot::heuristics::{self, ScoredPlay};
 use crate::game_state::play_phase::PlayPhase;
 use crate::settings::GameMode;
 
-fn sample_world<R: Rng>(p: &PlayPhase, me: PlayerID, rng: &mut R) -> Option<DeterminizedWorld> {
-    crate::bot::belief::sample_persistent_world(p, me, rng)
+fn sample_world<R: Rng>(
+    p: &PlayPhase,
+    me: PlayerID,
+    rng: &mut R,
+    features: EnochFeatures,
+) -> Option<DeterminizedWorld> {
+    if !features.intersects(EnochFeatures::HARD_EVIDENCE) {
+        crate::bot::belief::sample_persistent_world(p, me, rng)
+    } else {
+        crate::bot::determinize::sample_hidden_hands_with_features_and_proposal(
+            p,
+            me,
+            rng,
+            features,
+            crate::bot::belief::loaded_proposal(),
+        )
+    }
+}
+
+fn root_candidate_family(p: &PlayPhase, cards: &[Card]) -> u8 {
+    if cards.len() == 1 {
+        return 0; // single
+    }
+    let counts = Card::count(cards.iter().copied());
+    if cards.len() >= 4 && counts.len() == 1 && p.propagated().bomb_policy.bombs_enabled() {
+        return 5; // bomb
+    }
+    let suits = cards
+        .iter()
+        .map(|card| p.trump().effective_suit(*card))
+        .collect::<HashSet<_>>();
+    if suits.len() > 1 {
+        return 4; // configured rainbow / cross-suit compound
+    }
+    if counts.len() == 1 {
+        return 1; // repeated unit
+    }
+    let has_whole_tractor = TrickUnit::find_plays(
+        p.trump(),
+        p.propagated().tractor_requirements,
+        cards.iter().copied(),
+    )
+    .into_iter()
+    .any(|units| units.len() == 1 && units[0].is_tractor());
+    if has_whole_tractor {
+        2
+    } else {
+        3 // ordinary multi-unit throw / structured follow
+    }
+}
+
+fn progressive_active_count(base: usize, pool: usize, completed_worlds: usize) -> usize {
+    let extra = if completed_worlds < 4 {
+        0
+    } else {
+        // Admit one action after 4, 8, 16, ... completed sampled worlds.
+        completed_worlds.ilog2().saturating_sub(1) as usize
+    };
+    base.saturating_add(extra).min(pool)
+}
+
+fn progressive_pool_limit(config: &SearchConfig, available: usize) -> usize {
+    let base = config.max_candidates.max(1).min(available).max(1);
+    if !config
+        .enoch_features
+        .contains(EnochFeatures::PROGRESSIVE_ADMISSION)
+        || available <= base
+    {
+        return base;
+    }
+
+    // Simulate the deterministic widening schedule under the CONTROL arm's
+    // candidate-rollout budget. Only expose an action that can receive at least
+    // one evaluation before that fixed budget is exhausted. This is intentionally
+    // independent of wall-clock speed.
+    let pool_cap = base.saturating_add(8).min(available);
+    let work_budget = base.saturating_mul(config.max_worlds);
+    let mut work = 0usize;
+    let mut completed = 0usize;
+    let mut largest_evaluated = base;
+    while completed < config.max_worlds && work < work_budget {
+        let active = progressive_active_count(base, pool_cap, completed);
+        let remaining = work_budget - work;
+        let evaluated = active.min(remaining);
+        if evaluated > 0 {
+            largest_evaluated = largest_evaluated.max(active);
+        }
+        work += evaluated;
+        completed += 1;
+    }
+    largest_evaluated.min(pool_cap)
+}
+
+fn root_candidate_limit(config: &SearchConfig, available: usize) -> usize {
+    progressive_pool_limit(config, available)
+}
+
+fn fixed_candidate_work_budget(config: &SearchConfig, available: usize) -> usize {
+    config
+        .max_candidates
+        .max(1)
+        .min(available)
+        .saturating_mul(config.max_worlds)
+}
+
+fn select_root_candidates(
+    p: &PlayPhase,
+    candidates: Vec<ScoredPlay>,
+    limit: usize,
+    features: EnochFeatures,
+) -> Vec<ScoredPlay> {
+    if candidates.len() <= limit {
+        return candidates;
+    }
+    if !features.contains(EnochFeatures::STRUCTURAL_FAMILIES) {
+        return candidates.into_iter().take(limit).collect();
+    }
+
+    // Reserve the best-scored representative of every family that is present,
+    // then fill remaining slots by global score order. Restore original ranking
+    // order so candidate tie-breaking stays deterministic.
+    let mut selected = vec![false; candidates.len()];
+    let mut seen_families = [false; 6];
+    let mut count = 0usize;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let family = root_candidate_family(p, &candidate.cards) as usize;
+        if !seen_families[family] && count < limit {
+            seen_families[family] = true;
+            selected[index] = true;
+            count += 1;
+        }
+    }
+    for is_selected in &mut selected {
+        if count == limit {
+            break;
+        }
+        if !*is_selected {
+            *is_selected = true;
+            count += 1;
+        }
+    }
+    candidates
+        .into_iter()
+        .zip(selected)
+        .filter_map(|(candidate, keep)| keep.then_some(candidate))
+        .collect()
 }
 
 /// The policy source that supplies the candidate prior (for pruning) and the
@@ -92,6 +238,10 @@ pub enum Policy {
 pub struct SearchConfig {
     /// Wall-clock budget for a single decision.
     pub time_budget: Duration,
+    /// Continue past rejected world attempts until the deterministic candidate-
+    /// evaluation budget is complete. Authoritative fixed-work evaluation sets
+    /// this; product serving remains bounded by `max_worlds` plus wall time.
+    pub require_full_work: bool,
     /// Maximum number of candidate moves to evaluate (top-K by heuristic).
     pub max_candidates: usize,
     /// Maximum number of determinized worlds to sample per decision.
@@ -116,6 +266,96 @@ pub struct SearchConfig {
     /// (many, cheap) rollout plies — search + a learned policy prior, AlphaZero-
     /// lite, with a fast default rollout policy.
     pub rollout_policy: Policy,
+    /// Independently selected Enoch-1 hypotheses for this contestant. Empty is
+    /// frozen Enoch-0 behavior. Keeping this per config prevents candidate flags
+    /// from leaking into the control arm of an in-process paired comparison.
+    pub enoch_features: EnochFeatures,
+}
+
+/// Why a fail-closed search produced no action. These labels are stable protocol
+/// data: evaluators aggregate them instead of inferring failures from logs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchFailureReason {
+    NoLegalCandidates,
+    BudgetExpiredBeforeWork,
+    NoCompletedWorlds,
+}
+
+impl SearchFailureReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoLegalCandidates => "no_legal_candidates",
+            Self::BudgetExpiredBeforeWork => "budget_expired_before_work",
+            Self::NoCompletedWorlds => "no_completed_worlds",
+        }
+    }
+}
+
+/// Per-decision work/latency record used by authoritative Week-1 evaluation.
+/// Counts refer only to search work, not candidate-generation/model-prior work.
+#[derive(Clone, Debug)]
+pub struct SearchTelemetry {
+    pub strict: bool,
+    pub requested_worlds: usize,
+    pub initial_candidate_count: usize,
+    pub candidate_pool_count: usize,
+    pub candidate_work_budget: usize,
+    pub worlds_attempted: usize,
+    pub worlds_accepted: usize,
+    pub worlds_completed: usize,
+    pub candidate_evaluations: usize,
+    pub per_candidate_evaluations: Vec<u32>,
+    pub elapsed: Duration,
+    pub effective_time_budget: Duration,
+    pub time_bound: bool,
+    pub work_bound: bool,
+    pub forced_action: bool,
+    pub prior_fallback_used: bool,
+    pub failure: Option<SearchFailureReason>,
+}
+
+impl SearchTelemetry {
+    fn new(config: SearchConfig, strict: bool) -> Self {
+        Self {
+            strict,
+            requested_worlds: config.max_worlds,
+            initial_candidate_count: 0,
+            candidate_pool_count: 0,
+            candidate_work_budget: 0,
+            worlds_attempted: 0,
+            worlds_accepted: 0,
+            worlds_completed: 0,
+            candidate_evaluations: 0,
+            per_candidate_evaluations: Vec::new(),
+            elapsed: Duration::ZERO,
+            effective_time_budget: config.time_budget,
+            time_bound: false,
+            work_bound: false,
+            forced_action: false,
+            prior_fallback_used: false,
+            failure: None,
+        }
+    }
+
+    fn finish(
+        mut self,
+        started: Instant,
+        cards: Option<Vec<Card>>,
+        failure: Option<SearchFailureReason>,
+    ) -> SearchReport {
+        self.elapsed = started.elapsed();
+        self.failure = failure;
+        SearchReport {
+            cards,
+            telemetry: self,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchReport {
+    pub cards: Option<Vec<Card>>,
+    pub telemetry: SearchTelemetry,
 }
 
 impl Default for SearchConfig {
@@ -128,12 +368,14 @@ impl Default for SearchConfig {
         // documented default aligned with production.
         SearchConfig {
             time_budget: Duration::from_millis(2200),
+            require_full_work: false,
             max_candidates: 6,
             max_worlds: 144,
             rollout_tricks: 12,
             seed: 0xC0FFEE,
             policy: Policy::Heuristic,
             rollout_policy: Policy::Heuristic,
+            enoch_features: EnochFeatures::empty(),
         }
     }
 }
@@ -313,15 +555,15 @@ fn use_terminal_level_rollout_with_flags(
     terminal_enabled: bool,
     force_late_ruff_terminal: bool,
 ) -> bool {
-    if !standard_refinement_domain(root) {
-        return false;
-    }
     // The opt-in ruff-shape experiment is useful only if every candidate is
     // judged by the exact terminal contract outcome, including the final-kitty
     // multiplier. Keep that objective common to the entire root; never give the
     // reserved candidate bespoke value units.
     if force_late_ruff_terminal {
         return true;
+    }
+    if !standard_refinement_domain(root) {
+        return false;
     }
     if !terminal_enabled {
         return false;
@@ -340,6 +582,17 @@ fn use_terminal_level_rollout_with_flags(
     };
     let (attacker_points, _) = root.calculate_points();
     (1..=15).contains(&(turnover - attacker_points))
+}
+
+fn explicit_terminal_level_domain(
+    root: &PlayPhase,
+    rollout_tricks: usize,
+    features: EnochFeatures,
+) -> bool {
+    if !features.contains(EnochFeatures::TERMINAL_LEVEL) {
+        return false;
+    }
+    max_public_hand_size(root).is_some_and(|cards| cards > 0 && rollout_tricks >= cards)
 }
 
 /// Weight of a calibrated schema-v2 Q(o,a) prediction in the final root choice.
@@ -589,6 +842,38 @@ fn minmax_normalize(values: &[f64]) -> Option<Vec<f64>> {
         .then(|| values.iter().map(|value| (value - low) / span).collect())
 }
 
+fn minmax_normalize_observed(values: &[f64], counts: &[u32]) -> Option<Vec<f64>> {
+    if values.len() != counts.len() || values.is_empty() {
+        return None;
+    }
+    let observed = values
+        .iter()
+        .zip(counts)
+        .filter_map(|(&value, &count)| (count > 0 && value.is_finite()).then_some(value))
+        .collect::<Vec<_>>();
+    if observed.is_empty() {
+        return None;
+    }
+    let low = observed.iter().copied().fold(f64::INFINITY, f64::min);
+    let high = observed.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let span = high - low;
+    Some(
+        values
+            .iter()
+            .zip(counts)
+            .map(|(&value, &count)| {
+                if count == 0 || !value.is_finite() {
+                    f64::NEG_INFINITY
+                } else if span > 1e-6 && span.is_finite() {
+                    (value - low) / span
+                } else {
+                    0.0
+                }
+            })
+            .collect(),
+    )
+}
+
 fn normalize_level_q(values: &[f64]) -> Option<Vec<f64>> {
     static MIN_SPAN: OnceLock<f64> = OnceLock::new();
     let min_span = *MIN_SPAN.get_or_init(|| {
@@ -664,22 +949,64 @@ fn late_ruff_shape_candidate_with_flags(
 /// Run the determinized search and return the chosen cards, or `None` if no
 /// candidate could be produced (caller should fall back to the heuristic /
 /// dumb policy).
-pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Option<Vec<Card>> {
+pub fn search_play(p: &PlayPhase, me: PlayerID, config: SearchConfig) -> Option<Vec<Card>> {
+    search_play_with_report(p, me, config).cards
+}
+
+pub fn search_play_with_report(p: &PlayPhase, me: PlayerID, config: SearchConfig) -> SearchReport {
+    search_play_impl(p, me, config, false)
+}
+
+/// Fail-closed evaluator entry point. A genuine one-candidate position needs no
+/// simulation, but any multi-candidate root with zero completed search samples
+/// returns `None` instead of silently substituting the policy prior.
+pub fn search_play_strict(p: &PlayPhase, me: PlayerID, config: SearchConfig) -> Option<Vec<Card>> {
+    search_play_strict_with_report(p, me, config).cards
+}
+
+/// Strict search plus its complete per-decision audit record.
+pub fn search_play_strict_with_report(
+    p: &PlayPhase,
+    me: PlayerID,
+    config: SearchConfig,
+) -> SearchReport {
+    search_play_impl(p, me, config, true)
+}
+
+fn search_play_impl(
+    p: &PlayPhase,
+    me: PlayerID,
+    mut config: SearchConfig,
+    strict: bool,
+) -> SearchReport {
     let decision_start = Instant::now();
+    let mut telemetry = SearchTelemetry::new(config, strict);
     // Candidate generation + policy pruning: rank by the configured policy (net
     // prior for Expert, playbook/heuristic for Enoch) and take the top-K.
-    let mut candidates: Vec<ScoredPlay> = ranked_candidates(p, me, config.policy);
+    let mut candidates: Vec<ScoredPlay> =
+        ranked_candidates(p, me, config.policy, config.enoch_features);
     if candidates.is_empty() {
-        return None;
+        return telemetry.finish(
+            decision_start,
+            None,
+            Some(SearchFailureReason::NoLegalCandidates),
+        );
     }
-    let max_candidates = config.max_candidates.max(1);
-    let reserve_enabled = late_ruff_reserve_enabled();
+    let initial_candidate_count = config.max_candidates.max(1).min(candidates.len());
+    let candidate_work_budget = fixed_candidate_work_budget(&config, candidates.len());
+    let max_candidates = root_candidate_limit(&config, candidates.len());
+    let reserve_enabled =
+        config.enoch_features.contains(EnochFeatures::RUFF_SHAPE) || late_ruff_reserve_enabled();
     let late_ruff_terminal = force_late_ruff_terminal(p, me, &config, reserve_enabled);
     let terminal_level_root =
-        use_terminal_level_rollout(p, me, config.rollout_tricks, late_ruff_terminal);
+        use_terminal_level_rollout(p, me, config.rollout_tricks, late_ruff_terminal)
+            || explicit_terminal_level_domain(p, config.rollout_tricks, config.enoch_features);
     let reserved =
         late_ruff_shape_candidate_with_flags(p, me, &candidates, &config, reserve_enabled);
-    candidates.truncate(max_candidates);
+    candidates = select_root_candidates(p, candidates, max_candidates, config.enoch_features);
+    telemetry.initial_candidate_count = initial_candidate_count;
+    telemetry.candidate_pool_count = candidates.len();
+    telemetry.candidate_work_budget = candidate_work_budget;
     if let Some(reserved) = reserved {
         let already_present = candidates
             .iter()
@@ -701,7 +1028,13 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
 
     // If there's only one candidate, no need to search.
     if candidates.len() == 1 {
-        return Some(candidates.remove(0).cards);
+        // A forced action consumes no candidate-evaluation work.  Reporting the
+        // nominal K*world budget here made aggregate fixed-work evidence look
+        // incomplete even though there was no alternative to evaluate.
+        telemetry.candidate_work_budget = 0;
+        telemetry.forced_action = true;
+        telemetry.per_candidate_evaluations = vec![0];
+        return telemetry.finish(decision_start, Some(candidates.remove(0).cards), None);
     }
     // Cache the typed Q values once for final blending / PUCT. Candidate ranking
     // may already have consulted Q while assembling top-K, but serving should not
@@ -715,9 +1048,18 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
     // budget remains a hard upper bound from `decision_start`.
     let target_budget = adaptive_time_budget(p, &candidates, config.time_budget);
     let decision_deadline = decision_start + target_budget;
+    telemetry.effective_time_budget = target_budget;
     config.time_budget = decision_deadline.saturating_duration_since(Instant::now());
     if config.time_budget.is_zero() {
-        return Some(candidates[0].cards.clone());
+        telemetry.time_bound = true;
+        telemetry.per_candidate_evaluations = vec![0; candidates.len()];
+        let cards = (!strict).then(|| candidates[0].cards.clone());
+        telemetry.prior_fallback_used = cards.is_some();
+        return telemetry.finish(
+            decision_start,
+            cards,
+            Some(SearchFailureReason::BudgetExpiredBeforeWork),
+        );
     }
 
     let mut rng = StdRng::seed_from_u64(config.seed);
@@ -729,7 +1071,7 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
     // byte-unchanged in production. See `docs/bot-training-roadmap.md` (pays off
     // most once the leaf is a learned value net, not the crude static eval).
     if puct_enabled() {
-        return puct_search(
+        let result = puct_search(
             p,
             me,
             &candidates,
@@ -738,9 +1080,17 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
             &mut rng,
             PuctRunContext {
                 deadline: decision_deadline,
-                force_late_ruff_terminal: late_ruff_terminal,
+                force_late_ruff_terminal: terminal_level_root,
             },
+            strict,
+            &mut telemetry,
         );
+        telemetry.time_bound = Instant::now() >= decision_deadline;
+        telemetry.work_bound = telemetry.candidate_evaluations >= candidate_work_budget;
+        telemetry.prior_fallback_used = result.prior_fallback_used;
+        let failure =
+            (telemetry.worlds_completed == 0).then_some(SearchFailureReason::NoCompletedWorlds);
+        return telemetry.finish(decision_start, result.cards, failure);
     }
 
     let mut totals = vec![0.0f64; candidates.len()];
@@ -752,9 +1102,13 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
 
     let start = Instant::now();
     let mut worlds_attempted = 0usize;
+    let mut worlds_accepted = 0usize;
     let mut paired_worlds_done = 0usize;
+    let mut candidate_evaluations = 0usize;
 
-    while worlds_attempted < config.max_worlds {
+    while candidate_evaluations < candidate_work_budget
+        && (config.require_full_work || worlds_attempted < config.max_worlds)
+    {
         if Instant::now() >= decision_deadline {
             break;
         }
@@ -764,20 +1118,46 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
         // independent of the root policy. Reuse one world and one rollout-random
         // stream across all candidates (common random numbers) for a paired,
         // lower-variance comparison.
-        let world = match sample_world(p, me, &mut rng) {
+        let world = match sample_world(p, me, &mut rng, config.enoch_features) {
             Some(w) => w,
             None => continue,
         };
+        worlds_accepted += 1;
+
+        let active_count = if config
+            .enoch_features
+            .contains(EnochFeatures::PROGRESSIVE_ADMISSION)
+        {
+            progressive_active_count(
+                initial_candidate_count,
+                candidates.len(),
+                paired_worlds_done,
+            )
+        } else {
+            candidates.len()
+        };
+        let remaining_work = candidate_work_budget - candidate_evaluations;
+        let round_work = active_count.min(remaining_work);
+        let mut candidate_indices = (0..active_count).collect::<Vec<_>>();
+        if round_work < active_count {
+            // Spend the exact fixed-work remainder on the least-sampled active
+            // candidates. The stable index tie-break is part of the protocol.
+            candidate_indices.sort_by_key(|&index| (counts[index], index));
+            candidate_indices.truncate(round_work);
+            candidate_indices.sort_unstable();
+        }
 
         let rollout_seed = rng.gen::<u64>();
-        let Some(values) = evaluate_paired_candidates(
+        let Some(values) = evaluate_paired_candidate_indices(
             &world.play,
             me,
             &candidates,
+            &candidate_indices,
             RolloutEvalConfig {
                 tricks: config.rollout_tricks,
                 policy: config.rollout_policy,
-                force_late_ruff_terminal: late_ruff_terminal,
+                force_late_ruff_terminal: terminal_level_root,
+                enoch_features: config.enoch_features,
                 deadline: Some(decision_deadline),
             },
             rollout_seed,
@@ -787,13 +1167,14 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
         // Commit a world only after every candidate completed. We deliberately do
         // not stop halfway through a round: a timer expiring mid-round used to
         // give early candidates more samples and make strength depend on order.
-        for (idx, value) in values.into_iter().enumerate() {
+        for (idx, value) in values {
             totals[idx] += value;
             counts[idx] += 1;
             if let Some(samples) = &mut samples {
                 samples[idx].push(value);
             }
         }
+        candidate_evaluations += candidate_indices.len();
         paired_worlds_done += 1;
     }
 
@@ -801,12 +1182,15 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
         let elapsed = start.elapsed();
         let time_bound = Instant::now() >= decision_deadline;
         eprintln!(
-            "[search] seat={} cands={} paired_worlds={} attempts={}/{} elapsed={:.1}ms budget={}ms bound={}",
+            "[search] seat={} cands={}/{} paired_worlds={} attempts={}/{} candidate_evals={}/{} elapsed={:.1}ms budget={}ms bound={}",
             me.0,
+            initial_candidate_count,
             candidates.len(),
             paired_worlds_done,
             worlds_attempted,
             config.max_worlds,
+            candidate_evaluations,
+            candidate_work_budget,
             elapsed.as_secs_f64() * 1000.0,
             config.time_budget.as_millis(),
             if time_bound { "TIME" } else { "WORLDS" },
@@ -816,13 +1200,37 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
     // A zero-sample search falls back to the policy prior as a whole. Never mix
     // heuristic-prior units with rollout-point units in one argmax.
     if paired_worlds_done == 0 {
-        return Some(candidates[0].cards.clone());
+        telemetry.worlds_attempted = worlds_attempted;
+        telemetry.worlds_accepted = worlds_accepted;
+        telemetry.worlds_completed = paired_worlds_done;
+        telemetry.candidate_evaluations = candidate_evaluations;
+        telemetry.per_candidate_evaluations = counts;
+        telemetry.time_bound = Instant::now() >= decision_deadline;
+        telemetry.work_bound = candidate_evaluations >= candidate_work_budget;
+        let cards = (!strict).then(|| candidates[0].cards.clone());
+        telemetry.prior_fallback_used = cards.is_some();
+        return telemetry.finish(
+            decision_start,
+            cards,
+            Some(SearchFailureReason::NoCompletedWorlds),
+        );
     }
-    debug_assert!(counts.windows(2).all(|pair| pair[0] == pair[1]));
+    if !config
+        .enoch_features
+        .contains(EnochFeatures::PROGRESSIVE_ADMISSION)
+    {
+        debug_assert!(counts.windows(2).all(|pair| pair[0] == pair[1]));
+    }
     let avgs: Vec<f64> = totals
         .iter()
         .zip(&counts)
-        .map(|(&total, &count)| total / count as f64)
+        .map(|(&total, &count)| {
+            if count == 0 {
+                f64::NEG_INFINITY
+            } else {
+                total / count as f64
+            }
+        })
         .collect();
     let estimates = if let Some(samples) = &samples {
         samples
@@ -846,21 +1254,17 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
         // so the playbook breaks near-ties toward its move while a clearly-better
         // search value still wins. `candidates[i].score` is the playbook prior.
         const LAMBDA: f64 = 0.2;
-        let norm = |xs: &[f64]| -> Vec<f64> {
-            let lo = xs.iter().copied().fold(f64::INFINITY, f64::min);
-            let hi = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let span = hi - lo;
-            if !span.is_finite() || span <= 0.0 {
-                vec![0.0; xs.len()]
-            } else {
-                xs.iter().map(|&x| (x - lo) / span).collect()
-            }
-        };
-        let norm_avg = norm(&estimates);
-        let norm_heur = norm(&candidates.iter().map(|c| c.score).collect::<Vec<_>>());
+        let norm_avg = minmax_normalize_observed(&estimates, &counts)
+            .expect("at least one completed candidate evaluation");
+        let heuristic_scores = candidates.iter().map(|c| c.score).collect::<Vec<_>>();
+        let norm_heur =
+            minmax_normalize(&heuristic_scores).unwrap_or_else(|| vec![0.0; candidates.len()]);
         let mut bi = 0;
         let mut best = f64::NEG_INFINITY;
         for idx in 0..candidates.len() {
+            if counts[idx] == 0 {
+                continue;
+            }
             let combined = norm_avg[idx] + LAMBDA * norm_heur[idx];
             if combined > best {
                 best = combined;
@@ -869,17 +1273,36 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
         }
         bi
     } else if config.policy == Policy::Net {
-        let search_norm = minmax_normalize(&estimates);
+        let search_norm = minmax_normalize_observed(&estimates, &counts);
         let q_norm = root_q_values.as_deref().and_then(normalize_level_q);
         match (search_norm, q_norm) {
             (Some(search_norm), Some(q_norm)) => {
                 let weight = q_blend_weight();
                 let combined: Vec<f64> = (0..candidates.len())
-                    .map(|idx| (1.0 - weight) * search_norm[idx] + weight * q_norm[idx])
+                    .map(|idx| {
+                        if counts[idx] == 0 {
+                            f64::NEG_INFINITY
+                        } else {
+                            (1.0 - weight) * search_norm[idx] + weight * q_norm[idx]
+                        }
+                    })
                     .collect();
                 argmax_earliest(&combined)
             }
-            (None, Some(q_norm)) => argmax_earliest(&q_norm),
+            (None, Some(q_norm)) => {
+                let masked = q_norm
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, value)| {
+                        if counts[idx] == 0 {
+                            f64::NEG_INFINITY
+                        } else {
+                            value
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                argmax_earliest(&masked)
+            }
             _ => argmax_earliest(&estimates),
         }
     } else {
@@ -894,7 +1317,18 @@ pub fn search_play(p: &PlayPhase, me: PlayerID, mut config: SearchConfig) -> Opt
         bi
     };
 
-    Some(candidates[best_idx].cards.clone())
+    telemetry.worlds_attempted = worlds_attempted;
+    telemetry.worlds_accepted = worlds_accepted;
+    telemetry.worlds_completed = paired_worlds_done;
+    telemetry.candidate_evaluations = candidate_evaluations;
+    telemetry.per_candidate_evaluations = counts;
+    telemetry.time_bound = Instant::now() >= decision_deadline;
+    telemetry.work_bound = candidate_evaluations >= candidate_work_budget;
+    telemetry.finish(
+        decision_start,
+        Some(candidates[best_idx].cards.clone()),
+        None,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -902,6 +1336,7 @@ struct RolloutEvalConfig {
     tricks: usize,
     policy: Policy,
     force_late_ruff_terminal: bool,
+    enoch_features: EnochFeatures,
     deadline: Option<Instant>,
 }
 
@@ -909,6 +1344,11 @@ struct RolloutEvalConfig {
 struct PuctRunContext {
     deadline: Instant,
     force_late_ruff_terminal: bool,
+}
+
+struct PuctSearchResult {
+    cards: Option<Vec<Card>>,
+    prior_fallback_used: bool,
 }
 
 /// Evaluate a complete candidate round against one world with common random
@@ -921,19 +1361,30 @@ fn evaluate_paired_candidates(
     eval: RolloutEvalConfig,
     rollout_seed: u64,
 ) -> Option<Vec<f64>> {
-    let mut values = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
+    let indices = (0..candidates.len()).collect::<Vec<_>>();
+    evaluate_paired_candidate_indices(world, me, candidates, &indices, eval, rollout_seed)
+        .map(|values| values.into_iter().map(|(_, value)| value).collect())
+}
+
+fn evaluate_paired_candidate_indices(
+    world: &PlayPhase,
+    me: PlayerID,
+    candidates: &[ScoredPlay],
+    candidate_indices: &[usize],
+    eval: RolloutEvalConfig,
+    rollout_seed: u64,
+) -> Option<Vec<(usize, f64)>> {
+    let mut values = Vec::with_capacity(candidate_indices.len());
+    for &index in candidate_indices {
+        let candidate = candidates.get(index)?;
         // Re-seeding every candidate gives each hypothetical action the same
         // rollout-random stream. The paths may consume it differently after they
         // diverge, but candidate iteration order cannot change its random draws.
         let mut candidate_rng = StdRng::seed_from_u64(rollout_seed);
-        values.push(evaluate_candidate(
-            world,
-            me,
-            &candidate.cards,
-            eval,
-            &mut candidate_rng,
-        )?);
+        values.push((
+            index,
+            evaluate_candidate(world, me, &candidate.cards, eval, &mut candidate_rng)?,
+        ));
     }
     Some(values)
 }
@@ -957,6 +1408,7 @@ fn evaluate_paired_candidates(
 /// static eval. Progressive widening (searching beyond the top-K) is a future
 /// extension; this version keeps the same candidate set as the flat path so an
 /// A/B isolates the allocation change.
+#[allow(clippy::too_many_arguments)]
 fn puct_search(
     p: &PlayPhase,
     me: PlayerID,
@@ -965,7 +1417,9 @@ fn puct_search(
     config: &SearchConfig,
     rng: &mut StdRng,
     run: PuctRunContext,
-) -> Option<Vec<Card>> {
+    strict: bool,
+    telemetry: &mut SearchTelemetry,
+) -> PuctSearchResult {
     const C_PUCT: f64 = 1.5;
     let n = candidates.len();
     let uniform = vec![1.0 / n as f64; n];
@@ -989,26 +1443,30 @@ fn puct_search(
     let risk = risk_config();
     let mut samples = risk.enabled().then(|| vec![Vec::<f64>::new(); n]);
 
-    // Match the flat path's rollout budget: it does `max_worlds` worlds × `n`
-    // candidate rollouts; here each pull is one rollout, so allow `max_worlds·n`.
-    let pulls = config.max_worlds.saturating_mul(n);
+    // Match the CONTROL arm's fixed rollout budget. Progressive admission may
+    // expose more than top-K actions, but it never buys extra candidate work.
+    let initial_n = config.max_candidates.max(1).min(n);
+    let pulls = config.max_worlds.saturating_mul(initial_n);
     let start = Instant::now();
 
     // Mandatory paired warm-up: when there is enough budget to begin one world,
     // every candidate gets the same world and random stream before UCB may focus
     // on a subset. This removes the old zero-as-Q bias and guarantees at least one
     // comparable sample per candidate when any simulation is possible.
-    if pulls >= n && Instant::now() < run.deadline {
-        if let Some(world) = sample_world(p, me, rng) {
+    if pulls >= initial_n && Instant::now() < run.deadline {
+        telemetry.worlds_attempted += 1;
+        if let Some(world) = sample_world(p, me, rng, config.enoch_features) {
+            telemetry.worlds_accepted += 1;
             let rollout_seed = rng.gen::<u64>();
             if let Some(values) = evaluate_paired_candidates(
                 &world.play,
                 me,
-                candidates,
+                &candidates[..initial_n],
                 RolloutEvalConfig {
                     tricks: config.rollout_tricks,
                     policy: config.rollout_policy,
                     force_late_ruff_terminal: run.force_late_ruff_terminal,
+                    enoch_features: config.enoch_features,
                     deadline: Some(run.deadline),
                 },
                 rollout_seed,
@@ -1020,6 +1478,8 @@ fn puct_search(
                         samples[idx].push(value);
                     }
                 }
+                telemetry.worlds_completed += 1;
+                telemetry.candidate_evaluations += initial_n;
             }
         }
     }
@@ -1028,16 +1488,29 @@ fn puct_search(
     // If the world/candidate set could not complete that baseline, use the prior
     // rather than manufacturing an order-dependent partially visited search.
     if counts.iter().all(|&count| count == 0) {
-        return Some(candidates[0].cards.clone());
+        telemetry.per_candidate_evaluations = counts;
+        let cards = (!strict).then(|| candidates[0].cards.clone());
+        return PuctSearchResult {
+            prior_fallback_used: cards.is_some(),
+            cards,
+        };
     }
 
-    for _ in n..pulls {
+    for pull_index in initial_n..pulls {
         if Instant::now() >= run.deadline {
             break;
         }
+        let active_n = if config
+            .enoch_features
+            .contains(EnochFeatures::PROGRESSIVE_ADMISSION)
+        {
+            progressive_active_count(initial_n, n, pull_index / initial_n.max(1))
+        } else {
+            n
+        };
         // Min-max normalize the current per-candidate mean values to [0,1] so the
         // exploitation term is comparable to the (scale-free) exploration term.
-        let means: Vec<f64> = (0..n)
+        let means: Vec<f64> = (0..active_n)
             .map(|i| {
                 if counts[i] > 0 {
                     if risk.enabled() {
@@ -1059,19 +1532,30 @@ fn puct_search(
         let total: u32 = counts.iter().sum();
         let sqrt_total = (total as f64).sqrt();
 
-        let mut best_i = 0;
-        let mut best_u = f64::NEG_INFINITY;
-        for i in 0..n {
-            let q_norm = (means[i] - lo) / span;
-            let u = q_norm + C_PUCT * prior[i] * sqrt_total / (1.0 + counts[i] as f64);
-            if u > best_u {
-                best_u = u;
-                best_i = i;
+        let best_i = if let Some(unvisited) = (0..active_n).find(|&i| counts[i] == 0) {
+            // Every newly admitted action receives one mandatory visit before
+            // UCB can spend more work on incumbents.
+            unvisited
+        } else {
+            let mut best_i = 0;
+            let mut best_u = f64::NEG_INFINITY;
+            for i in 0..active_n {
+                let q_norm = (means[i] - lo) / span;
+                let u = q_norm + C_PUCT * prior[i] * sqrt_total / (1.0 + counts[i] as f64);
+                if u > best_u {
+                    best_u = u;
+                    best_i = i;
+                }
             }
-        }
+            best_i
+        };
 
-        let world = match sample_world(p, me, rng) {
-            Some(w) => w,
+        telemetry.worlds_attempted += 1;
+        let world = match sample_world(p, me, rng, config.enoch_features) {
+            Some(w) => {
+                telemetry.worlds_accepted += 1;
+                w
+            }
             None => continue,
         };
         if let Some(v) = evaluate_candidate(
@@ -1082,6 +1566,7 @@ fn puct_search(
                 tricks: config.rollout_tricks,
                 policy: config.rollout_policy,
                 force_late_ruff_terminal: run.force_late_ruff_terminal,
+                enoch_features: config.enoch_features,
                 deadline: Some(run.deadline),
             },
             rng,
@@ -1091,6 +1576,8 @@ fn puct_search(
             if let Some(samples) = &mut samples {
                 samples[best_i].push(v);
             }
+            telemetry.worlds_completed += 1;
+            telemetry.candidate_evaluations += 1;
         }
     }
 
@@ -1126,7 +1613,11 @@ fn puct_search(
             best_i = i;
         }
     }
-    Some(candidates[best_i].cards.clone())
+    telemetry.per_candidate_evaluations = counts;
+    PuctSearchResult {
+        cards: Some(candidates[best_i].cards.clone()),
+        prior_fallback_used: false,
+    }
 }
 
 /// Run a PERFECT-INFORMATION search and return the chosen cards, or `None` if no
@@ -1155,15 +1646,18 @@ pub fn search_play_perfect_info(
 ) -> Option<Vec<Card>> {
     let decision_start = Instant::now();
     let mut candidates: Vec<ScoredPlay> =
-        ranked_candidates_perfect_information(p, me, config.policy);
+        ranked_candidates_perfect_information(p, me, config.policy, config.enoch_features);
     remove_known_failed_throws(p, me, &mut candidates);
     if candidates.is_empty() {
         return None;
     }
-    candidates.truncate(config.max_candidates.max(1));
+    let max_candidates = root_candidate_limit(&config, candidates.len());
+    candidates = select_root_candidates(p, candidates, max_candidates, config.enoch_features);
     if candidates.len() == 1 {
         return Some(candidates.remove(0).cards);
     }
+    let terminal_level_root =
+        explicit_terminal_level_domain(p, config.rollout_tricks, config.enoch_features);
 
     let target_budget = adaptive_time_budget(p, &candidates, config.time_budget);
     let root_deadline = decision_start + target_budget;
@@ -1215,7 +1709,8 @@ pub fn search_play_perfect_info(
             RolloutEvalConfig {
                 tricks: config.rollout_tricks,
                 policy: config.rollout_policy,
-                force_late_ruff_terminal: false,
+                force_late_ruff_terminal: terminal_level_root,
+                enoch_features: config.enoch_features,
                 deadline: Some(root_deadline),
             },
             rollout_seed,
@@ -1289,8 +1784,13 @@ fn remove_known_failed_throws(p: &PlayPhase, me: PlayerID, candidates: &mut Vec<
 /// comment). If the net can't run (model missing/failed, or fewer than two
 /// candidates), we transparently fall back to the heuristic ranking, so the
 /// search is never starved of candidates.
-fn ranked_candidates(p: &PlayPhase, me: PlayerID, policy: Policy) -> Vec<ScoredPlay> {
-    canonicalize_ranked_candidates(ranked_candidates_raw(p, me, policy, false))
+fn ranked_candidates(
+    p: &PlayPhase,
+    me: PlayerID,
+    policy: Policy,
+    features: EnochFeatures,
+) -> Vec<ScoredPlay> {
+    canonicalize_ranked_candidates(ranked_candidates_raw(p, me, policy, false, features))
 }
 
 /// Perfect-information root counterpart to [`ranked_candidates`]. Honest root
@@ -1301,8 +1801,9 @@ fn ranked_candidates_perfect_information(
     p: &PlayPhase,
     me: PlayerID,
     policy: Policy,
+    features: EnochFeatures,
 ) -> Vec<ScoredPlay> {
-    canonicalize_ranked_candidates(ranked_candidates_raw(p, me, policy, true))
+    canonicalize_ranked_candidates(ranked_candidates_raw(p, me, policy, true, features))
 }
 
 fn canonicalize_ranked_candidates(candidates: Vec<ScoredPlay>) -> Vec<ScoredPlay> {
@@ -1347,6 +1848,7 @@ fn ranked_candidates_raw(
     me: PlayerID,
     policy: Policy,
     perfect_information_root: bool,
+    features: EnochFeatures,
 ) -> Vec<ScoredPlay> {
     let leading = p.trick().played_cards().is_empty();
 
@@ -1367,12 +1869,12 @@ fn ranked_candidates_raw(
         Policy::EnochHeuristic => {
             if leading {
                 if perfect_information_root {
-                    heuristics::ranked_leads_enoch_unfiltered(p, me)
+                    heuristics::ranked_leads_enoch_unfiltered_with_features(p, me, features)
                 } else {
-                    heuristics::ranked_leads_enoch(p, me)
+                    heuristics::ranked_leads_enoch_with_features(p, me, features)
                 }
             } else {
-                heuristics::ranked_follows_enoch(p, me)
+                heuristics::ranked_follows_enoch_with_features(p, me, features)
             }
         }
         Policy::Net => {
@@ -1532,7 +2034,18 @@ fn evaluate_candidate(
     // "roll out the whole hand" sentinel) caps at `usize::MAX` plies instead of
     // overflowing; the rollout loop terminates anyway once the hand is finished.
     let max_plies = players.saturating_mul(eval.tricks.max(1));
-    if !rollout(&mut sim, max_plies, eval.policy, rng, eval.deadline) {
+    // Uncertain-throw admission is a root-information hypothesis. Once a world
+    // is materialized, rollouts know whether a throw is actually safe and must
+    // retain the normal honest admissibility filter.
+    let rollout_features = eval.enoch_features.without(EnochFeatures::UNCERTAIN_THROWS);
+    if !rollout(
+        &mut sim,
+        max_plies,
+        eval.policy,
+        rollout_features,
+        rng,
+        eval.deadline,
+    ) {
         return None;
     }
 
@@ -1558,6 +2071,7 @@ fn rollout_ranked(
     actor: PlayerID,
     leading: bool,
     policy: Policy,
+    features: EnochFeatures,
 ) -> Vec<Vec<Card>> {
     // Knowledge/feature construction is observer-aware even on a materialized
     // sampled world: it uses only `actor`'s hand identities, public history and
@@ -1577,9 +2091,9 @@ fn rollout_ranked(
         Policy::Heuristic => heuristic_cards(),
         Policy::EnochHeuristic => {
             let ranked = if leading {
-                heuristics::ranked_leads_enoch_for_rollout(view, actor)
+                heuristics::ranked_leads_enoch_for_rollout_with_features(view, actor, features)
             } else {
-                heuristics::ranked_follows_enoch_for_rollout(view, actor)
+                heuristics::ranked_follows_enoch_for_rollout_with_features(view, actor, features)
             };
             ranked.into_iter().map(|s| s.cards).collect()
         }
@@ -1619,6 +2133,7 @@ fn rollout(
     sim: &mut PlayPhase,
     max_plies: usize,
     policy: Policy,
+    features: EnochFeatures,
     rng: &mut StdRng,
     deadline: Option<Instant>,
 ) -> bool {
@@ -1641,7 +2156,7 @@ fn rollout(
             }
             Some(actor) => {
                 let leading = sim.trick().played_cards().is_empty();
-                let mut ranked = rollout_ranked(sim, actor, leading, policy);
+                let mut ranked = rollout_ranked(sim, actor, leading, policy, features);
                 if ranked.is_empty() {
                     break;
                 }
@@ -1659,11 +2174,16 @@ fn rollout(
                 if sim.play_cards(actor, &cards).is_err() {
                     // Try other candidates.
                     let mut alts = if leading {
-                        let ctx = heuristics::EvalCtx::build(sim, actor);
+                        let ctx = if policy == Policy::EnochHeuristic {
+                            heuristics::EvalCtx::build_enoch_with_features(sim, actor, features)
+                        } else {
+                            heuristics::EvalCtx::build(sim, actor)
+                        };
                         heuristics::rollout_lead_candidates(sim, actor)
                             .into_iter()
                             .filter(|candidate| {
-                                heuristics::admissible_ranked_lead(&ctx, sim, candidate)
+                                features.contains(EnochFeatures::UNCERTAIN_THROWS)
+                                    || heuristics::admissible_ranked_lead(&ctx, sim, candidate)
                             })
                             .collect()
                     } else {
@@ -1909,13 +2429,19 @@ fn net_value_estimate(sim: &PlayPhase, me: PlayerID) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::time::Duration;
+
     use super::{
         adaptive_fraction_from_signals, canonicalize_ranked_candidates, evaluate_candidate,
-        force_late_ruff_terminal, late_ruff_shape_candidate_with_flags, max_public_hand_size,
-        normalized_entropy, oriented_level_utility, ranked_candidates,
+        explicit_terminal_level_domain, force_late_ruff_terminal,
+        late_ruff_shape_candidate_with_flags, max_public_hand_size, normalized_entropy,
+        oriented_level_utility, progressive_active_count, ranked_candidates,
         ranked_candidates_perfect_information, remove_known_failed_throws, risk_adjusted_value,
+        root_candidate_family, root_candidate_limit, search_play, search_play_strict,
+        search_play_strict_with_report, select_root_candidates, standard_refinement_domain,
         use_terminal_level_rollout_with_flags, Policy, RiskConfig, RolloutEvalConfig, ScoredPlay,
-        SearchConfig,
+        SearchConfig, SearchFailureReason,
     };
     use rand::rngs::StdRng;
     use rand::SeedableRng;
@@ -1924,8 +2450,21 @@ mod tests {
     use shengji_mechanics::player::Player;
     use shengji_mechanics::types::{Card, Number, PlayerID, Suit, Trump};
 
+    use crate::bot::enoch::EnochFeatures;
     use crate::game_state::play_phase::PlayPhase;
     use crate::settings::{GameMode, PropagatedState};
+
+    #[test]
+    fn every_hidden_world_ablation_routes_through_the_feature_aware_sampler() {
+        for feature in [
+            EnochFeatures::BID_OWNERSHIP,
+            EnochFeatures::COMPOUND_FOLLOW,
+            EnochFeatures::FAILED_THROW_WITNESS,
+            EnochFeatures::FRIEND_REVELATION,
+        ] {
+            assert!(EnochFeatures::HARD_EVIDENCE.contains(feature));
+        }
+    }
 
     fn card(suit: Suit, number: Number) -> Card {
         Card::Suited { suit, number }
@@ -2074,6 +2613,106 @@ mod tests {
             },
         ];
         (play, ids, candidates)
+    }
+
+    fn complete_one_deck_position() -> (PlayPhase, Vec<PlayerID>) {
+        let ids: Vec<PlayerID> = (0..4).map(PlayerID).collect();
+        let mut propagated = PropagatedState::default();
+        propagated.players = ids
+            .iter()
+            .map(|id| Player::new(*id, format!("p{}", id.0)))
+            .collect();
+        propagated.num_decks = Some(1);
+        let deck = Deck::default();
+        let configured = deck.cards().collect::<Vec<_>>();
+        let kitty = configured[..2].to_vec();
+        let trump = Trump::NoTrump { number: None };
+        let mut hands = Hands::new(ids.iter().copied());
+        hands.set_trump(trump);
+        for (index, cards) in configured[2..].chunks_exact(13).enumerate() {
+            hands.add(ids[index], cards.iter().copied()).unwrap();
+        }
+        (
+            PlayPhase::new(
+                propagated,
+                1,
+                GameMode::Tractor,
+                hands,
+                kitty,
+                trump,
+                ids[0],
+                ids[0],
+                vec![ids[0], ids[2]],
+                vec![],
+                vec![deck],
+                vec![],
+            )
+            .unwrap(),
+            ids,
+        )
+    }
+
+    fn complete_one_deck_position_with_tied_root_prior() -> (PlayPhase, Vec<PlayerID>) {
+        let ids: Vec<PlayerID> = (0..4).map(PlayerID).collect();
+        let mut propagated = PropagatedState::default();
+        propagated.players = ids
+            .iter()
+            .map(|id| Player::new(*id, format!("p{}", id.0)))
+            .collect();
+        propagated.num_decks = Some(1);
+        let deck = Deck::default();
+        let trump = Trump::NoTrump { number: None };
+        let root_cards = [
+            card(Suit::Clubs, Number::Two),
+            card(Suit::Diamonds, Number::Two),
+            card(Suit::Hearts, Number::Two),
+            card(Suit::Spades, Number::Two),
+            card(Suit::Clubs, Number::Three),
+            card(Suit::Diamonds, Number::Three),
+            card(Suit::Hearts, Number::Three),
+            card(Suit::Spades, Number::Three),
+            card(Suit::Clubs, Number::Four),
+            card(Suit::Diamonds, Number::Four),
+            card(Suit::Hearts, Number::Four),
+            card(Suit::Spades, Number::Four),
+            card(Suit::Clubs, Number::Six),
+        ];
+        let kitty = vec![Card::SmallJoker, Card::BigJoker];
+        let reserved = root_cards
+            .iter()
+            .copied()
+            .chain(kitty.iter().copied())
+            .collect::<HashSet<_>>();
+        let remaining = deck
+            .cards()
+            .filter(|card| !reserved.contains(card))
+            .collect::<Vec<_>>();
+        assert_eq!(remaining.len(), 39);
+
+        let mut hands = Hands::new(ids.iter().copied());
+        hands.set_trump(trump);
+        hands.add(ids[0], root_cards).unwrap();
+        for (index, cards) in remaining.chunks_exact(13).enumerate() {
+            hands.add(ids[index + 1], cards.iter().copied()).unwrap();
+        }
+        (
+            PlayPhase::new(
+                propagated,
+                1,
+                GameMode::Tractor,
+                hands,
+                kitty,
+                trump,
+                ids[0],
+                ids[0],
+                vec![ids[0], ids[2]],
+                vec![],
+                vec![deck],
+                vec![],
+            )
+            .unwrap(),
+            ids,
+        )
     }
 
     fn terminal_ruff_tradeoff_position(point_rich_pot: bool) -> (PlayPhase, Vec<PlayerID>) {
@@ -2265,7 +2904,7 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].cards, vec![low_trump]);
 
-        let net_ranked = ranked_candidates(&play, ids[0], Policy::Net);
+        let net_ranked = ranked_candidates(&play, ids[0], Policy::Net, EnochFeatures::empty());
         assert!(
             !net_ranked.iter().any(|candidate| {
                 candidate.cards.len() == 2
@@ -2282,7 +2921,12 @@ mod tests {
         let mut safe_throw = vec![card(Suit::Hearts, Number::Three), Card::BigJoker];
         safe_throw.sort_by_key(|card| card.as_char());
 
-        let honest = ranked_candidates(&play, ids[0], Policy::EnochHeuristic);
+        let honest = ranked_candidates(
+            &play,
+            ids[0],
+            Policy::EnochHeuristic,
+            EnochFeatures::empty(),
+        );
         assert!(
             !honest.iter().any(|candidate| {
                 let mut cards = candidate.cards.clone();
@@ -2292,8 +2936,27 @@ mod tests {
             "honest ranking must reject a Joker throw that is not publicly proven safe"
         );
 
-        let mut perfect =
-            ranked_candidates_perfect_information(&play, ids[0], Policy::EnochHeuristic);
+        let uncertain = ranked_candidates(
+            &play,
+            ids[0],
+            Policy::EnochHeuristic,
+            EnochFeatures::UNCERTAIN_THROWS,
+        );
+        assert!(
+            uncertain.iter().any(|candidate| {
+                let mut cards = candidate.cards.clone();
+                cards.sort_by_key(|card| card.as_char());
+                cards == safe_throw
+            }),
+            "the isolated uncertainty arm must expose the legal throw to search"
+        );
+
+        let mut perfect = ranked_candidates_perfect_information(
+            &play,
+            ids[0],
+            Policy::EnochHeuristic,
+            EnochFeatures::empty(),
+        );
         remove_known_failed_throws(&play, ids[0], &mut perfect);
         assert!(
             perfect.iter().any(|candidate| {
@@ -2304,7 +2967,12 @@ mod tests {
             "perfect-information ranking must retain a throw that succeeds in the true world"
         );
 
-        let mut perfect_net = ranked_candidates_perfect_information(&play, ids[0], Policy::Net);
+        let mut perfect_net = ranked_candidates_perfect_information(
+            &play,
+            ids[0],
+            Policy::Net,
+            EnochFeatures::empty(),
+        );
         remove_known_failed_throws(&play, ids[0], &mut perfect_net);
         assert!(
             perfect_net.iter().any(|candidate| {
@@ -2326,6 +2994,250 @@ mod tests {
         assert!(uncertain > routine);
         assert!((critical - 1.0).abs() < f64::EPSILON);
         assert!(routine >= minimum && critical <= 1.0);
+    }
+
+    #[test]
+    fn progressive_work_budget_admits_actions_beyond_initial_top_k() {
+        let control = SearchConfig {
+            max_candidates: 4,
+            max_worlds: 144,
+            ..SearchConfig::default()
+        };
+        let candidate = SearchConfig {
+            enoch_features: EnochFeatures::PROGRESSIVE_ADMISSION,
+            ..control
+        };
+        assert_eq!(root_candidate_limit(&control, 20), 4);
+        let pool = root_candidate_limit(&candidate, 20);
+        assert!(pool > 4);
+        assert!(pool <= 12);
+
+        let fixed_work = control.max_candidates * control.max_worlds;
+        let mut counts = vec![0usize; pool];
+        let mut completed = 0usize;
+        let mut work = 0usize;
+        while completed < candidate.max_worlds && work < fixed_work {
+            let active = progressive_active_count(control.max_candidates, pool, completed);
+            let remaining = fixed_work - work;
+            let round = active.min(remaining);
+            let mut indices = (0..active).collect::<Vec<_>>();
+            indices.sort_by_key(|&index| (counts[index], index));
+            indices.truncate(round);
+            for index in indices {
+                counts[index] += 1;
+                work += 1;
+            }
+            completed += 1;
+        }
+        assert_eq!(work, fixed_work, "candidate arm gets no extra work");
+        assert!(counts.iter().all(|&count| count > 0));
+    }
+
+    #[test]
+    fn strict_search_rejects_a_zero_sample_prior_fallback() {
+        let (play, ids, _) = late_ruff_position();
+        let config = SearchConfig {
+            time_budget: Duration::ZERO,
+            max_candidates: 2,
+            policy: Policy::EnochHeuristic,
+            rollout_policy: Policy::EnochHeuristic,
+            ..SearchConfig::default()
+        };
+        assert!(search_play(&play, ids[0], config).is_some());
+        assert!(search_play_strict(&play, ids[0], config).is_none());
+        let report = search_play_strict_with_report(&play, ids[0], config);
+        assert_eq!(
+            report.telemetry.failure,
+            Some(SearchFailureReason::BudgetExpiredBeforeWork)
+        );
+        assert!(!report.telemetry.prior_fallback_used);
+        assert_eq!(report.telemetry.candidate_evaluations, 0);
+    }
+
+    #[test]
+    fn strict_telemetry_proves_progressive_and_control_have_equal_fixed_work() {
+        let (play, ids) = complete_one_deck_position();
+        let control = SearchConfig {
+            time_budget: Duration::from_secs(10),
+            require_full_work: true,
+            max_candidates: 2,
+            max_worlds: 16,
+            rollout_tricks: 1,
+            seed: 77,
+            policy: Policy::EnochHeuristic,
+            rollout_policy: Policy::EnochHeuristic,
+            enoch_features: EnochFeatures::empty(),
+        };
+        let candidate = SearchConfig {
+            enoch_features: EnochFeatures::PROGRESSIVE_ADMISSION,
+            ..control
+        };
+        let control_report = search_play_strict_with_report(&play, ids[0], control);
+        let candidate_report = search_play_strict_with_report(&play, ids[0], candidate);
+        assert!(control_report.cards.is_some());
+        assert!(candidate_report.cards.is_some());
+        assert_eq!(control_report.telemetry.failure, None);
+        assert_eq!(candidate_report.telemetry.failure, None);
+        assert_eq!(
+            control_report.telemetry.candidate_work_budget,
+            candidate_report.telemetry.candidate_work_budget
+        );
+        assert_eq!(
+            control_report.telemetry.candidate_evaluations,
+            control_report.telemetry.candidate_work_budget
+        );
+        assert_eq!(
+            candidate_report.telemetry.candidate_evaluations,
+            candidate_report.telemetry.candidate_work_budget
+        );
+        assert!(
+            candidate_report.telemetry.candidate_pool_count
+                > candidate_report.telemetry.initial_candidate_count
+        );
+        assert!(candidate_report
+            .telemetry
+            .per_candidate_evaluations
+            .iter()
+            .all(|count| *count > 0));
+    }
+
+    #[test]
+    fn strict_fixed_work_search_repeats_cards_and_work_telemetry() {
+        let (play, ids) = complete_one_deck_position_with_tied_root_prior();
+        let config = SearchConfig {
+            time_budget: Duration::from_secs(10),
+            require_full_work: true,
+            max_candidates: 5,
+            max_worlds: 4,
+            rollout_tricks: 0,
+            seed: 0x5eed_2026_0703,
+            policy: Policy::Heuristic,
+            rollout_policy: Policy::Heuristic,
+            enoch_features: EnochFeatures::empty(),
+        };
+
+        let ranked = ranked_candidates(&play, ids[0], config.policy, config.enoch_features);
+        assert!(ranked.len() > config.max_candidates);
+        assert!(
+            ranked[..config.max_candidates]
+                .windows(2)
+                .any(|pair| pair[0].score.to_bits() == pair[1].score.to_bits()
+                    && pair[0].cards != pair[1].cards),
+            "the real searched root must contain distinct score-tied actions"
+        );
+
+        let first = search_play_strict_with_report(&play, ids[0], config);
+        assert!(first.cards.is_some());
+        assert_eq!(first.telemetry.failure, None);
+        assert_eq!(
+            first.telemetry.initial_candidate_count,
+            config.max_candidates
+        );
+        assert_eq!(first.telemetry.candidate_pool_count, config.max_candidates);
+        assert_eq!(
+            first.telemetry.candidate_evaluations,
+            first.telemetry.candidate_work_budget
+        );
+        assert!(first.telemetry.work_bound);
+        assert!(first
+            .telemetry
+            .per_candidate_evaluations
+            .iter()
+            .all(|count| *count > 0));
+
+        for _ in 0..3 {
+            let repeated = search_play_strict_with_report(&play, ids[0], config);
+            assert_eq!(repeated.cards, first.cards);
+            assert_eq!(repeated.telemetry.strict, first.telemetry.strict);
+            assert_eq!(
+                repeated.telemetry.requested_worlds,
+                first.telemetry.requested_worlds
+            );
+            assert_eq!(
+                repeated.telemetry.initial_candidate_count,
+                first.telemetry.initial_candidate_count
+            );
+            assert_eq!(
+                repeated.telemetry.candidate_pool_count,
+                first.telemetry.candidate_pool_count
+            );
+            assert_eq!(
+                repeated.telemetry.candidate_work_budget,
+                first.telemetry.candidate_work_budget
+            );
+            assert_eq!(
+                repeated.telemetry.worlds_attempted,
+                first.telemetry.worlds_attempted
+            );
+            assert_eq!(
+                repeated.telemetry.worlds_accepted,
+                first.telemetry.worlds_accepted
+            );
+            assert_eq!(
+                repeated.telemetry.worlds_completed,
+                first.telemetry.worlds_completed
+            );
+            assert_eq!(
+                repeated.telemetry.candidate_evaluations,
+                first.telemetry.candidate_evaluations
+            );
+            assert_eq!(
+                repeated.telemetry.per_candidate_evaluations,
+                first.telemetry.per_candidate_evaluations
+            );
+            assert_eq!(repeated.telemetry.work_bound, first.telemetry.work_bound);
+            assert_eq!(
+                repeated.telemetry.forced_action,
+                first.telemetry.forced_action
+            );
+            assert_eq!(
+                repeated.telemetry.prior_fallback_used,
+                first.telemetry.prior_fallback_used
+            );
+            assert_eq!(repeated.telemetry.failure, first.telemetry.failure);
+        }
+    }
+
+    #[test]
+    fn root_family_reservation_survives_global_score_pruning() {
+        let (play, _) = joker_throw_position(false);
+        let c = |suit, number| card(suit, number);
+        let mut candidates = (0..8)
+            .map(|index| ScoredPlay {
+                cards: vec![c(Suit::Clubs, Number::Three)],
+                score: 100.0 - index as f64,
+            })
+            .collect::<Vec<_>>();
+        candidates.extend([
+            ScoredPlay {
+                cards: vec![c(Suit::Clubs, Number::Four); 2],
+                score: 10.0,
+            },
+            ScoredPlay {
+                cards: vec![
+                    c(Suit::Clubs, Number::Five),
+                    c(Suit::Clubs, Number::Five),
+                    c(Suit::Clubs, Number::Six),
+                    c(Suit::Clubs, Number::Six),
+                ],
+                score: 9.0,
+            },
+            ScoredPlay {
+                cards: vec![c(Suit::Clubs, Number::Seven), c(Suit::Clubs, Number::Nine)],
+                score: 8.0,
+            },
+            ScoredPlay {
+                cards: vec![c(Suit::Clubs, Number::Ten), c(Suit::Diamonds, Number::Ten)],
+                score: 7.0,
+            },
+        ]);
+        let selected =
+            select_root_candidates(&play, candidates, 5, EnochFeatures::STRUCTURAL_FAMILIES);
+        let families = selected
+            .iter()
+            .map(|candidate| root_candidate_family(&play, &candidate.cards))
+            .collect::<HashSet<_>>();
+        assert_eq!(families, HashSet::from([0, 1, 2, 3, 4]));
     }
 
     #[test]
@@ -2409,6 +3321,7 @@ mod tests {
             tricks: 2,
             policy: Policy::Heuristic,
             force_late_ruff_terminal: true,
+            enoch_features: EnochFeatures::empty(),
             deadline: None,
         };
 
@@ -2432,6 +3345,34 @@ mod tests {
         assert!(
             shed_empty > ruff_empty,
             "shedding the last nontrump must protect the valuable final kitty"
+        );
+
+        assert!(explicit_terminal_level_domain(
+            &empty_pot,
+            2,
+            EnochFeatures::TERMINAL_LEVEL,
+        ));
+        assert!(!explicit_terminal_level_domain(
+            &empty_pot,
+            1,
+            EnochFeatures::TERMINAL_LEVEL,
+        ));
+        let common_terminal = RolloutEvalConfig {
+            force_late_ruff_terminal: true,
+            enoch_features: EnochFeatures::TERMINAL_LEVEL,
+            ..eval
+        };
+        let common_terminal_shed = evaluate_candidate(
+            &empty_pot,
+            ids[2],
+            &[shed],
+            common_terminal,
+            &mut StdRng::seed_from_u64(1),
+        )
+        .expect("the common terminal rollout finishes this hand");
+        assert_eq!(
+            common_terminal_shed, shed_empty,
+            "the explicitly eligible root must use exact level utility for every candidate"
         );
 
         let (point_rich, ids) = terminal_ruff_tradeoff_position(true);
@@ -2572,6 +3513,24 @@ mod tests {
         ));
         assert!(!use_terminal_level_rollout_with_flags(
             &play, ids[0], 1, true, false,
+        ));
+
+        // The explicit Enoch terminal arm is common-root forcing, not the legacy
+        // standard-table refinement. A one-deck root must therefore retain exact
+        // level units when its rollout horizon covers the hand.
+        let (one_deck, one_deck_ids) = joker_throw_position(false);
+        assert!(!standard_refinement_domain(&one_deck));
+        assert!(explicit_terminal_level_domain(
+            &one_deck,
+            max_public_hand_size(&one_deck).unwrap(),
+            EnochFeatures::TERMINAL_LEVEL,
+        ));
+        assert!(use_terminal_level_rollout_with_flags(
+            &one_deck,
+            one_deck_ids[0],
+            max_public_hand_size(&one_deck).unwrap(),
+            false,
+            true,
         ));
     }
 }

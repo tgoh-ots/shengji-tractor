@@ -35,6 +35,7 @@ use rand::{Rng, SeedableRng};
 use shengji_mechanics::trick::TrickUnit;
 use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Rank, Trump};
 
+use crate::bot::enoch::EnochFeatures;
 use crate::bot::heuristics::{self, ScoredPlay};
 use crate::bot::phase;
 use crate::bot::search::{search_play, search_play_perfect_info, Policy, SearchConfig};
@@ -560,6 +561,7 @@ fn choose_play(
         });
         let config = SearchConfig {
             time_budget: Duration::from_millis(omni_budget_ms),
+            require_full_work: false,
             max_worlds: knobs.search_worlds.max(1),
             max_candidates: knobs.search_candidates,
             rollout_tricks: knobs.rollout_tricks,
@@ -568,6 +570,7 @@ fn choose_play(
             // Enoch playbook prior (best candidate ranker on the true world).
             policy: env_policy("OMNI_PRIOR", Policy::EnochHeuristic),
             rollout_policy: env_policy("OMNI_ROLLOUT_POLICY", Policy::EnochHeuristic),
+            enoch_features: EnochFeatures::empty(),
         };
         if let Some(cards) = search_play_perfect_info(p, me, config) {
             return cards;
@@ -662,6 +665,7 @@ fn choose_play(
         });
         let config = SearchConfig {
             time_budget: Duration::from_millis(budget_ms),
+            require_full_work: false,
             max_worlds: knobs.search_worlds,
             max_candidates: knobs.search_candidates.max(1),
             rollout_tricks,
@@ -673,6 +677,7 @@ fn choose_play(
             // heuristic (calculation-driven, decoupled from the playbook's
             // defensive instincts — see the prior/rollout selection above).
             rollout_policy,
+            enoch_features: EnochFeatures::empty(),
         };
         if let Some(cards) = search_play(p, me, config) {
             return cards;

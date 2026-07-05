@@ -35,6 +35,7 @@ use std::time::{Duration, Instant};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
+use shengji_core::bot::enoch::EnochFeatures;
 use shengji_core::bot::harness::seeded_draw_phase;
 use shengji_core::bot::policy;
 use shengji_core::bot::search::{search_play, Policy, SearchConfig};
@@ -93,12 +94,14 @@ impl Side {
     fn config(&self, seed: u64) -> SearchConfig {
         SearchConfig {
             time_budget: Duration::from_millis(self.budget_ms),
+            require_full_work: false,
             max_candidates: MAX_CANDIDATES,
             max_worlds: self.worlds,
             rollout_tricks: self.rollout_tricks,
             seed,
             policy: Policy::Heuristic,
             rollout_policy: Policy::Heuristic,
+            enoch_features: EnochFeatures::empty(),
         }
     }
 }

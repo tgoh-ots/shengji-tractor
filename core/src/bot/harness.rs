@@ -20,9 +20,10 @@
 //! ONLY consumer of that RNG), so two hands with the same seed get the SAME deal.
 //! Search-LESS brains ([`PlayBrain::HeuristicDirect`], [`PlayBrain::EnochGreedy`],
 //! [`PlayBrain::Easy`]) are then fully deterministic; search brains
-//! ([`PlayBrain::Tier`] with a search tier, [`PlayBrain::Search`]) are
-//! deterministic ONLY when their world cap binds before the time budget (so for a
-//! byte-identical golden run, give them a very large `SHENGJI_BOT_BUDGET_MS`).
+//! ([`PlayBrain::Tier`] with a search tier, [`PlayBrain::Search`], and the strict
+//! search variants) are deterministic ONLY when their world cap binds before the
+//! time budget (so for a byte-identical golden run, give them a sufficiently
+//! large safety deadline).
 //!
 //! # Paired evaluation
 //!
@@ -37,17 +38,24 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
 use shengji_mechanics::deck::Deck;
+use shengji_mechanics::scoring::GameScoringParameters;
+use shengji_mechanics::trick::{BombPolicy, CompoundFormats, TractorRequirements, TrickDrawPolicy};
 use shengji_mechanics::types::{Card, PlayerID, Rank};
 
 use crate::bot::heuristics::{self, HeuristicVersion, ScoredPlay};
-use crate::bot::search::{search_play, SearchConfig};
+use crate::bot::search::{
+    search_play_strict_with_report, search_play_with_report, SearchConfig, SearchTelemetry,
+};
 use crate::bot::{policy, BotDifficulty};
 use crate::game_state::draw_phase::DrawPhase;
 use crate::game_state::initialize_phase::InitializePhase;
 use crate::game_state::play_phase::PlayPhase;
 use crate::game_state::GameState;
 use crate::interactive::Action;
-use crate::settings::{GameMode, GameModeSettings};
+use crate::settings::{
+    FriendSelectionPolicy, GameMode, GameModeSettings, KittyPenalty, MultipleJoinPolicy,
+    ThrowPenalty,
+};
 
 /// How a seat plays the PLAY phase. Covers every variant the `core/examples`
 /// benchmarks need (the production tiers, plus the search-less / explicit-config
@@ -66,9 +74,31 @@ pub enum PlayBrain {
     /// (the per-decision `seed` is overwritten from the observable state). Honest
     /// (own redacted view); used by the budget A/B to vary the search config.
     Search(SearchConfig),
+    /// Authoritative counterpart to [`PlayBrain::Search`]. A missing search
+    /// result fails the hand instead of silently substituting another policy.
+    /// Week-1 gates use this variant so fallback counters are exactly zero by
+    /// construction and an incomplete orientation invalidates the shard.
+    SearchStrict(SearchConfig),
+    /// Finding Friends counterpart to [`PlayBrain::SearchStrict`]. Team
+    /// membership changes when a called friend reveals; route every decision
+    /// from the current public landlord-team membership so a newly joined
+    /// player switches configs on its next turn.
+    SearchStrictByTeam {
+        landlord_team: SearchConfig,
+        non_landlord_team: SearchConfig,
+    },
     /// The search-less Easy policy with explicit knobs (ε blunder rate + softmax
     /// temperature), used by the Easy knob A/B. Honest (own redacted view).
     Easy { epsilon: f64, temperature: f64 },
+}
+
+/// Auditable result of one play decision. Strict Week-1 evaluation records this
+/// before applying the cards, including failures that make the hand incomplete.
+#[derive(Clone, Debug)]
+pub struct PlayDecision {
+    pub cards: Option<Vec<Card>>,
+    pub search: Option<SearchTelemetry>,
+    pub policy_fallback_used: bool,
 }
 
 /// One seat's full configuration: how it plays, bids, and buries the kitty. The
@@ -128,6 +158,15 @@ pub struct HarnessConfig {
     pub decks: Vec<Deck>,
     pub game_mode: GameModeSettings,
     pub rank: Rank,
+    pub friend_selection_policy: FriendSelectionPolicy,
+    pub multiple_join_policy: MultipleJoinPolicy,
+    pub kitty_penalty: KittyPenalty,
+    pub throw_penalty: ThrowPenalty,
+    pub game_scoring_parameters: GameScoringParameters,
+    pub tractor_requirements: TractorRequirements,
+    pub trick_draw_policy: TrickDrawPolicy,
+    pub bomb_policy: BombPolicy,
+    pub compound_formats: CompoundFormats,
 }
 
 impl Default for HarnessConfig {
@@ -137,6 +176,15 @@ impl Default for HarnessConfig {
             decks: vec![Deck::default(), Deck::default()],
             game_mode: GameModeSettings::Tractor,
             rank: Rank::Number(shengji_mechanics::types::Number::Two),
+            friend_selection_policy: FriendSelectionPolicy::default(),
+            multiple_join_policy: MultipleJoinPolicy::default(),
+            kitty_penalty: KittyPenalty::default(),
+            throw_penalty: ThrowPenalty::default(),
+            game_scoring_parameters: GameScoringParameters::default(),
+            tractor_requirements: TractorRequirements::default(),
+            trick_draw_policy: TrickDrawPolicy::default(),
+            bomb_policy: BombPolicy::default(),
+            compound_formats: CompoundFormats::default(),
         }
     }
 }
@@ -218,6 +266,21 @@ pub fn seeded_draw_phase_with_config(config: &HarnessConfig, rng: &mut StdRng) -
     }
     init.set_num_decks(Some(config.decks.len())).unwrap();
     init.set_game_mode(config.game_mode).unwrap();
+    init.set_friend_selection_policy(config.friend_selection_policy)
+        .unwrap();
+    init.set_multiple_join_policy(config.multiple_join_policy)
+        .unwrap();
+    init.set_kitty_penalty(config.kitty_penalty).unwrap();
+    init.set_throw_penalty(config.throw_penalty).unwrap();
+    init.set_game_scoring_parameters(config.game_scoring_parameters.clone())
+        .unwrap();
+    init.set_tractor_requirements(config.tractor_requirements)
+        .unwrap();
+    init.set_trick_draw_policy(config.trick_draw_policy)
+        .unwrap();
+    init.set_bomb_policy(config.bomb_policy).unwrap();
+    init.set_compound_formats(config.compound_formats.clone())
+        .unwrap();
     let real_seats: Vec<PlayerID> = init.players().iter().map(|p| p.id).collect();
     for &seat in &real_seats {
         init.set_rank(seat, config.rank).unwrap();
@@ -318,6 +381,28 @@ fn easy_play(
 /// Choose the PLAY-phase cards for `actor` under its `brain`, honoring the honesty
 /// boundary (only `Omniscient` sees the unredacted state).
 pub fn play_cards_for(s: &PlayPhase, actor: PlayerID, brain: &PlayBrain) -> Option<Vec<Card>> {
+    play_cards_for_audited(s, actor, brain).cards
+}
+
+fn team_routed_search_config(
+    landlords_team: &[PlayerID],
+    actor: PlayerID,
+    landlord_team: SearchConfig,
+    non_landlord_team: SearchConfig,
+) -> SearchConfig {
+    if landlords_team.contains(&actor) {
+        landlord_team
+    } else {
+        non_landlord_team
+    }
+}
+
+pub fn play_cards_for_audited(s: &PlayPhase, actor: PlayerID, brain: &PlayBrain) -> PlayDecision {
+    let plain = |cards| PlayDecision {
+        cards,
+        search: None,
+        policy_fallback_used: false,
+    };
     match brain {
         PlayBrain::Tier(d) => {
             let view = if matches!(d, BotDifficulty::Omniscient) {
@@ -325,41 +410,94 @@ pub fn play_cards_for(s: &PlayPhase, actor: PlayerID, brain: &PlayBrain) -> Opti
             } else {
                 GameState::Play(s.clone()).for_player(actor)
             };
-            match policy::select_action(&view, actor, *d).ok()? {
-                Some(Action::PlayCards(c)) => Some(c),
-                _ => None,
-            }
+            plain(
+                match policy::select_action(&view, actor, *d).ok().flatten() {
+                    Some(Action::PlayCards(c)) => Some(c),
+                    _ => None,
+                },
+            )
         }
         PlayBrain::HeuristicDirect(version) => {
             let view = GameState::Play(s.clone()).for_player(actor);
-            match &view {
+            plain(match &view {
                 GameState::Play(pp) => heuristics::choose_play_direct(pp, actor, *version),
                 _ => None,
-            }
+            })
         }
         PlayBrain::EnochGreedy => {
             let view = GameState::Play(s.clone()).for_player(actor);
-            match &view {
+            plain(match &view {
                 GameState::Play(pp) => heuristics::choose_play_direct_enoch(pp, actor),
                 _ => None,
-            }
+            })
         }
         PlayBrain::Search(cfg) => {
             let view = GameState::Play(s.clone()).for_player(actor);
             let pp = match &view {
                 GameState::Play(pp) => pp,
-                _ => return None,
+                _ => return plain(None),
             };
             let mut config = *cfg;
             config.seed = decision_seed(pp, actor);
-            if let Some(c) = search_play(pp, actor, config) {
-                return Some(c);
+            let report = search_play_with_report(pp, actor, config);
+            if report.cards.is_some() {
+                return PlayDecision {
+                    cards: report.cards,
+                    search: Some(report.telemetry),
+                    policy_fallback_used: false,
+                };
             }
             // Same config-independent fallback the live Expert policy uses, so a
             // degenerate position never stalls the harness (and can't bias an A/B).
-            match policy::select_action(&view, actor, BotDifficulty::Expert).ok()? {
+            let cards = match policy::select_action(&view, actor, BotDifficulty::Expert)
+                .ok()
+                .flatten()
+            {
                 Some(Action::PlayCards(c)) => Some(c),
                 _ => None,
+            };
+            PlayDecision {
+                cards,
+                search: Some(report.telemetry),
+                policy_fallback_used: true,
+            }
+        }
+        PlayBrain::SearchStrict(cfg) => {
+            let view = GameState::Play(s.clone()).for_player(actor);
+            let pp = match &view {
+                GameState::Play(pp) => pp,
+                _ => return plain(None),
+            };
+            let mut config = *cfg;
+            config.seed = decision_seed(pp, actor);
+            let report = search_play_strict_with_report(pp, actor, config);
+            PlayDecision {
+                cards: report.cards,
+                search: Some(report.telemetry),
+                policy_fallback_used: false,
+            }
+        }
+        PlayBrain::SearchStrictByTeam {
+            landlord_team,
+            non_landlord_team,
+        } => {
+            let view = GameState::Play(s.clone()).for_player(actor);
+            let pp = match &view {
+                GameState::Play(pp) => pp,
+                _ => return plain(None),
+            };
+            let mut config = team_routed_search_config(
+                s.landlords_team(),
+                actor,
+                *landlord_team,
+                *non_landlord_team,
+            );
+            config.seed = decision_seed(pp, actor);
+            let report = search_play_strict_with_report(pp, actor, config);
+            PlayDecision {
+                cards: report.cards,
+                search: Some(report.telemetry),
+                policy_fallback_used: false,
             }
         }
         PlayBrain::Easy {
@@ -369,10 +507,10 @@ pub fn play_cards_for(s: &PlayPhase, actor: PlayerID, brain: &PlayBrain) -> Opti
             let view = GameState::Play(s.clone()).for_player(actor);
             let pp = match &view {
                 GameState::Play(pp) => pp,
-                _ => return None,
+                _ => return plain(None),
             };
             let mut rng = StdRng::seed_from_u64(decision_seed(pp, actor));
-            easy_play(pp, actor, *epsilon, *temperature, &mut rng)
+            plain(easy_play(pp, actor, *epsilon, *temperature, &mut rng))
         }
     }
 }
@@ -414,6 +552,21 @@ pub fn play_one_hand_with_config_instrumented<F: FnMut(&PlayPhase, PlayerID, &[C
     config: &HarnessConfig,
     rng: &mut StdRng,
     on_play: &mut F,
+) -> Option<HandResult> {
+    play_one_hand_with_config_audited(seats, config, rng, &mut |state, actor, decision| {
+        if let Some(cards) = &decision.cards {
+            on_play(state, actor, cards);
+        }
+    })
+}
+
+/// Configurable hand driver that reports every decision, including a strict
+/// search failure that prevents the hand from completing.
+pub fn play_one_hand_with_config_audited<F: FnMut(&PlayPhase, PlayerID, &PlayDecision)>(
+    seats: &[Seat],
+    config: &HarnessConfig,
+    rng: &mut StdRng,
+    on_decision: &mut F,
 ) -> Option<HandResult> {
     if seats.len() != config.num_players {
         return None;
@@ -499,8 +652,10 @@ pub fn play_one_hand_with_config_instrumented<F: FnMut(&PlayPhase, PlayerID, &[C
                         s.finish_trick().ok()?;
                     }
                     Some(actor) => {
-                        let cards = play_cards_for(s, actor, &seats[seat_idx(actor)?].play)?;
-                        on_play(s, actor, &cards);
+                        let decision =
+                            play_cards_for_audited(s, actor, &seats[seat_idx(actor)?].play);
+                        on_decision(s, actor, &decision);
+                        let cards = decision.cards?;
                         s.play_cards(actor, &cards).ok()?;
                     }
                 }
@@ -844,6 +999,7 @@ mod tests {
             decks: vec![Deck::default(), Deck::default(), Deck::default()],
             game_mode: GameModeSettings::FindingFriends { num_friends: None },
             rank: Rank::Number(shengji_mechanics::types::Number::Seven),
+            ..HarnessConfig::default()
         };
         let mut a = StdRng::seed_from_u64(0xC0FFEE);
         let mut b = StdRng::seed_from_u64(0xC0FFEE);
@@ -858,6 +1014,43 @@ mod tests {
             .players()
             .iter()
             .all(|p| p.rank() == config.rank));
+    }
+
+    #[test]
+    fn finding_friends_router_switches_after_public_join() {
+        let landlord = PlayerID(0);
+        let joining_friend = PlayerID(2);
+        let landlord_config = SearchConfig {
+            seed: 11,
+            ..SearchConfig::default()
+        };
+        let attacker_config = SearchConfig {
+            seed: 22,
+            ..SearchConfig::default()
+        };
+        let mut landlords_team = vec![landlord];
+
+        assert_eq!(
+            team_routed_search_config(
+                &landlords_team,
+                joining_friend,
+                landlord_config,
+                attacker_config,
+            )
+            .seed,
+            22
+        );
+        landlords_team.push(joining_friend);
+        assert_eq!(
+            team_routed_search_config(
+                &landlords_team,
+                joining_friend,
+                landlord_config,
+                attacker_config,
+            )
+            .seed,
+            11
+        );
     }
 
     #[test]

@@ -52,6 +52,7 @@ fn main() {
             decks: vec![Deck::default(), Deck::default(), Deck::default()],
             game_mode: GameModeSettings::Tractor,
             rank: Rank::Number(Number::Seven),
+            ..HarnessConfig::default()
         },
         hands,
         seed,
@@ -63,6 +64,7 @@ fn main() {
             decks: vec![Deck::default(), Deck::default(), Deck::default()],
             game_mode: GameModeSettings::FindingFriends { num_friends: None },
             rank: Rank::Number(Number::Ace),
+            ..HarnessConfig::default()
         },
         hands,
         seed,
@@ -85,6 +87,7 @@ fn main() {
             ],
             game_mode: GameModeSettings::Tractor,
             rank: Rank::Number(Number::Ten),
+            ..HarnessConfig::default()
         },
         hands,
         seed,

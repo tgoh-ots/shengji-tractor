@@ -11,7 +11,7 @@ use shengji_mechanics::hands::Hands;
 use shengji_mechanics::player::Player;
 use shengji_mechanics::scoring::{compute_level_deltas, next_threshold_reachable, GameScoreResult};
 use shengji_mechanics::trick::{
-    BombPolicy, PlayCards, PlayCardsMessage, PlayedCards, Trick, TrickEnded, TrickUnit,
+    BombPolicy, PlayCards, PlayCardsMessage, PlayedCards, Trick, TrickEnded, TrickFormat, TrickUnit,
 };
 use shengji_mechanics::types::{Card, EffectiveSuit, PlayerID, Rank, Trump};
 
@@ -83,6 +83,7 @@ mod void_evidence_tests {
             cards,
             bad_throw_cards: vec![],
             better_player: None,
+            attempted_format: None,
         }
     }
 
@@ -185,6 +186,12 @@ pub struct PlayPhase {
     /// metadata. The current in-progress trick remains in [`PlayPhase::trick`].
     #[serde(default)]
     public_play_history: Arc<Vec<Vec<PlayedCards>>>,
+    /// The exact mechanics-selected format for every completed public trick.
+    /// This is parallel to `public_play_history` and avoids asking bot code to
+    /// reconstruct an ambiguous throw decomposition later. Older snapshots have
+    /// no entries; callers must then decline decomposition-dependent inference.
+    #[serde(default)]
+    public_trick_formats: Arc<Vec<Option<TrickFormat>>>,
     /// False only for a mid-hand snapshot written by an older server that had an
     /// aggregate played-card multiset but no attributed history. Belief models can
     /// then degrade conservatively instead of treating missing history as evidence.
@@ -257,6 +264,7 @@ impl PlayPhase {
             last_trick: None,
             played_this_hand: HashMap::new(),
             public_play_history: Arc::new(Vec::new()),
+            public_trick_formats: Arc::new(Vec::new()),
             public_history_complete: true,
             public_bids,
             voids_this_hand: HashMap::new(),
@@ -313,6 +321,13 @@ impl PlayPhase {
     /// have already occurred, never cards remaining in a hidden hand or kitty.
     pub fn public_play_history(&self) -> &[Vec<PlayedCards>] {
         self.public_play_history.as_slice()
+    }
+
+    /// Exact, mechanics-authoritative formats parallel to completed public
+    /// history. A missing/short vector means an older snapshot cannot support
+    /// compound-follow inference for those tricks.
+    pub fn public_trick_formats(&self) -> &[Option<TrickFormat>] {
+        self.public_trick_formats.as_slice()
     }
 
     pub fn public_history_complete(&self) -> bool {
@@ -670,6 +685,12 @@ impl PlayPhase {
             self.propagated.bomb_policy,
         );
         let completed = std::mem::replace(&mut self.trick, new_trick);
+        let formats = Arc::make_mut(&mut self.public_trick_formats);
+        // A legacy snapshot can have completed play history but no parallel
+        // formats. Preserve alignment by padding every old trick with `None`
+        // before appending the new authoritative decomposition.
+        formats.resize(self.public_play_history.len(), None);
+        formats.push(completed.trick_format().cloned());
         Arc::make_mut(&mut self.public_play_history).push(completed.played_cards().to_vec());
         // Accumulate every card from the just-completed trick into the honest,
         // public full-hand play history. Tally even `Card::Unknown` plays (when
@@ -1122,6 +1143,224 @@ impl PlayPhase {
                 *card = Card::Unknown;
             }
         }
+        if game_ongoing && self.propagated.hide_played_cards {
+            self.trick.destructively_redact_played_cards();
+            if let Some(last) = &mut self.last_trick {
+                last.destructively_redact_played_cards();
+            }
+            for trick in Arc::make_mut(&mut self.public_play_history) {
+                for played in trick {
+                    for card in &mut played.cards {
+                        *card = Card::Unknown;
+                    }
+                    for card in &mut played.bad_throw_cards {
+                        *card = Card::Unknown;
+                    }
+                    played.attempted_format = None;
+                }
+            }
+            Arc::make_mut(&mut self.public_trick_formats).fill(None);
+            let played_count = self.played_this_hand.values().copied().sum();
+            self.played_this_hand.clear();
+            if played_count > 0 {
+                self.played_this_hand.insert(Card::Unknown, played_count);
+            }
+            self.voids_this_hand.clear();
+        }
+    }
+}
+
+#[cfg(test)]
+mod observation_regression_tests {
+    use super::PlayPhase;
+    use crate::settings::{GameMode, PropagatedState};
+    use serde_json::Value;
+    use shengji_mechanics::deck::Deck;
+    use shengji_mechanics::hands::Hands;
+    use shengji_mechanics::types::{Card, Number, PlayerID, Suit, Trump};
+
+    fn card(suit: Suit, number: Number) -> Card {
+        Card::Suited { suit, number }
+    }
+
+    fn play_phase(cards: [Vec<Card>; 4], hide_played_cards: bool) -> (PlayPhase, Vec<PlayerID>) {
+        let mut propagated = PropagatedState::default();
+        let ids = (0..4)
+            .map(|index| propagated.add_player(format!("p{index}")).unwrap().0)
+            .collect::<Vec<_>>();
+        propagated.set_num_decks(Some(2)).unwrap();
+        propagated.hide_played_cards(hide_played_cards).unwrap();
+        let trump = Trump::NoTrump { number: None };
+        let mut hands = Hands::new(ids.iter().copied());
+        hands.set_trump(trump);
+        for (&id, cards) in ids.iter().zip(cards) {
+            hands.add(id, cards).unwrap();
+        }
+        let play = PlayPhase::new(
+            propagated,
+            2,
+            GameMode::Tractor,
+            hands,
+            vec![],
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0], ids[2]],
+            vec![],
+            vec![Deck::default(), Deck::default()],
+            vec![],
+        )
+        .unwrap();
+        (play, ids)
+    }
+
+    #[test]
+    fn legacy_history_without_formats_stays_index_aligned_after_new_trick() {
+        let (mut play, ids) = play_phase(
+            [
+                vec![
+                    card(Suit::Clubs, Number::Three),
+                    card(Suit::Diamonds, Number::Three),
+                ],
+                vec![
+                    card(Suit::Clubs, Number::Four),
+                    card(Suit::Diamonds, Number::Four),
+                ],
+                vec![
+                    card(Suit::Clubs, Number::Five),
+                    card(Suit::Diamonds, Number::Five),
+                ],
+                vec![
+                    card(Suit::Clubs, Number::Six),
+                    card(Suit::Diamonds, Number::Six),
+                ],
+            ],
+            false,
+        );
+        for (id, number) in [
+            (ids[0], Number::Three),
+            (ids[1], Number::Four),
+            (ids[2], Number::Five),
+            (ids[3], Number::Six),
+        ] {
+            play.play_cards(id, &[card(Suit::Clubs, number)]).unwrap();
+        }
+        play.finish_trick().unwrap();
+        assert_eq!(play.public_play_history().len(), 1);
+        assert!(play.public_trick_formats()[0].is_some());
+
+        let mut serialized = serde_json::to_value(&play).unwrap();
+        serialized
+            .as_object_mut()
+            .unwrap()
+            .remove("public_trick_formats");
+        let mut restored: PlayPhase = serde_json::from_value(serialized).unwrap();
+        assert!(restored.public_trick_formats().is_empty());
+
+        for (id, number) in [
+            (ids[3], Number::Six),
+            (ids[0], Number::Three),
+            (ids[1], Number::Four),
+            (ids[2], Number::Five),
+        ] {
+            restored
+                .play_cards(id, &[card(Suit::Diamonds, number)])
+                .unwrap();
+        }
+        restored.finish_trick().unwrap();
+
+        assert_eq!(restored.public_play_history().len(), 2);
+        assert_eq!(restored.public_trick_formats().len(), 2);
+        assert!(restored.public_trick_formats()[0].is_none());
+        assert!(restored.public_trick_formats()[1].is_some());
+    }
+
+    #[test]
+    fn hidden_play_observation_redacts_every_identity_and_format_path() {
+        let c = |number| card(Suit::Clubs, number);
+        let (mut play, ids) = play_phase(
+            [
+                vec![c(Number::Three), c(Number::Three), c(Number::Five)],
+                vec![c(Number::Four), c(Number::Four)],
+                vec![c(Number::Six), c(Number::Six)],
+                vec![
+                    c(Number::Seven),
+                    c(Number::Seven),
+                    c(Number::Nine),
+                    c(Number::Nine),
+                    c(Number::Ace),
+                ],
+            ],
+            true,
+        );
+
+        play.play_cards(
+            ids[0],
+            &[c(Number::Three), c(Number::Three), c(Number::Five)],
+        )
+        .unwrap();
+        assert!(play.trick().played_cards()[0].attempted_format.is_some());
+        assert!(!play.trick().played_cards()[0].bad_throw_cards.is_empty());
+        play.play_cards(ids[1], &[c(Number::Four), c(Number::Four)])
+            .unwrap();
+        play.play_cards(ids[2], &[c(Number::Six), c(Number::Six)])
+            .unwrap();
+        play.play_cards(ids[3], &[c(Number::Seven), c(Number::Seven)])
+            .unwrap();
+        play.finish_trick().unwrap();
+
+        assert!(play.public_play_history()[0][0].attempted_format.is_some());
+        assert!(play.public_trick_formats()[0].is_some());
+        play.play_cards(ids[3], &[c(Number::Nine), c(Number::Nine), c(Number::Ace)])
+            .unwrap();
+        assert!(play.trick().trick_format().is_some());
+        assert!(play.trick().played_cards()[0].attempted_format.is_some());
+
+        let mut observed = play.clone();
+        observed.destructively_redact_for_player(ids[1]);
+
+        for played in observed.trick().played_cards() {
+            assert!(played.cards.iter().all(|card| *card == Card::Unknown));
+            assert!(played
+                .bad_throw_cards
+                .iter()
+                .all(|card| *card == Card::Unknown));
+            assert!(played.attempted_format.is_none());
+        }
+        assert!(observed.trick().trick_format().is_none());
+
+        for played in observed.public_play_history().iter().flatten() {
+            assert!(played.cards.iter().all(|card| *card == Card::Unknown));
+            assert!(played
+                .bad_throw_cards
+                .iter()
+                .all(|card| *card == Card::Unknown));
+            assert!(played.attempted_format.is_none());
+        }
+        assert!(observed.public_trick_formats().iter().all(Option::is_none));
+        let last = observed.last_trick().unwrap();
+        assert!(last.trick_format().is_none());
+        assert!(last
+            .played_cards()
+            .iter()
+            .flat_map(|played| played.cards.iter().chain(&played.bad_throw_cards))
+            .all(|card| *card == Card::Unknown));
+
+        assert_eq!(observed.played_this_hand().len(), 1);
+        assert_eq!(observed.played_this_hand().get(&Card::Unknown), Some(&8));
+        assert!(observed.voids_this_hand().is_empty());
+
+        // The serialized observation must not retain private mapping/format data
+        // through fields for which PlayPhase has no public accessor.
+        let serialized = serde_json::to_value(&observed).unwrap();
+        let current = serialized.get("trick").and_then(Value::as_object).unwrap();
+        assert!(current.get("trick_format").unwrap().is_null());
+        assert!(current
+            .get("played_card_mappings")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .all(Value::is_null));
     }
 }
 

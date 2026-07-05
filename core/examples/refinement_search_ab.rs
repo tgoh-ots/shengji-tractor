@@ -13,6 +13,7 @@
 use std::env;
 use std::time::Duration;
 
+use shengji_core::bot::enoch::EnochFeatures;
 use shengji_core::bot::harness::{print_paired_ab, run_paired_ab, Contestant, PlayBrain, Seat};
 use shengji_core::bot::heuristics::HeuristicVersion;
 use shengji_core::bot::search::{Policy, SearchConfig};
@@ -86,12 +87,14 @@ fn main() {
                 // Deliberately generous: the fixed world cap, not wall-clock
                 // contention, must bind in a cross-checkout comparison.
                 time_budget: Duration::from_secs(30),
+                require_full_work: true,
                 max_candidates,
                 max_worlds: worlds,
                 rollout_tricks,
                 seed,
                 policy,
                 rollout_policy,
+                enoch_features: EnochFeatures::empty(),
             }),
             bid: BotDifficulty::Expert,
             kitty: BotDifficulty::Easy,

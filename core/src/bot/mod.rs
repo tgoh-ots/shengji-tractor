@@ -11,6 +11,7 @@ use crate::interactive::{Action, BroadcastMessage, InteractiveGame};
 pub mod belief;
 pub mod determinize;
 pub mod endgame;
+pub mod enoch;
 pub mod expert;
 pub mod harness;
 pub mod heuristics;

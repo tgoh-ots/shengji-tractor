@@ -95,6 +95,32 @@ impl Default for GameScoringParameters {
 }
 
 impl GameScoringParameters {
+    /// Construct a custom scoring contract. Validation that depends on the
+    /// configured decks is performed by [`Self::materialize`] (and by the room
+    /// setter before the contract is accepted).
+    pub fn new(
+        step_size_per_deck: usize,
+        num_steps_to_non_landlord_turnover: usize,
+        deadzone_size: usize,
+        truncate_zero_crossing_window: bool,
+        bonus_level_policy: BonusLevelPolicy,
+    ) -> Self {
+        Self {
+            step_size_per_deck,
+            step_adjustments: HashMap::new(),
+            num_steps_to_non_landlord_turnover,
+            deadzone_size,
+            truncate_zero_crossing_window,
+            bonus_level_policy,
+        }
+    }
+
+    /// Add or replace the step-size adjustment for one deck count.
+    pub fn with_step_adjustment(mut self, num_decks: usize, adjustment: isize) -> Self {
+        self.step_adjustments.insert(num_decks, adjustment);
+        self
+    }
+
     pub fn step_size(&self, decks: &[Deck]) -> Result<usize, Error> {
         let num_decks = decks.len();
         let total_points = decks.iter().map(|d| d.points() as isize).sum::<isize>();

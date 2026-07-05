@@ -17,8 +17,9 @@ use shengji_mechanics::trick::{PlayCards, TrickUnit, UnitLike};
 use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Rank, Suit, Trump};
 
 use crate::bot::determinize::Knowledge;
+use crate::bot::enoch::EnochFeatures;
 use crate::game_state::play_phase::PlayPhase;
-use crate::settings::FriendSelection;
+use crate::settings::{FriendSelection, KittyPenalty};
 
 /// Selects which heuristic scoring implementation drives candidate evaluation.
 ///
@@ -274,6 +275,8 @@ pub struct EvalCtx {
     /// long-suit running, defender low-trump hand-off, endgame kitty protection).
     /// Honest — every fact below derives from the redacted view only.
     pub enoch: bool,
+    /// Candidate-only Week-1 hypotheses. Empty preserves frozen Enoch-0.
+    pub enoch_features: EnochFeatures,
     /// Number of cards `me` currently holds. Used by the Enoch endgame logic to
     /// detect the late game (a small hand) and to scale aggression.
     pub my_hand_size: usize,
@@ -322,7 +325,7 @@ impl EvalCtx {
     /// Build the context once for the acting player `me` from the redacted view
     /// (no Enoch playbook — used by Easy/Expert/Omniscient).
     pub fn build(p: &PlayPhase, me: PlayerID) -> Self {
-        Self::build_inner(p, me, false)
+        Self::build_inner(p, me, false, EnochFeatures::empty())
     }
 
     /// Build the context with the Enoch full-game playbook ENABLED. Identical to
@@ -330,15 +333,24 @@ impl EvalCtx {
     /// Enoch-specific lead/follow bonuses. Still HONEST — Enoch reads only the
     /// redacted per-player view.
     pub fn build_enoch(p: &PlayPhase, me: PlayerID) -> Self {
-        Self::build_inner(p, me, true)
+        Self::build_inner(p, me, true, EnochFeatures::empty())
     }
 
-    fn build_inner(p: &PlayPhase, me: PlayerID, enoch: bool) -> Self {
+    pub fn build_enoch_with_features(p: &PlayPhase, me: PlayerID, features: EnochFeatures) -> Self {
+        Self::build_inner(p, me, true, features)
+    }
+
+    fn build_inner(
+        p: &PlayPhase,
+        me: PlayerID,
+        enoch: bool,
+        enoch_features: EnochFeatures,
+    ) -> Self {
         let trump = p.trick().trump();
         // Full public memory belongs to the observation, not a difficulty tier.
         // Stronger tiers differ in policy/search rather than intentionally
         // forgetting cards every human at the table saw.
-        let k = Knowledge::from_play_view(p, me);
+        let k = Knowledge::from_play_view_with_features(p, me, enoch_features);
         let num_decks = k.num_decks.max(1);
         let me_is_attacker = !p.landlords_team().contains(&me);
         let (non_landlord_points, _) = p.calculate_points();
@@ -407,6 +419,7 @@ impl EvalCtx {
             non_landlord_turnover_score: p.bot_non_landlord_turnover_score(),
             unseen_trumps,
             enoch,
+            enoch_features,
             my_hand_size,
             my_trump_count,
             kitty_points,
@@ -695,6 +708,8 @@ fn enumerate_rainbow_counts(
 /// 1. singles/repeated units/tractors under the table's configured requirements;
 /// 2. enabled rainbows;
 /// 3. ordinary same-suit throws composed progressively from 2..N units.
+/// 4. every mechanics-legal multiset when the complete action space fits the cap
+///    and the caller permits full-hand compounds.
 ///
 /// Every proposal is validated by the mechanics engine and canonicalized, so
 /// search receives deterministic, legal candidates without a combinatorial
@@ -732,6 +747,8 @@ fn lead_candidates_with_limits(
     let mut rainbow_seen = HashSet::new();
     let mut throw_candidates: Vec<Vec<Card>> = vec![];
     let mut throw_seen = HashSet::new();
+    let mut exhaustive_candidates: Vec<Vec<Card>> = vec![];
+    let mut exhaustive_seen = HashSet::new();
 
     // Build atomic units deterministically by effective suit. Explicit repeated
     // units ensure a single card from a held pair remains available as a lead;
@@ -836,9 +853,48 @@ fn lead_candidates_with_limits(
         }
     }
 
+    // Compound formats can span both ranks and effective suits, so constructing
+    // them one named format at a time is not sufficient for every configuration
+    // (a multi-rank rainbow is one example). When the caller permits full-hand
+    // compounds and the entire physical multiset space fits its cap, enumerate
+    // it and let mechanics be the oracle. Larger hands retain the bounded
+    // structured families above.
+    let entries = hand_entries(hand, trump, |_| true);
+    let hand_size: usize = entries.iter().map(|(_, count)| count).sum();
+    let total_nonempty = (max_units >= hand_size)
+        .then(|| {
+            entries.iter().try_fold(1usize, |total, (_, available)| {
+                total
+                    .checked_mul(available.checked_add(1)?)
+                    .filter(|possibilities| possibilities.saturating_sub(1) <= cap)
+            })
+        })
+        .flatten()
+        .map(|possibilities| possibilities.saturating_sub(1));
+    if let Some(total_nonempty) = total_nonempty {
+        for size in 1..=hand_size {
+            for play in enumerate_multiset_combinations(&entries, size, total_nonempty.max(1)) {
+                push_legal_candidate(
+                    p,
+                    me,
+                    trump,
+                    play,
+                    &mut exhaustive_candidates,
+                    &mut exhaustive_seen,
+                    cap,
+                );
+            }
+        }
+    }
+
     let mut candidates = merge_candidate_families(
         trump,
-        vec![atomic_candidates, rainbow_candidates, throw_candidates],
+        vec![
+            atomic_candidates,
+            rainbow_candidates,
+            throw_candidates,
+            exhaustive_candidates,
+        ],
         cap,
     );
     if candidates.is_empty() {
@@ -1663,7 +1719,7 @@ pub fn score_lead(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
     }
 
     if ctx.enoch {
-        score += enoch_lead_bonus(ctx, p, lead, trumping, is_boss, len);
+        score += enoch_lead_bonus(ctx, p, cards, lead, trumping, is_boss, len);
     }
 
     score
@@ -1705,9 +1761,23 @@ fn my_best_nontrump_is_boss(ctx: &EvalCtx, p: &PlayPhase) -> bool {
     false
 }
 
+fn projected_kitty_multiplier(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> isize {
+    if !ctx.enoch_features.contains(EnochFeatures::RUFF_SHAPE) {
+        return 2;
+    }
+    let largest = post_play_ruff_shape(p, ctx.me, cards)
+        .map(|shape| shape.largest_trump_unit.max(1))
+        .unwrap_or(1);
+    match p.propagated().kitty_penalty {
+        KittyPenalty::Times => (2usize.saturating_mul(largest)) as isize,
+        KittyPenalty::Power => 2usize.saturating_pow(largest.min(20) as u32) as isize,
+    }
+}
+
 fn enoch_lead_bonus(
     ctx: &EvalCtx,
     p: &PlayPhase,
+    cards: &[Card],
     lead: Card,
     trumping: bool,
     is_boss: bool,
@@ -1832,6 +1902,46 @@ fn enoch_lead_bonus(
             if in_suit >= 4 && pairs >= 1 {
                 bonus += 1.0 * pairs as f64;
             }
+
+            if ctx
+                .enoch_features
+                .contains(EnochFeatures::LIVE_SUIT_CONTROL)
+            {
+                let unseen_elsewhere = ctx
+                    .k
+                    .configured_counts
+                    .iter()
+                    .filter(|(card, _)| trump.effective_suit(**card) == eff)
+                    .map(|(card, configured)| {
+                        configured.saturating_sub(ctx.k.seen.get(card).copied().unwrap_or(0))
+                    })
+                    .sum::<usize>();
+                let live = in_suit + unseen_elsewhere;
+                let share = if live == 0 {
+                    0.0
+                } else {
+                    in_suit as f64 / live as f64
+                };
+                let single_halters = unseen_dominators(&ctx.k, trump, lead);
+                let pair_halters =
+                    boss_stronger_cards_in_suit(trump, eff, boss_strength(trump, lead))
+                        .into_iter()
+                        .filter(|card| {
+                            ctx.k
+                                .configured_copies(*card)
+                                .saturating_sub(ctx.k.seen.get(card).copied().unwrap_or(0))
+                                >= 2
+                        })
+                        .count();
+                // Replace raw length confidence with an honest relative read:
+                // owning most live cards is useful, while remaining higher
+                // single/pair halters keep the bonus modest.
+                bonus += (share - 0.35).max(0.0) * 8.0;
+                bonus -= single_halters.min(3) as f64 * 0.35;
+                if len >= 2.0 {
+                    bonus -= pair_halters.min(2) as f64 * 0.75;
+                }
+            }
         }
     }
 
@@ -1854,6 +1964,7 @@ fn enoch_lead_bonus(
         let mut partner_void = false;
         let mut opp_total = 0usize;
         let mut opp_void = 0usize;
+        let mut opp_can_ruff = 0usize;
         for player in p.propagated().players() {
             let pid = player.id;
             if pid == ctx.me {
@@ -1871,6 +1982,14 @@ fn enoch_lead_bonus(
                 opp_total += 1;
                 if void_here {
                     opp_void += 1;
+                    let known_void_in_trump = ctx
+                        .k
+                        .voids
+                        .get(&pid)
+                        .is_some_and(|voids| voids.contains(&EffectiveSuit::Trump));
+                    if !known_void_in_trump {
+                        opp_can_ruff += 1;
+                    }
                 }
             }
         }
@@ -1887,6 +2006,33 @@ fn enoch_lead_bonus(
         // (b) Trump drain: every opponent void → reward dumping the multi-card unit.
         if opp_total > 0 && opp_void == opp_total && len >= 2.0 {
             bonus += 2.0 + (len - 1.0) * 1.5;
+        }
+
+        if ctx.enoch_features.contains(EnochFeatures::TEAM_VOID) && opp_can_ruff > 0 && is_boss {
+            // "Boss in suit" is not boss against a publicly void opponent who
+            // may ruff. Keep it available, but remove the automatic cashing
+            // confidence and protect point-bearing leads most strongly.
+            let points = lead.points().unwrap_or(0) as f64;
+            bonus -= 3.0 + points * 0.4 + opp_can_ruff as f64;
+        }
+
+        if ctx.enoch_features.contains(EnochFeatures::ENTRY_RETURN) {
+            if let Some(previous) = p.last_trick() {
+                let previous_leader = previous.played_cards().first().map(|play| play.id);
+                let previous_winner = previous.winner_so_far();
+                let return_suit = previous
+                    .played_cards()
+                    .first()
+                    .and_then(|play| play.cards.first())
+                    .map(|card| trump.effective_suit(*card));
+                if previous_leader
+                    .is_some_and(|leader| leader != ctx.me && same_team(p, ctx.me, leader))
+                    && previous_winner.is_some_and(|winner| same_team(p, ctx.me, winner))
+                    && return_suit == Some(eff)
+                {
+                    bonus += 3.0;
+                }
+            }
         }
     }
 
@@ -1915,6 +2061,25 @@ fn enoch_lead_bonus(
             // Offset most (not all) of the -5 hoard penalty: a deliberate hand-off
             // with a SMALL trump (never a joker / rank card).
             bonus += 4.0;
+            if ctx
+                .enoch_features
+                .contains(EnochFeatures::HANDOFF_PROTECTION)
+            {
+                let before = post_play_ruff_shape(p, ctx.me, &[]);
+                let after = post_play_ruff_shape(p, ctx.me, &[lead]);
+                let destroys_only_shape = before.zip(after).is_some_and(|(before, after)| {
+                    before.nontrumps > 0
+                        && before.trump_pair_capacity > 0
+                        && (after.trump_pair_capacity < before.trump_pair_capacity
+                            || after.largest_trump_unit < before.largest_trump_unit)
+                });
+                let kitty_live = ctx.kitty_points.unwrap_or(0) >= 10;
+                if destroys_only_shape && kitty_live {
+                    // Remove the handoff reward and make the destructive line
+                    // clearly worse than retaining the response structure.
+                    bonus -= 10.0;
+                }
+            }
         }
     }
 
@@ -1927,7 +2092,7 @@ fn enoch_lead_bonus(
     if let Some(kp) = ctx.kitty_points {
         // The attacking side takes DOUBLE the kitty if they win the last trick,
         // so a 10-point kitty is effectively 20 at stake.
-        let at_stake = kp * 2;
+        let at_stake = kp * projected_kitty_multiplier(ctx, p, cards);
         if at_stake >= 20 && late > 0.0 && !is_boss && len < 2.0 {
             let spend = boss_strength(trump, lead).min(998) as f64;
             // Spending a strong card (high trump / boss-ish) on a throwaway lead
@@ -2518,6 +2683,28 @@ pub fn score_follow(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
         }
     }
 
+    if ctx
+        .enoch_features
+        .contains(EnochFeatures::CONTEXTUAL_EMPTY_TRICK)
+        && pot_points == 0
+        && my_point_contribution == 0
+    {
+        if trumping_in && would_beat {
+            // Empty control is not intrinsically worth a trump. Point pots,
+            // threshold crossings, and partner protection remain governed by
+            // the stronger branches above; this only prices the empty case.
+            score -= 5.0;
+        }
+        if !would_beat
+            && post_play_ruff_shape(p, ctx.me, cards)
+                .is_some_and(|shape| shape.nontrumps == 0 && shape.trumps > 0)
+        {
+            // Shedding the final nontrump creates a concrete all-trump response
+            // shape for the multiplied-kitty endgame.
+            score += 4.0;
+        }
+    }
+
     if ctx.enoch {
         // --- Dump points to a WINNING PARTNER (Trip Holder) ----------------
         // "If your partner is winning — dropping a big joker / small joker and
@@ -2563,7 +2750,7 @@ pub fn score_follow(ctx: &EvalCtx, p: &PlayPhase, cards: &[Card]) -> f64 {
         // long as it is less than the doubled kitty at stake. We damp trumping in
         // on a low pot when the (doubled) kitty is large and the game is late.
         if let Some(kp) = ctx.kitty_points {
-            let at_stake = kp * 2;
+            let at_stake = kp * projected_kitty_multiplier(ctx, p, cards);
             let late = ctx.my_hand_size <= 8;
             if at_stake >= 20 && late && trumping_in && pot_points < (at_stake as i32) {
                 // Discourage burning a trump to win a pot smaller than the kitty
@@ -2804,7 +2991,15 @@ fn enoch_throw_candidates(ctx: &EvalCtx, p: &PlayPhase, me: PlayerID) -> Vec<Vec
 /// augmented with Enoch-only multi-unit throws. Used by the Enoch tier (directly
 /// and as the search prior / rollout policy).
 pub fn ranked_leads_enoch(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
-    let ctx = EvalCtx::build_enoch(p, me);
+    ranked_leads_enoch_with_features(p, me, EnochFeatures::empty())
+}
+
+pub(crate) fn ranked_leads_enoch_with_features(
+    p: &PlayPhase,
+    me: PlayerID,
+    features: EnochFeatures,
+) -> Vec<ScoredPlay> {
+    let ctx = EvalCtx::build_enoch_with_features(p, me, features);
     // Augment the shared bounded candidates with the playbook's larger safe
     // full-suit/subset throws, then de-duplicate.
     let mut cand_sets = lead_candidates(p, me);
@@ -2812,7 +3007,10 @@ pub fn ranked_leads_enoch(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
     dedup_card_sets(&mut cand_sets);
     let mut scored: Vec<ScoredPlay> = cand_sets
         .into_iter()
-        .filter(|cards| admissible_ranked_lead(&ctx, p, cards))
+        .filter(|cards| {
+            features.contains(EnochFeatures::UNCERTAIN_THROWS)
+                || admissible_ranked_lead(&ctx, p, cards)
+        })
         .map(|cards| {
             let score = score_lead(&ctx, p, &cards);
             ScoredPlay { cards, score }
@@ -2830,8 +3028,17 @@ pub fn ranked_leads_enoch(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
 /// Enoch-policy counterpart to [`ranked_leads_unfiltered`]. This widens only
 /// root proposals for exact-world validation; normal Enoch rankings and all
 /// rollout rankings continue to reject unproven Joker compounds.
+#[cfg(test)]
 pub(crate) fn ranked_leads_enoch_unfiltered(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
-    let ctx = EvalCtx::build_enoch(p, me);
+    ranked_leads_enoch_unfiltered_with_features(p, me, EnochFeatures::empty())
+}
+
+pub(crate) fn ranked_leads_enoch_unfiltered_with_features(
+    p: &PlayPhase,
+    me: PlayerID,
+    features: EnochFeatures,
+) -> Vec<ScoredPlay> {
+    let ctx = EvalCtx::build_enoch_with_features(p, me, features);
     let mut candidates = lead_candidates(p, me);
     candidates.extend(enoch_throw_candidates(&ctx, p, me));
     dedup_card_sets(&mut candidates);
@@ -2849,7 +3056,15 @@ pub(crate) fn ranked_leads_enoch_unfiltered(p: &PlayPhase, me: PlayerID) -> Vec<
 /// Rank the legal follow candidates with the Enoch playbook ENABLED. See
 /// [`ranked_leads_enoch`].
 pub fn ranked_follows_enoch(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
-    let ctx = EvalCtx::build_enoch(p, me);
+    ranked_follows_enoch_with_features(p, me, EnochFeatures::empty())
+}
+
+pub(crate) fn ranked_follows_enoch_with_features(
+    p: &PlayPhase,
+    me: PlayerID,
+    features: EnochFeatures,
+) -> Vec<ScoredPlay> {
+    let ctx = EvalCtx::build_enoch_with_features(p, me, features);
     let mut scored: Vec<ScoredPlay> = follow_candidates(p, me)
         .into_iter()
         .map(|cards| {
@@ -2865,14 +3080,26 @@ pub fn ranked_follows_enoch(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
     scored
 }
 
+#[cfg(test)]
 pub(crate) fn ranked_leads_enoch_for_rollout(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
-    let ctx = EvalCtx::build_enoch(p, me);
+    ranked_leads_enoch_for_rollout_with_features(p, me, EnochFeatures::empty())
+}
+
+pub(crate) fn ranked_leads_enoch_for_rollout_with_features(
+    p: &PlayPhase,
+    me: PlayerID,
+    features: EnochFeatures,
+) -> Vec<ScoredPlay> {
+    let ctx = EvalCtx::build_enoch_with_features(p, me, features);
     let mut candidates = rollout_lead_candidates(p, me);
     candidates.extend(enoch_throw_candidates(&ctx, p, me));
     dedup_card_sets(&mut candidates);
     let mut scored: Vec<ScoredPlay> = candidates
         .into_iter()
-        .filter(|cards| admissible_ranked_lead(&ctx, p, cards))
+        .filter(|cards| {
+            features.contains(EnochFeatures::UNCERTAIN_THROWS)
+                || admissible_ranked_lead(&ctx, p, cards)
+        })
         .map(|cards| ScoredPlay {
             score: score_lead(&ctx, p, &cards),
             cards,
@@ -2883,8 +3110,17 @@ pub(crate) fn ranked_leads_enoch_for_rollout(p: &PlayPhase, me: PlayerID) -> Vec
     scored
 }
 
+#[cfg(test)]
 pub(crate) fn ranked_follows_enoch_for_rollout(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
-    let ctx = EvalCtx::build_enoch(p, me);
+    ranked_follows_enoch_for_rollout_with_features(p, me, EnochFeatures::empty())
+}
+
+pub(crate) fn ranked_follows_enoch_for_rollout_with_features(
+    p: &PlayPhase,
+    me: PlayerID,
+    features: EnochFeatures,
+) -> Vec<ScoredPlay> {
+    let ctx = EvalCtx::build_enoch_with_features(p, me, features);
     let mut scored: Vec<ScoredPlay> = rollout_follow_candidates(p, me)
         .into_iter()
         .map(|cards| ScoredPlay {
@@ -5159,6 +5395,228 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_handoff_protection_keeps_the_only_final_pair_shape() {
+        let ids: Vec<PlayerID> = (0..4).map(PlayerID).collect();
+        let mut propagated = PropagatedState::default();
+        propagated.players = ids
+            .iter()
+            .map(|id| Player::new(*id, format!("p{}", id.0)))
+            .collect();
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let low_trump = card(Number::Three, Suit::Hearts);
+        let mut hands = Hands::new(ids.iter().copied());
+        hands.set_trump(trump);
+        hands
+            .add(
+                ids[0],
+                [low_trump, low_trump, card(Number::Six, Suit::Clubs)],
+            )
+            .unwrap();
+        hands
+            .add(ids[1], [card(Number::Four, Suit::Spades)])
+            .unwrap();
+        hands
+            .add(ids[2], [card(Number::Five, Suit::Spades)])
+            .unwrap();
+        hands
+            .add(ids[3], [card(Number::Six, Suit::Spades)])
+            .unwrap();
+        let pp = PlayPhase::new(
+            propagated,
+            2,
+            GameMode::Tractor,
+            hands,
+            vec![card(Number::King, Suit::Diamonds)],
+            trump,
+            ids[0],
+            ids[0],
+            vec![ids[0], ids[2]],
+            vec![],
+            vec![Deck::default(), Deck::default()],
+            vec![],
+        )
+        .unwrap();
+        let control = EvalCtx::build_enoch(&pp, ids[0]);
+        let protected =
+            EvalCtx::build_enoch_with_features(&pp, ids[0], EnochFeatures::HANDOFF_PROTECTION);
+        let control_score = score_lead(&control, &pp, &[low_trump]);
+        let protected_score = score_lead(&protected, &pp, &[low_trump]);
+        assert!(
+            protected_score <= control_score - 9.0,
+            "destroying the only retained pair must suppress the handoff: {} vs {}",
+            protected_score,
+            control_score,
+        );
+    }
+
+    #[test]
+    fn test_contextual_empty_trick_prices_shed_against_trump_spend() {
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let lead = card(Number::Three, Suit::Clubs);
+        let ruff = card(Number::Three, Suit::Hearts);
+        let shed = card(Number::Four, Suit::Diamonds);
+        let (mut pp, ids) = make_play_phase_decks(
+            [
+                vec![lead],
+                vec![ruff, shed],
+                vec![card(Number::Four, Suit::Clubs)],
+                vec![card(Number::Five, Suit::Clubs)],
+            ],
+            2,
+            trump,
+        );
+        pp.play_cards(ids[0], &[lead]).unwrap();
+        let control = EvalCtx::build_enoch(&pp, ids[1]);
+        let contextual =
+            EvalCtx::build_enoch_with_features(&pp, ids[1], EnochFeatures::CONTEXTUAL_EMPTY_TRICK);
+        let control_gap =
+            score_follow(&control, &pp, &[ruff]) - score_follow(&control, &pp, &[shed]);
+        let contextual_gap =
+            score_follow(&contextual, &pp, &[ruff]) - score_follow(&contextual, &pp, &[shed]);
+        assert!(
+            contextual_gap <= control_gap - 8.0,
+            "the empty-pot arm must move preference toward shedding: {} vs {}",
+            contextual_gap,
+            control_gap,
+        );
+    }
+
+    #[test]
+    fn test_live_suit_control_uses_relative_share() {
+        let trump = Trump::Standard {
+            suit: Suit::Hearts,
+            number: Number::Two,
+        };
+        let ace = card(Number::Ace, Suit::Spades);
+        let mut long_spades = vec![ace];
+        for number in [
+            Number::Three,
+            Number::Four,
+            Number::Five,
+            Number::Six,
+            Number::Seven,
+        ] {
+            long_spades.extend([card(number, Suit::Spades); 2]);
+        }
+        let (pp, ids) = make_play_phase_decks(
+            [
+                long_spades,
+                vec![card(Number::Seven, Suit::Clubs)],
+                vec![card(Number::Eight, Suit::Clubs)],
+                vec![card(Number::Nine, Suit::Clubs)],
+            ],
+            2,
+            trump,
+        );
+        let control = EvalCtx::build_enoch(&pp, ids[0]);
+        let relative =
+            EvalCtx::build_enoch_with_features(&pp, ids[0], EnochFeatures::LIVE_SUIT_CONTROL);
+        assert!(
+            score_lead(&relative, &pp, &[ace]) > score_lead(&control, &pp, &[ace]),
+            "owning a large share of the live suit should add an honest control bonus"
+        );
+    }
+
+    #[test]
+    fn test_team_void_only_discounts_a_boss_when_the_void_opponent_can_ruff() {
+        let ace = card(Number::Ace, Suit::Clubs);
+        let (pp, ids) = make_play_phase([
+            vec![ace, card(Number::Three, Suit::Spades)],
+            vec![card(Number::Four, Suit::Diamonds)],
+            vec![card(Number::Five, Suit::Diamonds)],
+            vec![card(Number::Six, Suit::Diamonds)],
+        ]);
+        let mut control = EvalCtx::build_enoch(&pp, ids[0]);
+        let mut empty = EvalCtx::build_enoch_with_features(&pp, ids[0], EnochFeatures::empty());
+        let mut team_void =
+            EvalCtx::build_enoch_with_features(&pp, ids[0], EnochFeatures::TEAM_VOID);
+
+        for ctx in [&mut control, &mut empty, &mut team_void] {
+            ctx.k.voids.insert(ids[1], vec![EffectiveSuit::Clubs]);
+        }
+        let control_score = score_lead(&control, &pp, &[ace]);
+        let empty_score = score_lead(&empty, &pp, &[ace]);
+        let exposed_score = score_lead(&team_void, &pp, &[ace]);
+        assert!((empty_score - control_score).abs() < 1e-9);
+        assert!(
+            exposed_score <= control_score - 4.0,
+            "a publicly void opponent with possible trump must suppress boss confidence: {} vs {}",
+            exposed_score,
+            control_score,
+        );
+
+        for ctx in [&mut control, &mut empty, &mut team_void] {
+            ctx.k
+                .voids
+                .insert(ids[1], vec![EffectiveSuit::Clubs, EffectiveSuit::Trump]);
+        }
+        let control_score = score_lead(&control, &pp, &[ace]);
+        let empty_score = score_lead(&empty, &pp, &[ace]);
+        let unable_to_ruff_score = score_lead(&team_void, &pp, &[ace]);
+        assert!((empty_score - control_score).abs() < 1e-9);
+        assert!(
+            (unable_to_ruff_score - control_score).abs() < 1e-9,
+            "a player known void in both the led suit and trump cannot ruff: {} vs {}",
+            unable_to_ruff_score,
+            control_score,
+        );
+    }
+
+    #[test]
+    fn test_entry_return_only_rewards_returning_a_teammates_entry_suit() {
+        let club_three = card(Number::Three, Suit::Clubs);
+        let club_four = card(Number::Four, Suit::Clubs);
+        let club_five = card(Number::Five, Suit::Clubs);
+        let club_six = card(Number::Six, Suit::Clubs);
+        let club_ace = card(Number::Ace, Suit::Clubs);
+        let diamond_six = card(Number::Six, Suit::Diamonds);
+        let (mut pp, ids) = make_play_phase([
+            vec![club_three, card(Number::Three, Suit::Diamonds)],
+            vec![club_four, card(Number::Four, Suit::Diamonds)],
+            vec![club_ace, club_six, diamond_six],
+            vec![club_five, card(Number::Five, Suit::Diamonds)],
+        ]);
+        pp.play_cards(ids[0], &[club_three]).unwrap();
+        pp.play_cards(ids[1], &[club_four]).unwrap();
+        pp.play_cards(ids[2], &[club_ace]).unwrap();
+        pp.play_cards(ids[3], &[club_five]).unwrap();
+        pp.finish_trick().unwrap();
+        assert_eq!(pp.next_player().unwrap(), ids[2]);
+
+        let control = EvalCtx::build_enoch(&pp, ids[2]);
+        let empty = EvalCtx::build_enoch_with_features(&pp, ids[2], EnochFeatures::empty());
+        let entry_return =
+            EvalCtx::build_enoch_with_features(&pp, ids[2], EnochFeatures::ENTRY_RETURN);
+        let control_return = score_lead(&control, &pp, &[club_six]);
+        let empty_return = score_lead(&empty, &pp, &[club_six]);
+        let featured_return = score_lead(&entry_return, &pp, &[club_six]);
+        assert!((empty_return - control_return).abs() < 1e-9);
+        assert!(
+            (featured_return - control_return - 3.0).abs() < 1e-9,
+            "returning the entry suit should receive only its isolated bonus: {} vs {}",
+            featured_return,
+            control_return,
+        );
+
+        let control_other = score_lead(&control, &pp, &[diamond_six]);
+        let empty_other = score_lead(&empty, &pp, &[diamond_six]);
+        let featured_other = score_lead(&entry_return, &pp, &[diamond_six]);
+        assert!((empty_other - control_other).abs() < 1e-9);
+        assert!(
+            (featured_other - control_other).abs() < 1e-9,
+            "ENTRY_RETURN must not affect a different-suit lead: {} vs {}",
+            featured_other,
+            control_other,
+        );
+    }
+
     /// Trip Holder #3 — dump points to a WINNING PARTNER. When our partner is
     /// winning the trick (here with a locked boss), Enoch should DROP a 10-point
     /// card rather than hoard a low card. The Enoch follow bonus must raise the
@@ -5419,6 +5877,7 @@ mod tests {
             seen,
             voids: HashMap::new(),
             hidden_counts: HashMap::new(),
+            unknown_public_cards: 0,
             known_holding: HashMap::new(),
             trump,
             num_decks: 1,
@@ -5462,6 +5921,7 @@ mod tests {
             seen: HashMap::new(),
             voids: HashMap::new(),
             hidden_counts: HashMap::new(),
+            unknown_public_cards: 0,
             known_holding: HashMap::new(),
             trump,
             num_decks: 1,
@@ -5560,6 +6020,279 @@ mod tests {
             generated, exhaustive,
             "bounded exhaustive fallback must cover every legal small-hand follow"
         );
+    }
+
+    fn physical_subset_oracle(p: &PlayPhase, actor: PlayerID) -> HashSet<Vec<char>> {
+        let hand = p
+            .hands()
+            .get(actor)
+            .unwrap()
+            .iter()
+            .flat_map(|(&card, &count)| std::iter::repeat_n(card, count))
+            .collect::<Vec<_>>();
+        assert!(hand.len() < usize::BITS as usize);
+        let mut legal = HashSet::new();
+        for mask in 1usize..(1usize << hand.len()) {
+            let cards = hand
+                .iter()
+                .enumerate()
+                .filter_map(|(index, card)| ((mask >> index) & 1 == 1).then_some(*card))
+                .collect::<Vec<_>>();
+            if p.can_play_cards(actor, &cards).is_ok() {
+                let mut key = cards.iter().map(|card| card.as_char()).collect::<Vec<_>>();
+                key.sort_unstable();
+                legal.insert(key);
+            }
+        }
+        legal
+    }
+
+    fn assert_exact_legal_coverage(
+        label: &str,
+        p: &PlayPhase,
+        actor: PlayerID,
+        generated: Vec<Vec<Card>>,
+    ) {
+        let mut generated_keys = HashSet::new();
+        for cards in &generated {
+            assert!(
+                p.can_play_cards(actor, cards).is_ok(),
+                "{}: generated illegal action {:?}",
+                label,
+                cards
+            );
+            let mut key = cards.iter().map(|card| card.as_char()).collect::<Vec<_>>();
+            key.sort_unstable();
+            assert!(
+                generated_keys.insert(key),
+                "{}: generated the same physical multiset twice",
+                label
+            );
+        }
+        assert_eq!(
+            generated_keys,
+            physical_subset_oracle(p, actor),
+            "{label}: generator and mechanics legal-action oracle diverged"
+        );
+    }
+
+    #[test]
+    fn exhaustive_small_leads_match_mechanics_across_rule_variants() {
+        use shengji_mechanics::trick::{BombPolicy, CompoundFormats, TractorRequirements};
+
+        let s = |number| card(number, Suit::Spades);
+        let c = |number| card(number, Suit::Clubs);
+        let rainbow_rank = |number| {
+            [Suit::Clubs, Suit::Diamonds, Suit::Hearts, Suit::Spades]
+                .iter()
+                .map(|suit| card(number, *suit))
+                .collect::<Vec<_>>()
+        };
+        let mut two_rank_rainbow = rainbow_rank(Number::Three);
+        two_rank_rainbow.extend(rainbow_rank(Number::Four));
+
+        let cases = vec![
+            (
+                "default-tractors",
+                vec![
+                    s(Number::Three),
+                    s(Number::Three),
+                    s(Number::Four),
+                    s(Number::Four),
+                    s(Number::Six),
+                ],
+                TractorRequirements::default(),
+                BombPolicy::NoBombs,
+                CompoundFormats::default(),
+            ),
+            (
+                "triple-tractors",
+                vec![
+                    s(Number::Three),
+                    s(Number::Three),
+                    s(Number::Four),
+                    s(Number::Four),
+                    s(Number::Six),
+                ],
+                TractorRequirements {
+                    min_count: 3,
+                    min_length: 2,
+                },
+                BombPolicy::NoBombs,
+                CompoundFormats::default(),
+            ),
+            (
+                "bombs-disabled",
+                vec![c(Number::Three); 4]
+                    .into_iter()
+                    .chain([s(Number::Four)])
+                    .collect(),
+                TractorRequirements::default(),
+                BombPolicy::NoBombs,
+                CompoundFormats::default(),
+            ),
+            (
+                "bombs-enabled",
+                vec![c(Number::Three); 4]
+                    .into_iter()
+                    .chain([s(Number::Four)])
+                    .collect(),
+                TractorRequirements::default(),
+                BombPolicy::AllowBombs,
+                CompoundFormats::default(),
+            ),
+            (
+                "rainbows-disabled",
+                two_rank_rainbow.clone(),
+                TractorRequirements::default(),
+                BombPolicy::NoBombs,
+                CompoundFormats::default(),
+            ),
+            (
+                "multi-rank-rainbows-enabled",
+                two_rank_rainbow,
+                TractorRequirements::default(),
+                BombPolicy::NoBombs,
+                CompoundFormats { rainbows: Some(4) },
+            ),
+        ];
+
+        for (label, hand, tractors, bombs, compounds) in cases {
+            let hand_size = hand.len();
+            let (mut p, ids) = make_play_phase_decks(
+                [
+                    hand,
+                    vec![c(Number::Five)],
+                    vec![c(Number::Six)],
+                    vec![c(Number::Seven)],
+                ],
+                4,
+                std_trump(Suit::Hearts),
+            );
+            p.propagated_mut().tractor_requirements = tractors;
+            p.propagated_mut().bomb_policy = bombs;
+            p.propagated_mut().compound_formats = compounds;
+            assert_exact_legal_coverage(
+                label,
+                &p,
+                ids[0],
+                lead_candidates_with_limits(&p, ids[0], 4096, hand_size),
+            );
+        }
+    }
+
+    #[test]
+    fn exhaustive_small_follows_match_mechanics_across_rule_variants() {
+        use shengji_mechanics::trick::{BombPolicy, CompoundFormats, TractorRequirements};
+
+        let s = |number| card(number, Suit::Spades);
+        let c = |number| card(number, Suit::Clubs);
+        let rainbow_rank = |number| {
+            [Suit::Clubs, Suit::Diamonds, Suit::Hearts, Suit::Spades]
+                .iter()
+                .map(|suit| card(number, *suit))
+                .collect::<Vec<_>>()
+        };
+        let high_tractor = vec![
+            s(Number::Queen),
+            s(Number::Queen),
+            s(Number::King),
+            s(Number::King),
+        ];
+        let low_structure = vec![
+            s(Number::Three),
+            s(Number::Three),
+            s(Number::Four),
+            s(Number::Four),
+            s(Number::Six),
+        ];
+        let bomb_hand = vec![
+            c(Number::Three),
+            c(Number::Three),
+            c(Number::Three),
+            c(Number::Three),
+            s(Number::Three),
+            s(Number::Four),
+        ];
+        let mut rainbow_follower = rainbow_rank(Number::Four);
+        rainbow_follower.extend([c(Number::Five), card(Number::Six, Suit::Diamonds)]);
+
+        let cases = vec![
+            (
+                "default-tractor-follow",
+                high_tractor.clone(),
+                low_structure.clone(),
+                TractorRequirements::default(),
+                BombPolicy::NoBombs,
+                CompoundFormats::default(),
+            ),
+            (
+                "triple-requirement-follow",
+                high_tractor.clone(),
+                low_structure,
+                TractorRequirements {
+                    min_count: 3,
+                    min_length: 2,
+                },
+                BombPolicy::NoBombs,
+                CompoundFormats::default(),
+            ),
+            (
+                "bomb-follow-disabled",
+                high_tractor.clone(),
+                bomb_hand.clone(),
+                TractorRequirements::default(),
+                BombPolicy::NoBombs,
+                CompoundFormats::default(),
+            ),
+            (
+                "bomb-follow-unrestricted",
+                high_tractor.clone(),
+                bomb_hand.clone(),
+                TractorRequirements::default(),
+                BombPolicy::AllowBombs,
+                CompoundFormats::default(),
+            ),
+            (
+                "bomb-follow-suit-restricted",
+                high_tractor,
+                bomb_hand,
+                TractorRequirements::default(),
+                BombPolicy::AllowBombsSuitFollowing,
+                CompoundFormats::default(),
+            ),
+            (
+                "rainbow-follow",
+                rainbow_rank(Number::Three),
+                rainbow_follower,
+                TractorRequirements::default(),
+                BombPolicy::NoBombs,
+                CompoundFormats { rainbows: Some(4) },
+            ),
+        ];
+
+        for (label, lead, follower, tractors, bombs, compounds) in cases {
+            let (mut p, ids) = make_play_phase_decks(
+                [
+                    lead.clone(),
+                    follower,
+                    vec![c(Number::Six)],
+                    vec![c(Number::Seven)],
+                ],
+                4,
+                std_trump(Suit::Hearts),
+            );
+            p.propagated_mut().tractor_requirements = tractors;
+            p.propagated_mut().bomb_policy = bombs;
+            p.propagated_mut().compound_formats = compounds;
+            p.play_cards(ids[0], &lead).unwrap();
+            assert_exact_legal_coverage(
+                label,
+                &p,
+                ids[1],
+                follow_candidates_with_cap(&p, ids[1], 4096),
+            );
+        }
     }
 
     #[test]

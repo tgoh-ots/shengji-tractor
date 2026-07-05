@@ -14,3 +14,6 @@ backend/.env
 # Local server state dumps
 shengji_*.json
 sj_smoke_*.json
+
+# Local authoritative experiment outputs
+/.enoch-week1-runs/

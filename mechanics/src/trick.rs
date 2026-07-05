@@ -240,6 +240,13 @@ impl TrickFormat {
         self.is_rainbow
     }
 
+    /// The exact mechanics-selected decomposition. Consumers that reason about
+    /// pairs, tractors, throws, or kitty multipliers must use this rather than
+    /// independently re-running an ambiguous decomposition search.
+    pub fn units(&self) -> &[TrickUnit] {
+        &self.units
+    }
+
     pub fn decomposition(
         &self,
         trick_draw_policy: TrickDrawPolicy,
@@ -577,6 +584,11 @@ pub struct PlayedCards {
     pub cards: Vec<Card>,
     pub bad_throw_cards: Vec<Card>,
     pub better_player: Option<PlayerID>,
+    /// Exact decomposition selected for the original compound lead before a
+    /// failed throw was reduced to its forced unit. This preserves a human's
+    /// explicit format hint for later public-evidence reconstruction.
+    #[serde(default)]
+    pub attempted_format: Option<TrickFormat>,
 }
 
 pub struct PlayCards<'a, 'b, 'c> {
@@ -629,6 +641,24 @@ impl Trick {
 
     pub fn played_cards(&self) -> &'_ [PlayedCards] {
         &self.played_cards
+    }
+
+    /// Remove card identities and decomposition metadata for rulesets that hide
+    /// played cards. The queue/winner remain available as public turn state, but
+    /// no bot observation can recover identities through `TrickFormat`, mappings,
+    /// rejected throw cards, or the original hinted format.
+    pub fn destructively_redact_played_cards(&mut self) {
+        for played in &mut self.played_cards {
+            for card in &mut played.cards {
+                *card = Card::Unknown;
+            }
+            for card in &mut played.bad_throw_cards {
+                *card = Card::Unknown;
+            }
+            played.attempted_format = None;
+        }
+        self.trick_format = None;
+        self.played_card_mappings.fill(None);
     }
 
     pub fn next_player(&self) -> Option<PlayerID> {
@@ -736,6 +766,7 @@ impl Trick {
         let mut msgs = vec![];
         let mut cards = cards.to_vec();
         cards.sort_by(|a, b| self.trump.compare(*a, *b));
+        let mut attempted_format = None;
 
         let (cards, bad_throw_cards, better_player) = if self.trick_format.is_none() {
             let mut tf = TrickFormat::from_cards(
@@ -745,6 +776,9 @@ impl Trick {
                 format_hint,
                 compound_formats,
             )?;
+            if tf.units.len() > 1 {
+                attempted_format = Some(tf.clone());
+            }
             let mut invalid = None;
             if tf.units.len() > 1 {
                 if tf.is_rainbow {
@@ -959,6 +993,7 @@ impl Trick {
             } else {
                 better_player
             },
+            attempted_format,
         });
 
         self.current_winner = self.compute_winner(throw_eval_policy);

@@ -472,7 +472,7 @@ fn relative_class(
 ) -> Option<usize> {
     match location {
         HiddenCardLocation::Kitty => Some(3),
-        HiddenCardLocation::Removed => None,
+        HiddenCardLocation::Removed | HiddenCardLocation::PublicPlayed => None,
         HiddenCardLocation::Player(player) => {
             let seats: Vec<PlayerID> = context
                 .view
@@ -916,6 +916,7 @@ mod sequence_feature_tests {
             cards,
             bad_throw_cards: vec![],
             better_player: None,
+            attempted_format: None,
         }
     }
 

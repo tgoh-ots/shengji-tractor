@@ -5054,6 +5054,7 @@ fn test_full_memory_guaranteed_top_after_higher_cards_played_across_tricks() {
         seen,
         voids: std::collections::HashMap::new(),
         hidden_counts: std::collections::HashMap::new(),
+        unknown_public_cards: 0,
         known_holding: std::collections::HashMap::new(),
         trump,
         num_decks: decks,
