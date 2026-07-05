@@ -537,7 +537,7 @@ teacher/baseline identity.
 
 The Week 1 package is implemented, but there is no valid completed
 authoritative W1.1 calibration and the 40–84-hour strength campaign has **not**
-been run. Three authoritative starts were stopped and retained as described
+been run. Four authoritative starts were stopped and retained as described
 below. There is therefore no Enoch-1 result, promotion claim, or evidence yet
 that any arm improves playing strength.
 
@@ -576,7 +576,7 @@ Local implementation verification completed with:
 
 - 188 passing core tests with 2 pre-existing ignored tests, 77 passing mechanics
   tests, 12 evaluator tests, and 5 control-probe tests;
-- 86 passing Week 1 Python tests;
+- 90 passing Week 1 Python tests;
 - clean formatting, all-target compilation, and strict Clippy checks;
 - 31 sealed tactical/global fixture cases over 45 source files, including the
   hash-order regression fixture, with zero failures
@@ -598,7 +598,7 @@ seed ledgers.
 
 ### Retired authoritative attempts — 2026-07-04
 
-Three starts are preserved under `.enoch-week1-runs/` and must not be
+Four starts are preserved under `.enoch-week1-runs/` and must not be
 overwritten or presented as campaign evidence:
 
 1. `authoritative-2026-07-04-e5ab4ec` stopped during W1.0 before any seed
@@ -622,6 +622,24 @@ overwritten or presented as campaign evidence:
    post-apply hash guard caught the no-op. The freezer now forces standalone
    apply semantics with a resolved `GIT_CEILING_DIRECTORIES`, and a nested
    parent-worktree regression test verifies that all three target hashes change.
+4. `authoritative-2026-07-04-314935b` successfully sealed W1.0
+   (`d6145b7a…014816`; phase `bce68e32…ac670a`) and entered W1.1 with an
+   empty ledger. The host's Santa policy then blocked the deterministic-search
+   release test executable because Cargo's default target was below the
+   `/private/tmp` source worktree. This was a pre-claim execution-location
+   failure, not a failed fixture. The authority builder now overwrites any
+   ambient `CARGO_TARGET_DIR` with a canonical, manifest-bound target below
+   the run root, outside the immutable W1.0 bundle; cached and offline
+   verification require that exact target.
+
+A non-authoritative host diagnostic then compiled the exact release fixture in
+that run-root-style target. The explicit `/private/tmp` Santa denial was gone,
+but AMFI killed the unsigned binary; ad-hoc signing was also rejected as an
+unknown certificate chain, and `security find-identity -p codesigning`
+reported zero valid identities. W1.1 is therefore externally blocked on this
+managed Mac until the exact release test is approved through the Santa App or a
+trusted code-signing identity is supplied. Do not initialize the reserved
+`0x5eed202607040004` protocol before that prerequisite is satisfied.
 
 The replacement source applies the same narrow deterministic normalization to
 current code and to a separately built probe-only `c813c8a` reference. The
@@ -631,11 +649,12 @@ fresh subprocesses per binary to be byte-identical within and across versions.
 An independent check over the entire 100-seed equivalence prefix was
 byte-identical (`140d71d5…75e9e`).
 
-Protocols `dea0964f…bd644f` and `4acdc5c1…0e2ed7e`, with master seeds
-`0x5eed202607040001` and `0x5eed202607040002`, are retired. No namespace
-from either protocol may be reused. The replacement reserves master seed
-`0x5eed202607040003` in a new run root; each registry contains 35,111 seeds,
-and all three registries are pairwise disjoint.
+Protocols `dea0964f…bd644f`, `4acdc5c1…0e2ed7e`, and
+`b968b3be…6e04a8`, with master seeds `0x5eed202607040001` through
+`0x5eed202607040003`, are retired. No namespace from those protocols may be
+reused. The replacement reserves master seed `0x5eed202607040004` in a new
+run root; each registry contains 35,111 seeds, and all four registries are
+pairwise disjoint.
 
 ## Operator sequence
 

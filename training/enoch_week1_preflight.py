@@ -1299,6 +1299,7 @@ def build_deterministic_search_fixture_authority(
     control_bundle: Path,
     workspace: Path,
     *,
+    cargo_target_dir: Path,
     timeout_seconds: float = DEFAULT_PROBE_TIMEOUT_SECONDS,
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -1307,6 +1308,15 @@ def build_deterministic_search_fixture_authority(
     enoch_week1.validate_protocol(protocol)
     control = _verify_control_bundle(protocol, control_bundle)
     workspace = workspace.resolve()
+    cargo_target_dir = cargo_target_dir.resolve()
+    try:
+        cargo_target_dir.relative_to(control_bundle.resolve())
+    except ValueError:
+        pass
+    else:
+        raise PreflightError(
+            "deterministic-search Cargo target must not mutate the W1.0 bundle"
+        )
     if _workspace_source_records(workspace) != control["source_records"]:
         raise PreflightError(
             "deterministic-search fixtures are not running on the frozen W1.0 source"
@@ -1321,6 +1331,10 @@ def build_deterministic_search_fixture_authority(
         environment,
         allowlist=protocol["evaluator_environment_policy"]["allowlist"],
     )
+    # Bind Cargo output to the authoritative run root. The source worktree may
+    # live under a host-restricted temporary directory, and release test
+    # executables must neither land there nor mutate the immutable W1.0 bundle.
+    cleaned["CARGO_TARGET_DIR"] = str(cargo_target_dir)
     records: list[dict[str, Any]] = []
     for test_name in DETERMINISTIC_SEARCH_TESTS:
         command = _canonical_search_fixture_command(test_name)
@@ -1366,6 +1380,7 @@ def build_deterministic_search_fixture_authority(
         raise PreflightError("frozen source changed while search fixtures were running")
     body = {
         "automatic_production_promotion_allowed": False,
+        "cargo_target_dir": str(cargo_target_dir),
         "control_manifest_fingerprint": control["identity"][
             "control_manifest_fingerprint"
         ],
@@ -1411,6 +1426,7 @@ def validate_deterministic_search_fixture_authority(
         fixture,
         {
             "automatic_production_promotion_allowed",
+            "cargo_target_dir",
             "control_manifest_fingerprint",
             "deterministic_search_authority_fingerprint",
             "effective_environment_sha256",
@@ -1433,6 +1449,16 @@ def validate_deterministic_search_fixture_authority(
         raise PreflightError("unsupported deterministic-search fixture authority")
     if fixture["automatic_production_promotion_allowed"] is not False:
         raise PreflightError("search fixture authority cannot authorize promotion")
+    cargo_target_dir = fixture["cargo_target_dir"]
+    if (
+        not isinstance(cargo_target_dir, str)
+        or not cargo_target_dir
+        or not Path(cargo_target_dir).is_absolute()
+        or str(Path(cargo_target_dir).resolve()) != cargo_target_dir
+    ):
+        raise PreflightError(
+            "search fixture Cargo target must be a canonical absolute path"
+        )
     expected_bindings = {
         "control_manifest_fingerprint": control["identity"][
             "control_manifest_fingerprint"

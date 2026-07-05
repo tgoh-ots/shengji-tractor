@@ -85,6 +85,49 @@ class Week1OperatorTests(unittest.TestCase):
             [1, 3, 3],
         )
 
+    def test_search_authority_uses_an_isolated_run_root_cargo_target(self) -> None:
+        expected = str(self.layout.authority_target.resolve())
+        authority = {"cargo_target_dir": expected}
+        with mock.patch.object(
+            operator.enoch_week1_preflight,
+            "build_deterministic_search_fixture_authority",
+            return_value=authority,
+        ) as build:
+            actual = operator._ensure_authority(
+                self.protocol,
+                self.layout,
+                Path("/private/tmp/source-worktree"),
+                123.0,
+            )
+
+        self.assertEqual(actual, authority)
+        self.assertEqual(
+            build.call_args.kwargs["cargo_target_dir"],
+            self.layout.authority_target.resolve(),
+        )
+        self.assertEqual(
+            enoch_week1.load_json_object(self.layout.authority),
+            authority,
+        )
+
+    def test_cached_search_authority_rejects_a_different_cargo_target(self) -> None:
+        enoch_week1.atomic_write_json(
+            self.layout.authority,
+            {"cargo_target_dir": str(self.layout.root / "wrong-target")},
+        )
+        with mock.patch.object(
+            operator.enoch_week1_preflight,
+            "validate_deterministic_search_fixture_authority",
+        ), self.assertRaisesRegex(
+            operator.OperatorError, "different Cargo target"
+        ):
+            operator._ensure_authority(
+                self.protocol,
+                self.layout,
+                Path("/private/tmp/source-worktree"),
+                123.0,
+            )
+
     def test_source_provenance_rejects_workspace_drift(self) -> None:
         control = {
             "evaluator_identity": {"source_sha256": "3" * 64},

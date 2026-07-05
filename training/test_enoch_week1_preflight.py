@@ -19,6 +19,7 @@ from training.enoch_week1_preflight import (
     PreflightError,
     STYLE_BASELINE_NAMESPACE,
     _protocol_prefix,
+    build_deterministic_search_fixture_authority,
     build_preflight_artifact,
     build_w1_1_baseline_worker_report,
     run_probe,
@@ -388,6 +389,102 @@ class Week1PreflightTests(unittest.TestCase):
             "bot::search::tests::strict_fixed_work_search_repeats_cards_and_work_telemetry",
             DETERMINISTIC_SEARCH_TESTS,
         )
+
+    def test_deterministic_search_authority_binds_isolated_cargo_target(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "source"
+            workspace.mkdir()
+            bundle = root / "run" / "w1.0" / "control-bundle"
+            bundle.mkdir(parents=True)
+            target = root / "run" / "w1.1" / "build" / "authority-target"
+            control = {
+                "identity": {"control_manifest_fingerprint": "a" * 64},
+                "manifest": {
+                    "evaluator_identity": {
+                        "binary_sha256": "b" * 64,
+                        "source_sha256": "c" * 64,
+                    }
+                },
+                "source_records": [],
+            }
+            seen_environments: list[dict[str, str]] = []
+
+            def completed(
+                command: list[str], **kwargs: object
+            ) -> subprocess.CompletedProcess[bytes]:
+                environment = dict(kwargs["env"])  # type: ignore[arg-type]
+                seen_environments.append(environment)
+                test_name = command[6]
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=f"test {test_name} ... ok\n".encode("utf-8"),
+                    stderr=b"",
+                )
+
+            with mock.patch(
+                "training.enoch_week1_preflight._verify_control_bundle",
+                return_value=control,
+            ), mock.patch(
+                "training.enoch_week1_preflight._workspace_source_records",
+                return_value=[],
+            ), mock.patch(
+                "training.enoch_week1_preflight._verify_probe_files",
+            ), mock.patch(
+                "training.enoch_week1_preflight.validate_deterministic_search_fixture_authority",
+                return_value="d" * 64,
+            ), mock.patch(
+                "training.enoch_week1_preflight.subprocess.run",
+                side_effect=completed,
+            ):
+                authority = build_deterministic_search_fixture_authority(
+                    self.protocol,
+                    bundle,
+                    workspace,
+                    cargo_target_dir=target,
+                    environment={
+                        "PATH": "/usr/bin:/bin",
+                        "CARGO_TARGET_DIR": "/untrusted/ambient-target",
+                    },
+                )
+
+        self.assertEqual(authority["cargo_target_dir"], str(target.resolve()))
+        self.assertEqual(len(seen_environments), len(DETERMINISTIC_SEARCH_TESTS))
+        self.assertTrue(
+            all(
+                environment["CARGO_TARGET_DIR"] == str(target.resolve())
+                for environment in seen_environments
+            )
+        )
+        self.assertEqual(
+            authority["effective_environment_sha256"],
+            enoch_week1.canonical_json_sha256(seen_environments[0]),
+        )
+    def test_deterministic_search_authority_rejects_w1_0_bundle_target(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "source"
+            workspace.mkdir()
+            bundle = root / "run" / "w1.0" / "control-bundle"
+            bundle.mkdir(parents=True)
+            with mock.patch(
+                "training.enoch_week1_preflight._verify_control_bundle",
+                return_value={},
+            ), self.assertRaisesRegex(
+                PreflightError, "must not mutate the W1.0 bundle"
+            ):
+                build_deterministic_search_fixture_authority(
+                    self.protocol,
+                    bundle,
+                    workspace,
+                    cargo_target_dir=bundle / "build" / "target",
+                    environment={"PATH": "/usr/bin:/bin"},
+                )
 
     def test_baseline_worker_report_separates_reference_and_runtime_identities(
         self,

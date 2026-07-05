@@ -93,6 +93,10 @@ class RunLayout:
         return self.w1_1 / "deterministic-search-authority.json"
 
     @property
+    def authority_target(self) -> Path:
+        return self.w1_1 / "build" / "deterministic-search-target"
+
+    @property
     def fixtures(self) -> Path:
         return self.w1_1 / "fixtures"
 
@@ -474,6 +478,27 @@ def _verify_frozen_source(workspace: Path, layout: RunLayout) -> None:
         raise OperatorError("workspace source differs from the frozen W1.0 evaluator")
 
 
+def _authority_target(layout: RunLayout) -> Path:
+    root = layout.root.resolve()
+    target = layout.authority_target.resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise OperatorError(
+            "deterministic-search Cargo target escapes the authoritative run root"
+        ) from exc
+    return target
+
+
+def _validate_authority_target(
+    layout: RunLayout, authority: Mapping[str, Any]
+) -> None:
+    if authority.get("cargo_target_dir") != str(_authority_target(layout)):
+        raise OperatorError(
+            "deterministic-search authority used a different Cargo target"
+        )
+
+
 def _ensure_authority(
     protocol: Mapping[str, Any], layout: RunLayout, workspace: Path, timeout: float
 ) -> dict[str, Any]:
@@ -482,13 +507,17 @@ def _ensure_authority(
         enoch_week1_preflight.validate_deterministic_search_fixture_authority(
             protocol, layout.control_bundle, authority
         )
+        _validate_authority_target(layout, authority)
         return authority
+    cargo_target_dir = _authority_target(layout)
     authority = enoch_week1_preflight.build_deterministic_search_fixture_authority(
         protocol,
         layout.control_bundle,
         workspace.resolve(),
         timeout_seconds=timeout,
+        cargo_target_dir=cargo_target_dir,
     )
+    _validate_authority_target(layout, authority)
     enoch_week1.atomic_write_json(layout.authority, authority)
     return authority
 
@@ -1134,6 +1163,7 @@ def verify_complete(layout: RunLayout) -> dict[str, str]:
         enoch_week1_preflight.validate_deterministic_search_fixture_authority(
             protocol, layout.control_bundle, authority
         )
+        _validate_authority_target(layout, authority)
         fixtures = _validate_fixture_gate(layout)
         preflight = _load_json(layout.preflight)
         enoch_week1_preflight.validate_preflight_artifact(
