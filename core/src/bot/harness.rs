@@ -605,8 +605,11 @@ pub fn play_one_hand_with_config_audited<F: FnMut(&PlayPhase, PlayerID, &PlayDec
                     }
                     if !bid && s.reveal_card().is_err() {
                         for &seat in &seat_ids {
-                            if let Some(b) =
-                                s.valid_bids(seat).ok()?.into_iter().min_by_key(|b| b.count)
+                            if let Some(b) = s
+                                .valid_bids(seat)
+                                .ok()?
+                                .into_iter()
+                                .min_by_key(|b| (b.count, b.card.as_char(), b.epoch, b.id.0))
                             {
                                 if s.bid(seat, b.card, b.count) {
                                     break;

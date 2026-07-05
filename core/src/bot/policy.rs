@@ -1035,6 +1035,10 @@ pub fn choose_bid(
     if evaluated.is_empty() {
         return None;
     }
+    // `valid_bids` originates from hand counts and therefore has HashMap order.
+    // Canonicalize before ranking so equal-strength suits do not choose a
+    // process-random trump declaration.
+    evaluated.sort_by_key(|(bid, _, _)| (bid.card.as_char(), bid.count, bid.epoch, bid.id.0));
     let heuristic_best_strength = evaluated
         .iter()
         .map(|(_, _, strength)| *strength)
@@ -1156,7 +1160,18 @@ pub fn choose_exchange_bid(
             strength -= bid.count as f64 * 0.5;
             (strength >= 10.0).then_some((strength, bid))
         })
-        .max_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|(a_strength, a_bid), (b_strength, b_bid)| {
+            a_strength
+                .partial_cmp(b_strength)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                // `max_by` should select the lexicographically smallest bid on
+                // an exact strength tie, matching `choose_bid` above.
+                .then_with(|| {
+                    let a_key = (a_bid.card.as_char(), a_bid.count, a_bid.epoch, a_bid.id.0);
+                    let b_key = (b_bid.card.as_char(), b_bid.count, b_bid.epoch, b_bid.id.0);
+                    b_key.cmp(&a_key)
+                })
+        })
         .map(|(_, bid)| bid)
 }
 

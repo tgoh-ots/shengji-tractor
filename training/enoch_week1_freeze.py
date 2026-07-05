@@ -32,11 +32,29 @@ except ImportError:  # Direct ``python training/enoch_week1_freeze.py`` executio
 DEFAULT_REFERENCE = "c813c8a"
 CONTROL_PROBE_RELATIVE = Path("core/examples/enoch_control_probe.rs")
 CONTROL_PROBE_BUNDLE_SOURCE = Path("source/enoch-control-probe.rs")
+REFERENCE_PROBE_PATCH_RELATIVE = Path("training/enoch_control_probe_reference.patch")
+REFERENCE_PROBE_PATCH_BUNDLE_SOURCE = Path(
+    "source/enoch-control-probe-reference.patch"
+)
+REFERENCE_PROBE_PATCH_ARTIFACT_ID = "source/enoch-control-probe-reference-patch"
+REFERENCE_PROBE_PREPATCH_PREREQUISITES = (
+    Path("bin/enoch-0"),
+    Path("bin/expert-0"),
+    Path("bin/grandmaster-0"),
+    Path("bin/reference-evaluator"),
+    Path("bin/validate-expert-model"),
+    Path("preflight/expert-model-validation.json"),
+    Path("preflight/reference-model-contract-tests.json"),
+)
+CONTROL_PROBE_REGRESSION_SEED = 0x58B76B703FF0E148
+CONTROL_PROBE_DETERMINISM_REPETITIONS = 8
 CONTROL_PROBE_ARTIFACT_IDS = frozenset(
     {
         "binary/enoch-control-probe-current",
         "binary/enoch-control-probe-reference",
+        "preflight/control-probe-determinism",
         "source/enoch-control-probe",
+        REFERENCE_PROBE_PATCH_ARTIFACT_ID,
     }
 )
 REFERENCE_EXAMPLES = (
@@ -61,6 +79,7 @@ CURRENT_SOURCE_FILES = (
     CONTROL_PROBE_RELATIVE.as_posix(),
     "core/examples/enoch_eval.rs",
     "mechanics/Cargo.toml",
+    REFERENCE_PROBE_PATCH_RELATIVE.as_posix(),
 )
 SAFE_ENV_NAMES = (
     "CARGO_HOME",
@@ -207,6 +226,107 @@ def _inject_control_probe(workspace: Path, reference_source: Path, bundle: Path)
     return source_sha256
 
 
+def _reference_probe_patch_paths(patch: Path) -> set[str]:
+    try:
+        lines = patch.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise FreezeError(f"could not read reference probe patch {patch}: {exc}") from exc
+    paths: set[str] = set()
+    for line in lines:
+        if line.startswith("diff --git "):
+            fields = line.split()
+            if (
+                len(fields) != 4
+                or not fields[2].startswith("a/")
+                or not fields[3].startswith("b/")
+            ):
+                raise FreezeError("reference probe patch has a malformed diff header")
+            paths.update((fields[2][2:], fields[3][2:]))
+        if line.startswith("+++ b/") or line.startswith("--- a/"):
+            paths.add(line[6:])
+    if not paths:
+        raise FreezeError("reference probe patch contains no repository paths")
+    return paths
+
+
+def _bind_reference_probe_patch(workspace: Path, bundle: Path) -> tuple[Path, str]:
+    """Freeze the one compatibility patch allowed in the reference probe build."""
+
+    missing = [
+        path.as_posix()
+        for path in REFERENCE_PROBE_PREPATCH_PREREQUISITES
+        if not (bundle / path).is_file()
+    ]
+    if missing:
+        raise FreezeError(
+            "reference probe patch cannot be bound before pristine binaries and "
+            f"model-contract tests are staged: {missing}"
+        )
+    source = workspace / REFERENCE_PROBE_PATCH_RELATIVE
+    if not source.is_file():
+        raise FreezeError(f"required reference probe patch is missing: {source}")
+    expected_paths = {
+        "core/src/bot/harness.rs",
+        "core/src/bot/heuristics.rs",
+        "core/src/bot/policy.rs",
+    }
+    if _reference_probe_patch_paths(source) != expected_paths:
+        raise FreezeError(
+            "reference probe patch must touch exactly the audited harness.rs, "
+            "heuristics.rs, and policy.rs"
+        )
+    frozen = bundle / REFERENCE_PROBE_PATCH_BUNDLE_SOURCE
+    digest = _copy_hashed(source, frozen)
+    if _reference_probe_patch_paths(frozen) != expected_paths:
+        raise FreezeError("frozen reference probe patch changed while being copied")
+    return frozen, digest
+
+
+def _apply_reference_probe_patch(
+    reference_source: Path,
+    patch: Path,
+    environment: Mapping[str, str],
+) -> dict[str, Any]:
+    """Apply the bound determinism normalization to the probe-only source tree."""
+
+    targets = {
+        relative: reference_source / relative
+        for relative in (
+            "core/src/bot/harness.rs",
+            "core/src/bot/heuristics.rs",
+            "core/src/bot/policy.rs",
+        )
+    }
+    missing = [relative for relative, path in targets.items() if not path.is_file()]
+    if missing:
+        raise FreezeError(f"reference source lacks patch targets: {missing}")
+    before = {relative: _sha256_file(path) for relative, path in targets.items()}
+    _run(
+        ("git", "apply", "--check", "--whitespace=error-all", str(patch)),
+        cwd=reference_source,
+        environment=environment,
+    )
+    _run(
+        ("git", "apply", "--whitespace=error-all", str(patch)),
+        cwd=reference_source,
+        environment=environment,
+    )
+    _run(
+        ("git", "apply", "--check", "--reverse", str(patch)),
+        cwd=reference_source,
+        environment=environment,
+    )
+    after = {relative: _sha256_file(path) for relative, path in targets.items()}
+    unchanged = [relative for relative in targets if after[relative] == before[relative]]
+    if unchanged:
+        raise FreezeError(f"reference probe patch did not change targets: {unchanged}")
+    return {
+        "patch_sha256": _sha256_file(patch),
+        "target_files_after_sha256": after,
+        "target_files_before_sha256": before,
+    }
+
+
 def _configuration_hash(value: Mapping[str, Any]) -> str:
     return enoch_week1.canonical_json_sha256(value)
 
@@ -327,6 +447,44 @@ def _build_control_probe(
     return target / "release" / "examples" / "enoch_control_probe"
 
 
+def _control_probe_determinism_record(
+    reference_probe: Path,
+    current_probe: Path,
+    environment: Mapping[str, str],
+    *,
+    repetitions: int = CONTROL_PROBE_DETERMINISM_REPETITIONS,
+) -> dict[str, Any]:
+    """Require fresh-process determinism within and across both probe builds."""
+
+    if repetitions < 2:
+        raise FreezeError("control probe determinism requires at least two repetitions")
+    outputs: dict[str, list[str]] = {"reference": [], "current": []}
+    for label, binary in (("reference", reference_probe), ("current", current_probe)):
+        command = (
+            str(binary),
+            "--policy",
+            "enoch-greedy",
+            "--seed",
+            str(CONTROL_PROBE_REGRESSION_SEED),
+        )
+        for _ in range(repetitions):
+            outputs[label].append(
+                _run(command, cwd=binary.parent, environment=environment)
+            )
+        if any(output != outputs[label][0] for output in outputs[label][1:]):
+            raise FreezeError(f"{label} control probe is not process-deterministic")
+    if outputs["reference"][0] != outputs["current"][0]:
+        raise FreezeError("reference and current control probes diverge on regression seed")
+    stdout = outputs["reference"][0].encode("utf-8")
+    return {
+        "command_succeeded": True,
+        "policy": "enoch-greedy",
+        "repetitions_per_binary": repetitions,
+        "seed": CONTROL_PROBE_REGRESSION_SEED,
+        "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+    }
+
+
 def freeze_bundle(
     workspace: Path,
     protocol_path: Path,
@@ -370,36 +528,41 @@ def freeze_bundle(
             workspace, reference_source, temporary
         )
 
-        evaluator_archive = temporary / "source" / "week1-evaluator-source.tar.gz"
-        evaluator_source_sha256, source_records = _snapshot_sources(
-            workspace, evaluator_archive
-        )
-        probe_record = next(
-            (
-                record
-                for record in source_records
-                if record["path"] == CONTROL_PROBE_RELATIVE.as_posix()
-            ),
-            None,
-        )
-        if probe_record is None or probe_record["sha256"] != control_probe_source_sha256:
-            raise FreezeError("control probe source changed while it was being injected")
-        evaluator_file_list = temporary / "source" / "week1-evaluator-source-files.json"
-        enoch_week1.atomic_write_json(evaluator_file_list, source_records)
-        evaluator_source_identity_sha256 = _sha256_file(evaluator_file_list)
-
+        # Build every production artifact from untouched c813, then immediately
+        # copy it out of Cargo's target directory. No compatibility patch exists
+        # in the reference tree yet, and no later build can replace these files.
+        reference_target = temporary / "build" / "reference-target"
         reference_bins = _build_reference(
-            reference_source, temporary / "build" / "reference-target", environment
+            reference_source, reference_target, environment
         )
-        reference_probe_bin = _build_control_probe(
-            reference_source,
-            temporary / "build" / "reference-target",
-            environment,
+        binary_destinations = {
+            "enoch-0": "enoch_benchmark",
+            "expert-0": "model_control_eval",
+            "grandmaster-0": "gm_benchmark",
+            "reference-evaluator": "paired_eval",
+        }
+        binary_hashes: dict[str, str] = {}
+        staged_reference_artifacts: dict[str, str] = {}
+        staged_reference_paths: dict[str, Path] = {}
+        for policy, example in binary_destinations.items():
+            artifact_id = f"binary/{policy}"
+            destination = temporary / "bin" / policy
+            digest = _copy_hashed(Path(reference_bins[example]), destination)
+            binary_hashes[policy] = digest
+            staged_reference_artifacts[artifact_id] = digest
+            staged_reference_paths[artifact_id] = destination
+        staged_validator = temporary / "bin" / "validate-expert-model"
+        validator_binary_hash = _copy_hashed(
+            Path(reference_bins["validate_expert_model"]), staged_validator
         )
+        staged_reference_artifacts[
+            "binary/validate-expert-model"
+        ] = validator_binary_hash
+        staged_reference_paths["binary/validate-expert-model"] = staged_validator
+
+        # Production model-contract tests also execute before patching c813.
         reference_test_environment = dict(environment)
-        reference_test_environment["CARGO_TARGET_DIR"] = str(
-            temporary / "build" / "reference-target"
-        )
+        reference_test_environment["CARGO_TARGET_DIR"] = str(reference_target)
         reference_test_output = _run(
             (
                 "cargo",
@@ -424,6 +587,78 @@ def freeze_bundle(
                 raise FreezeError(
                     f"production model-contract preflight did not execute {required_test}"
                 )
+
+        reference_model_dir = reference_source / "core" / "src" / "bot"
+        validator_output = _run(
+            (
+                str(staged_validator),
+                str(reference_model_dir / "expert_model.onnx"),
+                str(reference_model_dir / "expert_model.onnx.manifest.json"),
+                str(reference_model_dir / "expert_model.onnx.golden.json"),
+            ),
+            cwd=reference_source,
+            environment=environment,
+        )
+        enoch_week1.atomic_write_json(
+            temporary / "preflight" / "reference-model-contract-tests.json",
+            {"command_succeeded": True, "output": reference_test_output},
+        )
+        enoch_week1.atomic_write_json(
+            temporary / "preflight" / "expert-model-validation.json",
+            {"command_succeeded": True, "output": validator_output},
+        )
+
+        model_hashes: dict[str, str] = {}
+        for filename in REFERENCE_MODEL_FILES:
+            source = reference_model_dir / filename
+            if not source.is_file():
+                raise FreezeError(f"production reference lacks model artifact {filename}")
+            model_hashes[filename] = _copy_hashed(
+                source, temporary / "models" / filename
+            )
+
+        # Only after all untouched production binaries are safely staged and all
+        # production tests have passed may the probe-only compatibility patch be
+        # bound and applied. Its target directory is separate as a second guard
+        # against Cargo replacing an original production artifact.
+        reference_probe_patch, reference_probe_patch_sha256 = (
+            _bind_reference_probe_patch(workspace, temporary)
+        )
+        patch_application = _apply_reference_probe_patch(
+            reference_source, reference_probe_patch, environment
+        )
+        reference_probe_bin = _build_control_probe(
+            reference_source,
+            temporary / "build" / "reference-probe-target",
+            environment,
+        )
+        for artifact_id, expected in staged_reference_artifacts.items():
+            if _sha256_file(staged_reference_paths[artifact_id]) != expected:
+                raise FreezeError(
+                    f"staged production binary changed after probe patch: {artifact_id}"
+                )
+
+        evaluator_archive = temporary / "source" / "week1-evaluator-source.tar.gz"
+        evaluator_source_sha256, source_records = _snapshot_sources(
+            workspace, evaluator_archive
+        )
+        source_records_by_path = {
+            record["path"]: record["sha256"] for record in source_records
+        }
+        if (
+            source_records_by_path.get(CONTROL_PROBE_RELATIVE.as_posix())
+            != control_probe_source_sha256
+        ):
+            raise FreezeError("control probe source changed while it was being injected")
+        if (
+            source_records_by_path.get(REFERENCE_PROBE_PATCH_RELATIVE.as_posix())
+            != reference_probe_patch_sha256
+        ):
+            raise FreezeError("reference probe patch changed while it was being bound")
+        evaluator_file_list = temporary / "source" / "week1-evaluator-source-files.json"
+        enoch_week1.atomic_write_json(evaluator_file_list, source_records)
+        evaluator_source_identity_sha256 = _sha256_file(evaluator_file_list)
+
         evaluator_bin, strict_test_output = _build_current_evaluator(
             workspace,
             temporary / "build" / "evaluator-target",
@@ -449,30 +684,30 @@ def freeze_bundle(
             != control_probe_source_sha256
         ):
             raise FreezeError("injected reference control probe changed during the build")
-
-        enoch_week1.atomic_write_json(
-            temporary / "preflight" / "reference-model-contract-tests.json",
-            {"command_succeeded": True, "output": reference_test_output},
-        )
+        if _sha256_file(reference_probe_patch) != reference_probe_patch_sha256:
+            raise FreezeError("frozen reference probe patch changed during the build")
         enoch_week1.atomic_write_json(
             temporary / "preflight" / "strict-evaluator-test.json",
             {"command_succeeded": True, "output": strict_test_output},
         )
 
-        reference_model_dir = reference_source / "core" / "src" / "bot"
-        validator_output = _run(
-            (
-                reference_bins["validate_expert_model"],
-                str(reference_model_dir / "expert_model.onnx"),
-                str(reference_model_dir / "expert_model.onnx.manifest.json"),
-                str(reference_model_dir / "expert_model.onnx.golden.json"),
-            ),
-            cwd=reference_source,
-            environment=environment,
+        reference_probe_destination = (
+            temporary / "bin" / "enoch-control-probe-reference"
         )
+        current_probe_destination = temporary / "bin" / "enoch-control-probe-current"
+        reference_probe_binary_hash = _copy_hashed(
+            reference_probe_bin, reference_probe_destination
+        )
+        current_probe_binary_hash = _copy_hashed(
+            current_probe_bin, current_probe_destination
+        )
+        determinism_record = _control_probe_determinism_record(
+            reference_probe_destination, current_probe_destination, environment
+        )
+        determinism_record["reference_patch_application"] = patch_application
         enoch_week1.atomic_write_json(
-            temporary / "preflight" / "expert-model-validation.json",
-            {"command_succeeded": True, "output": validator_output},
+            temporary / "preflight" / "control-probe-determinism.json",
+            determinism_record,
         )
 
         frozen_probe_source_sha256 = _sha256_file(
@@ -484,6 +719,9 @@ def freeze_bundle(
             "preflight/expert-model-validation": _sha256_file(
                 temporary / "preflight" / "expert-model-validation.json"
             ),
+            "preflight/control-probe-determinism": _sha256_file(
+                temporary / "preflight" / "control-probe-determinism.json"
+            ),
             "preflight/reference-model-contract-tests": _sha256_file(
                 temporary / "preflight" / "reference-model-contract-tests.json"
             ),
@@ -494,50 +732,22 @@ def freeze_bundle(
                 protocol_path, temporary / "protocol" / "week1-seed-protocol.json"
             ),
             "source/enoch-control-probe": frozen_probe_source_sha256,
+            REFERENCE_PROBE_PATCH_ARTIFACT_ID: reference_probe_patch_sha256,
             "source/production-reference": reference_source_sha256,
             "source/week1-evaluator": _sha256_file(evaluator_archive),
             "source/week1-evaluator-file-list": _sha256_file(
                 temporary / "source" / "week1-evaluator-source-files.json"
             ),
+            "binary/enoch-control-probe-current": current_probe_binary_hash,
+            "binary/enoch-control-probe-reference": reference_probe_binary_hash,
         }
-        binary_destinations = {
-            "enoch-0": "enoch_benchmark",
-            "expert-0": "model_control_eval",
-            "grandmaster-0": "gm_benchmark",
-            "reference-evaluator": "paired_eval",
-        }
-        binary_hashes: dict[str, str] = {}
-        for policy, example in binary_destinations.items():
-            destination = temporary / "bin" / policy
-            binary_hashes[policy] = _copy_hashed(
-                Path(reference_bins[example]), destination
-            )
-            artifact_hashes[f"binary/{policy}"] = binary_hashes[policy]
+        artifact_hashes.update(staged_reference_artifacts)
         evaluator_binary_hash = _copy_hashed(
             evaluator_bin, temporary / "bin" / "enoch-week1-evaluator"
         )
         artifact_hashes["binary/week1-evaluator"] = evaluator_binary_hash
-        artifact_hashes["binary/enoch-control-probe-reference"] = _copy_hashed(
-            reference_probe_bin,
-            temporary / "bin" / "enoch-control-probe-reference",
-        )
-        artifact_hashes["binary/enoch-control-probe-current"] = _copy_hashed(
-            current_probe_bin,
-            temporary / "bin" / "enoch-control-probe-current",
-        )
-        validator_binary_hash = _copy_hashed(
-            Path(reference_bins["validate_expert_model"]),
-            temporary / "bin" / "validate-expert-model",
-        )
-        artifact_hashes["binary/validate-expert-model"] = validator_binary_hash
 
-        model_hashes: dict[str, str] = {}
-        for filename in REFERENCE_MODEL_FILES:
-            source = reference_model_dir / filename
-            if not source.is_file():
-                raise FreezeError(f"production reference lacks model artifact {filename}")
-            digest = _copy_hashed(source, temporary / "models" / filename)
-            model_hashes[filename] = digest
+        for filename, digest in model_hashes.items():
             artifact_hashes[f"model/{filename}"] = digest
         embedded_model_hash = model_hashes["expert_model.onnx"]
         no_model_hash = enoch_week1.canonical_json_sha256(
@@ -672,6 +882,7 @@ def _bundle_artifact_path(bundle: Path, artifact_id: str) -> Path:
     if category == "source":
         filenames = {
             "enoch-control-probe": "enoch-control-probe.rs",
+            "enoch-control-probe-reference-patch": "enoch-control-probe-reference.patch",
             "production-reference": "production-reference.tar",
             "week1-evaluator": "week1-evaluator-source.tar.gz",
             "week1-evaluator-file-list": "week1-evaluator-source-files.json",

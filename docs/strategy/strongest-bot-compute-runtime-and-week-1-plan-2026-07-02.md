@@ -535,9 +535,11 @@ teacher/baseline identity.
 
 ## Implementation and execution status — 2026-07-04
 
-The Week 1 package is implemented, but the authoritative 40–84-hour strength
-campaign has **not** been run. There is therefore no Enoch-1 result, promotion
-claim, or evidence yet that any arm improves playing strength.
+The Week 1 package is implemented, but there is no valid completed
+authoritative W1.1 calibration and the 40–84-hour strength campaign has **not**
+been run. Two authoritative starts were stopped and retained as described
+below. There is therefore no Enoch-1 result, promotion claim, or evidence yet
+that any arm improves playing strength.
 
 The implemented package includes:
 
@@ -549,7 +551,9 @@ The implemented package includes:
 - the strict in-process mirrored evaluator in
   [`enoch_eval.rs`](../../core/examples/enoch_eval.rs) and the cross-version
   control probe in
-  [`enoch_control_probe.rs`](../../core/examples/enoch_control_probe.rs);
+  [`enoch_control_probe.rs`](../../core/examples/enoch_control_probe.rs),
+  including canonical Enoch play and bid ordering plus a repeated-process
+  regression gate for the inherited hash-order leak;
 - frozen seed, phase, comparison, shard, merge, qualification, locked-gate, and
   terminal schemas in [`enoch_week1.py`](../../training/enoch_week1.py);
 - W1.4 survivor/combination lineage and the reconstructable post-run
@@ -570,12 +574,13 @@ The implemented package includes:
 
 Local implementation verification completed with:
 
-- 187 passing core tests with 2 pre-existing ignored tests, 77 passing mechanics
-  tests, 12 evaluator tests, and 4 control-probe tests;
-- 79 passing Week 1 Python tests;
+- 188 passing core tests with 2 pre-existing ignored tests, 77 passing mechanics
+  tests, 12 evaluator tests, and 5 control-probe tests;
+- 85 passing Week 1 Python tests;
 - clean formatting, all-target compilation, and strict Clippy checks;
-- 30 sealed tactical/global fixture cases over 41 source files, with zero
-  failures (`16266f8b…09a517a`);
+- 31 sealed tactical/global fixture cases over 45 source files, including the
+  hash-order regression fixture, with zero failures
+  (`000b57d7…fc969dab`);
 - a verified non-authoritative W1.0 smoke bundle for the exact
   `c813c8ad6a43ef0599effbca098dec45c55e9aa8` reference
   (`784dd67d…ea240f0`);
@@ -591,10 +596,46 @@ pair development and locked results, the 3,300-pair qualification matrix, and
 the terminal Week 1 decision remain to be generated on unused authoritative
 seed ledgers.
 
+### Retired authoritative attempts — 2026-07-04
+
+Two starts are preserved under `.enoch-week1-runs/` and must not be
+overwritten or presented as campaign evidence:
+
+1. `authoritative-2026-07-04-e5ab4ec` stopped during W1.0 before any seed
+   claim because the host Python 3.9 `tarfile` API lacks the newer extraction
+   filter argument. The freezer was corrected with an equivalent safe legacy
+   extraction path.
+2. `authoritative-2026-07-04-1019134` completed and sealed W1.0
+   (`c92704b2…c563a10e`; phase `801dd6db…faea56`), deterministic-search
+   authority, and all fixtures. W1.1 then consumed exactly the 100
+   `preflight/frozen-policy-equivalence` seeds and failed before any product
+   smoke. Repeated fresh-process diagnosis showed both reference and current
+   binaries had the same four-output support. The mismatch came from inherited
+   per-process `HashMap` order in Enoch throw candidates, floating-point bid
+   score accumulation, normal/exchange bid ties, and the harness's forced-bid
+   fallback—not from the new mechanics changes.
+
+The replacement source applies the same narrow deterministic normalization to
+current code and to a separately built probe-only `c813c8a` reference. The
+freezer stages and hashes every untouched production binary before applying
+that bound three-file patch, records its before/after hashes, and requires eight
+fresh subprocesses per binary to be byte-identical within and across versions.
+An independent check over the entire 100-seed equivalence prefix was
+byte-identical (`140d71d5…75e9e`).
+
+Protocol `dea0964f…bd644f` and master seed `0x5eed202607040001` are retired.
+No namespace from that protocol may be reused. The replacement reserves the
+globally disjoint master seed `0x5eed202607040002` in a new run root; its
+35,111 derived seeds have zero overlap with the retired registry.
+
 ## Operator sequence
 
 The authoritative run starts from a new output directory and never reuses the
-diagnostic artifacts above.
+diagnostic artifacts above. Capture every operator command in an external
+durable transcript. If a stage fails, preserve an immutable failure tombstone
+with its protocol, seed claims, failed stage, and disposition before any retry
+or replacement; some failures occur before a normal phase artifact is
+published.
 
 1. From a clean committed worktree, run
    `python3 training/enoch_week1_operator.py init --root <run-root> --workspace <worktree> --master-seed <new-u64>`.
@@ -610,6 +651,9 @@ diagnostic artifacts above.
    preflight and the exact 1/10/100 product smokes with a 1/4/8 worker ramp. It
    refuses partial preflight, incomplete smoke evidence, a mismatched real Rust
    environment identity, or any ambiguous consumed seed.
+   On this host the measured declaration is `--available-parallelism 10`;
+   keep the machine awake and plugged in, and do not make the no-contention
+   attestation while builds, tests, or another experiment are active.
 4. Reconstruct the sealed W1.0/W1.1 package with
    `python3 training/enoch_week1_operator.py verify --root <run-root>` before any
    W1.2 arm consumes a seed.

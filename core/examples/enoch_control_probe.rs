@@ -461,4 +461,26 @@ mod tests {
         assert!(first.get("elapsed_ms").is_none());
         assert!(first.get("wall_time").is_none());
     }
+
+    #[test]
+    fn known_hash_order_regression_seed_is_repeatable() {
+        let args = Args {
+            policy: ProbePolicy::EnochGreedy,
+            seeds: vec![0x58b7_6b70_3ff0_e148],
+        };
+        let (first, complete) = run_probe(&args).unwrap();
+        assert!(complete);
+        let first = canonical_json_bytes(&first).unwrap();
+
+        // This seed previously exposed randomized HashMap iteration in bidding
+        // and Enoch's whole-suit throw candidates. Rebuild and replay the full
+        // mirrored pair enough times to exercise fresh map states; compare bytes
+        // rather than a historical digest so the test binds determinism, not one
+        // accidental member of the old nondeterministic output set.
+        for _ in 0..16 {
+            let (repeated, complete) = run_probe(&args).unwrap();
+            assert!(complete);
+            assert_eq!(canonical_json_bytes(&repeated).unwrap(), first);
+        }
+    }
 }

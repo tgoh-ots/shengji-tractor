@@ -31,6 +31,15 @@ class Week1FixtureTests(unittest.TestCase):
         )
         self.assertIn("core/examples/enoch_control_probe.rs", SOURCE_FILES)
         self.assertIn("core/examples/enoch_eval.rs", SOURCE_FILES)
+        self.assertIn("training/enoch_control_probe_reference.patch", SOURCE_FILES)
+        self.assertIn(
+            (
+                "bid-score-hash-order-determinism",
+                "shengji-core",
+                "bot::heuristics::tests::test_bid_strength_is_bit_stable_across_fresh_count_maps",
+            ),
+            GLOBAL_FIXTURES,
+        )
 
     def test_fixture_map_exactly_covers_all_arms(self) -> None:
         _assert_registry()

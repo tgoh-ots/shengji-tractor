@@ -2865,6 +2865,18 @@ fn dedup_card_sets(sets: &mut Vec<Vec<Card>>) {
     });
 }
 
+fn canonical_card_set_key(cards: &[Card]) -> Vec<char> {
+    let mut key = cards.iter().map(|card| card.as_char()).collect::<Vec<_>>();
+    key.sort_unstable();
+    key
+}
+
+fn compare_enoch_scored_plays(a: &ScoredPlay, b: &ScoredPlay) -> std::cmp::Ordering {
+    b.score
+        .total_cmp(&a.score)
+        .then_with(|| canonical_card_set_key(&a.cards).cmp(&canonical_card_set_key(&b.cards)))
+}
+
 /// Whether a PAIR (or each pair of a tractor) whose top is `top` strength in
 /// effective suit `eff` cannot be beaten by a higher PAIR a follower could
 /// assemble — i.e. no strictly-higher same-suit rank still has >= 2 unseen
@@ -2982,6 +2994,7 @@ fn enoch_throw_candidates(ctx: &EvalCtx, p: &PlayPhase, me: PlayerID) -> Vec<Vec
             }
         }
     }
+    canonical_candidate_order(trump, &mut out);
     out
 }
 
@@ -3017,11 +3030,7 @@ pub(crate) fn ranked_leads_enoch_with_features(
         })
         .filter(|play| play.score.is_finite())
         .collect();
-    scored.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    scored.sort_by(compare_enoch_scored_plays);
     scored
 }
 
@@ -3049,7 +3058,7 @@ pub(crate) fn ranked_leads_enoch_unfiltered_with_features(
             cards,
         })
         .collect();
-    scored.sort_by(|a, b| b.score.total_cmp(&a.score));
+    scored.sort_by(compare_enoch_scored_plays);
     scored
 }
 
@@ -3072,11 +3081,7 @@ pub(crate) fn ranked_follows_enoch_with_features(
             ScoredPlay { cards, score }
         })
         .collect();
-    scored.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    scored.sort_by(compare_enoch_scored_plays);
     scored
 }
 
@@ -3106,7 +3111,7 @@ pub(crate) fn ranked_leads_enoch_for_rollout_with_features(
         })
         .filter(|play| play.score.is_finite())
         .collect();
-    scored.sort_by(|a, b| b.score.total_cmp(&a.score));
+    scored.sort_by(compare_enoch_scored_plays);
     scored
 }
 
@@ -3128,7 +3133,7 @@ pub(crate) fn ranked_follows_enoch_for_rollout_with_features(
             cards,
         })
         .collect();
-    scored.sort_by(|a, b| b.score.total_cmp(&a.score));
+    scored.sort_by(compare_enoch_scored_plays);
     scored
 }
 
@@ -3230,10 +3235,15 @@ pub fn choose_play_direct(
 pub fn bid_strength(hand: &[Card], candidate: Trump) -> f64 {
     let mut score = 0.0;
     let counts = Card::count(hand.iter().copied());
+    let mut count_entries = counts
+        .iter()
+        .map(|(&card, &count)| (card, count))
+        .collect::<Vec<_>>();
+    count_entries.sort_by_key(|(card, _)| card.as_char());
 
     // Count effective-trump cards and their strength.
     let mut trump_count = 0;
-    for (&card, &ct) in &counts {
+    for &(card, ct) in &count_entries {
         if candidate.effective_suit(card) == EffectiveSuit::Trump {
             trump_count += ct;
             let s = card_strength(candidate, card);
@@ -3249,7 +3259,7 @@ pub fn bid_strength(hand: &[Card], candidate: Trump) -> f64 {
     score += big as f64 * 3.0 + small as f64 * 2.0;
 
     // Side-suit Aces/Kings provide control.
-    for (&card, &ct) in &counts {
+    for &(card, ct) in &count_entries {
         if candidate.effective_suit(card) != EffectiveSuit::Trump {
             if let Card::Suited { number, .. } = card {
                 if number == Number::Ace {
@@ -3274,12 +3284,17 @@ pub fn bid_strength_enoch(hand: &[Card], candidate: Trump) -> f64 {
     // Start from the shared backbone (length + raw strength + jokers + side aces).
     let mut score = bid_strength(hand, candidate);
     let counts = Card::count(hand.iter().copied());
+    let mut count_entries = counts
+        .iter()
+        .map(|(&card, &count)| (card, count))
+        .collect::<Vec<_>>();
+    count_entries.sort_by_key(|(card, _)| card.as_char());
 
     // PAIR PRIORITY: each effective-trump PAIR (two copies) is worth a big bump.
     // The backbone already counted each card once for length; this adds the extra
     // "a pair is worth ~3-4 singles" premium on top. Trump-number / joker pairs
     // (the trump tops) are worth even more.
-    for (&card, &ct) in &counts {
+    for &(card, ct) in &count_entries {
         if candidate.effective_suit(card) != EffectiveSuit::Trump {
             continue;
         }
@@ -5010,6 +5025,40 @@ mod tests {
             spades,
             clubs
         );
+    }
+
+    #[test]
+    fn test_bid_strength_is_bit_stable_across_fresh_count_maps() {
+        let mut hand = vec![Card::SmallJoker, Card::BigJoker];
+        for suit in [Suit::Clubs, Suit::Diamonds, Suit::Hearts, Suit::Spades] {
+            for number in [
+                Number::Two,
+                Number::Five,
+                Number::Seven,
+                Number::Eight,
+                Number::King,
+                Number::Ace,
+            ] {
+                hand.push(card(number, suit));
+            }
+            hand.push(card(Number::Eight, suit));
+        }
+        let candidates = [std_trump(Suit::Clubs), std_trump(Suit::Spades)];
+        let expected = candidates.map(|trump| {
+            (
+                bid_strength(&hand, trump).to_bits(),
+                bid_strength_enoch(&hand, trump).to_bits(),
+            )
+        });
+        for _ in 0..128 {
+            let repeated = candidates.map(|trump| {
+                (
+                    bid_strength(&hand, trump).to_bits(),
+                    bid_strength_enoch(&hand, trump).to_bits(),
+                )
+            });
+            assert_eq!(repeated, expected);
+        }
     }
 
     /// Enoch kitty discipline: on a weak hand (no jokers, few trump) it buries NO

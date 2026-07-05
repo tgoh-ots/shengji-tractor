@@ -1,0 +1,181 @@
+diff --git a/core/src/bot/harness.rs b/core/src/bot/harness.rs
+index 09dcfef..30820c6 100644
+--- a/core/src/bot/harness.rs
++++ b/core/src/bot/harness.rs
+@@ -452,8 +452,11 @@ pub fn play_one_hand_with_config_instrumented<F: FnMut(&PlayPhase, PlayerID, &[C
+                     }
+                     if !bid && s.reveal_card().is_err() {
+                         for &seat in &seat_ids {
+-                            if let Some(b) =
+-                                s.valid_bids(seat).ok()?.into_iter().min_by_key(|b| b.count)
++                            if let Some(b) = s
++                                .valid_bids(seat)
++                                .ok()?
++                                .into_iter()
++                                .min_by_key(|b| (b.count, b.card.as_char(), b.epoch, b.id.0))
+                             {
+                                 if s.bid(seat, b.card, b.count) {
+                                     break;
+diff --git a/core/src/bot/heuristics.rs b/core/src/bot/heuristics.rs
+index dbffa04..510896e 100644
+--- a/core/src/bot/heuristics.rs
++++ b/core/src/bot/heuristics.rs
+@@ -2678,6 +2678,18 @@ fn dedup_card_sets(sets: &mut Vec<Vec<Card>>) {
+     });
+ }
+
++fn canonical_card_set_key(cards: &[Card]) -> Vec<char> {
++    let mut key = cards.iter().map(|card| card.as_char()).collect::<Vec<_>>();
++    key.sort_unstable();
++    key
++}
++
++fn compare_enoch_scored_plays(a: &ScoredPlay, b: &ScoredPlay) -> std::cmp::Ordering {
++    b.score
++        .total_cmp(&a.score)
++        .then_with(|| canonical_card_set_key(&a.cards).cmp(&canonical_card_set_key(&b.cards)))
++}
++
+ /// Whether a PAIR (or each pair of a tractor) whose top is `top` strength in
+ /// effective suit `eff` cannot be beaten by a higher PAIR a follower could
+ /// assemble — i.e. no strictly-higher same-suit rank still has >= 2 unseen
+@@ -2795,6 +2807,7 @@ fn enoch_throw_candidates(ctx: &EvalCtx, p: &PlayPhase, me: PlayerID) -> Vec<Vec
+             }
+         }
+     }
++    canonical_candidate_order(trump, &mut out);
+     out
+ }
+
+@@ -2819,11 +2832,7 @@ pub fn ranked_leads_enoch(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
+         })
+         .filter(|play| play.score.is_finite())
+         .collect();
+-    scored.sort_by(|a, b| {
+-        b.score
+-            .partial_cmp(&a.score)
+-            .unwrap_or(std::cmp::Ordering::Equal)
+-    });
++    scored.sort_by(compare_enoch_scored_plays);
+     scored
+ }
+
+@@ -2842,7 +2851,7 @@ pub(crate) fn ranked_leads_enoch_unfiltered(p: &PlayPhase, me: PlayerID) -> Vec<
+             cards,
+         })
+         .collect();
+-    scored.sort_by(|a, b| b.score.total_cmp(&a.score));
++    scored.sort_by(compare_enoch_scored_plays);
+     scored
+ }
+
+@@ -2857,11 +2866,7 @@ pub fn ranked_follows_enoch(p: &PlayPhase, me: PlayerID) -> Vec<ScoredPlay> {
+             ScoredPlay { cards, score }
+         })
+         .collect();
+-    scored.sort_by(|a, b| {
+-        b.score
+-            .partial_cmp(&a.score)
+-            .unwrap_or(std::cmp::Ordering::Equal)
+-    });
++    scored.sort_by(compare_enoch_scored_plays);
+     scored
+ }
+
+@@ -2879,7 +2884,7 @@ pub(crate) fn ranked_leads_enoch_for_rollout(p: &PlayPhase, me: PlayerID) -> Vec
+         })
+         .filter(|play| play.score.is_finite())
+         .collect();
+-    scored.sort_by(|a, b| b.score.total_cmp(&a.score));
++    scored.sort_by(compare_enoch_scored_plays);
+     scored
+ }
+
+@@ -2892,7 +2897,7 @@ pub(crate) fn ranked_follows_enoch_for_rollout(p: &PlayPhase, me: PlayerID) -> V
+             cards,
+         })
+         .collect();
+-    scored.sort_by(|a, b| b.score.total_cmp(&a.score));
++    scored.sort_by(compare_enoch_scored_plays);
+     scored
+ }
+
+@@ -2994,10 +2999,15 @@ pub fn choose_play_direct(
+ pub fn bid_strength(hand: &[Card], candidate: Trump) -> f64 {
+     let mut score = 0.0;
+     let counts = Card::count(hand.iter().copied());
++    let mut count_entries = counts
++        .iter()
++        .map(|(&card, &count)| (card, count))
++        .collect::<Vec<_>>();
++    count_entries.sort_by_key(|(card, _)| card.as_char());
+
+     // Count effective-trump cards and their strength.
+     let mut trump_count = 0;
+-    for (&card, &ct) in &counts {
++    for &(card, ct) in &count_entries {
+         if candidate.effective_suit(card) == EffectiveSuit::Trump {
+             trump_count += ct;
+             let s = card_strength(candidate, card);
+@@ -3013,7 +3023,7 @@ pub fn bid_strength(hand: &[Card], candidate: Trump) -> f64 {
+     score += big as f64 * 3.0 + small as f64 * 2.0;
+
+     // Side-suit Aces/Kings provide control.
+-    for (&card, &ct) in &counts {
++    for &(card, ct) in &count_entries {
+         if candidate.effective_suit(card) != EffectiveSuit::Trump {
+             if let Card::Suited { number, .. } = card {
+                 if number == Number::Ace {
+@@ -3038,12 +3048,17 @@ pub fn bid_strength_enoch(hand: &[Card], candidate: Trump) -> f64 {
+     // Start from the shared backbone (length + raw strength + jokers + side aces).
+     let mut score = bid_strength(hand, candidate);
+     let counts = Card::count(hand.iter().copied());
++    let mut count_entries = counts
++        .iter()
++        .map(|(&card, &count)| (card, count))
++        .collect::<Vec<_>>();
++    count_entries.sort_by_key(|(card, _)| card.as_char());
+
+     // PAIR PRIORITY: each effective-trump PAIR (two copies) is worth a big bump.
+     // The backbone already counted each card once for length; this adds the extra
+     // "a pair is worth ~3-4 singles" premium on top. Trump-number / joker pairs
+     // (the trump tops) are worth even more.
+-    for (&card, &ct) in &counts {
++    for &(card, ct) in &count_entries {
+         if candidate.effective_suit(card) != EffectiveSuit::Trump {
+             continue;
+         }
+diff --git a/core/src/bot/policy.rs b/core/src/bot/policy.rs
+index 2e75648..7b0b615 100644
+--- a/core/src/bot/policy.rs
++++ b/core/src/bot/policy.rs
+@@ -1030,6 +1030,10 @@ pub fn choose_bid(
+     if evaluated.is_empty() {
+         return None;
+     }
++    // `valid_bids` originates from hand counts and therefore has HashMap order.
++    // Canonicalize before ranking so equal-strength suits do not choose a
++    // process-random trump declaration.
++    evaluated.sort_by_key(|(bid, _, _)| (bid.card.as_char(), bid.count, bid.epoch, bid.id.0));
+     let heuristic_best_strength = evaluated
+         .iter()
+         .map(|(_, _, strength)| *strength)
+@@ -1151,6 +1155,17 @@ pub fn choose_exchange_bid(
+             strength -= bid.count as f64 * 0.5;
+             (strength >= 10.0).then_some((strength, bid))
+         })
+-        .max_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
++        .max_by(|(a_strength, a_bid), (b_strength, b_bid)| {
++            a_strength
++                .partial_cmp(b_strength)
++                .unwrap_or(std::cmp::Ordering::Equal)
++                // `max_by` should select the lexicographically smallest bid on
++                // an exact strength tie, matching `choose_bid` above.
++                .then_with(|| {
++                    let a_key = (a_bid.card.as_char(), a_bid.count, a_bid.epoch, a_bid.id.0);
++                    let b_key = (b_bid.card.as_char(), b_bid.count, b_bid.epoch, b_bid.id.0);
++                    b_key.cmp(&a_key)
++                })
++        })
+         .map(|(_, bid)| bid)
+ }

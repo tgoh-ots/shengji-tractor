@@ -31,9 +31,15 @@ SOURCE_FILES = (
     "core/examples/enoch_control_probe.rs",
     "core/examples/enoch_eval.rs",
     "mechanics/Cargo.toml",
+    "training/enoch_control_probe_reference.patch",
 )
 
 GLOBAL_FIXTURES: tuple[tuple[str, str, str], ...] = (
+    (
+        "bid-score-hash-order-determinism",
+        "shengji-core",
+        "bot::heuristics::tests::test_bid_strength_is_bit_stable_across_fresh_count_maps",
+    ),
     (
         "physical-copy-conservation",
         "shengji-core",
