@@ -573,6 +573,8 @@ No step in this document authorizes automatic promotion or deployment.
 The documents below remain useful as evidence or technical references, but none
 of their older future-work ordering overrides this plan.
 
+- [Compute runtime and Week 1 execution plan](strongest-bot-compute-runtime-and-week-1-plan-2026-07-02.md)
+  — current-machine wall-clock estimates and the Stage 0–1 execution contract
 - [Policy-only Expert promotion](policy-only-promotion-2026-07-02.md)
 - [Human refinement evaluation](human-refinement-evaluation-2026-06-30.md)
 - [Bot overhaul and alternative training paths](../bot-overhaul-2026-06-30.md) — historical implementation audit
