@@ -537,7 +537,7 @@ teacher/baseline identity.
 
 The Week 1 package is implemented, but there is no valid completed
 authoritative W1.1 calibration and the 40–84-hour strength campaign has **not**
-been run. Two authoritative starts were stopped and retained as described
+been run. Three authoritative starts were stopped and retained as described
 below. There is therefore no Enoch-1 result, promotion claim, or evidence yet
 that any arm improves playing strength.
 
@@ -576,7 +576,7 @@ Local implementation verification completed with:
 
 - 188 passing core tests with 2 pre-existing ignored tests, 77 passing mechanics
   tests, 12 evaluator tests, and 5 control-probe tests;
-- 85 passing Week 1 Python tests;
+- 86 passing Week 1 Python tests;
 - clean formatting, all-target compilation, and strict Clippy checks;
 - 31 sealed tactical/global fixture cases over 45 source files, including the
   hash-order regression fixture, with zero failures
@@ -598,7 +598,7 @@ seed ledgers.
 
 ### Retired authoritative attempts — 2026-07-04
 
-Two starts are preserved under `.enoch-week1-runs/` and must not be
+Three starts are preserved under `.enoch-week1-runs/` and must not be
 overwritten or presented as campaign evidence:
 
 1. `authoritative-2026-07-04-e5ab4ec` stopped during W1.0 before any seed
@@ -614,6 +614,14 @@ overwritten or presented as campaign evidence:
    per-process `HashMap` order in Enoch throw candidates, floating-point bid
    score accumulation, normal/exchange bid ties, and the harness's forced-bid
    fallback—not from the new mechanics changes.
+3. `authoritative-2026-07-04-f87cb65` stopped during W1.0 before any seed
+   claim. The three-file patch's check/apply/reverse commands ran from an
+   extracted reference directory nested inside the main Git worktree. Git
+   treated that directory as a subdirectory of the parent repository, filtered
+   every patch path, and returned success after changing zero files; the
+   post-apply hash guard caught the no-op. The freezer now forces standalone
+   apply semantics with a resolved `GIT_CEILING_DIRECTORIES`, and a nested
+   parent-worktree regression test verifies that all three target hashes change.
 
 The replacement source applies the same narrow deterministic normalization to
 current code and to a separately built probe-only `c813c8a` reference. The
@@ -623,10 +631,11 @@ fresh subprocesses per binary to be byte-identical within and across versions.
 An independent check over the entire 100-seed equivalence prefix was
 byte-identical (`140d71d5…75e9e`).
 
-Protocol `dea0964f…bd644f` and master seed `0x5eed202607040001` are retired.
-No namespace from that protocol may be reused. The replacement reserves the
-globally disjoint master seed `0x5eed202607040002` in a new run root; its
-35,111 derived seeds have zero overlap with the retired registry.
+Protocols `dea0964f…bd644f` and `4acdc5c1…0e2ed7e`, with master seeds
+`0x5eed202607040001` and `0x5eed202607040002`, are retired. No namespace
+from either protocol may be reused. The replacement reserves master seed
+`0x5eed202607040003` in a new run root; each registry contains 35,111 seeds,
+and all three registries are pairwise disjoint.
 
 ## Operator sequence
 

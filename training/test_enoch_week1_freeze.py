@@ -281,6 +281,68 @@ class Week1FreezeTests(unittest.TestCase):
             receipt["target_files_after_sha256"],
         )
 
+    def test_reference_patch_is_not_a_noop_inside_a_parent_git_worktree(self) -> None:
+        patch_body = (
+            "diff --git a/core/src/bot/harness.rs b/core/src/bot/harness.rs\n"
+            "--- a/core/src/bot/harness.rs\n"
+            "+++ b/core/src/bot/harness.rs\n"
+            "@@ -1 +1 @@\n"
+            "-old-harness\n"
+            "+new-harness\n"
+            "diff --git a/core/src/bot/heuristics.rs b/core/src/bot/heuristics.rs\n"
+            "--- a/core/src/bot/heuristics.rs\n"
+            "+++ b/core/src/bot/heuristics.rs\n"
+            "@@ -1 +1 @@\n"
+            "-old-heuristics\n"
+            "+new-heuristics\n"
+            "diff --git a/core/src/bot/policy.rs b/core/src/bot/policy.rs\n"
+            "--- a/core/src/bot/policy.rs\n"
+            "+++ b/core/src/bot/policy.rs\n"
+            "@@ -1 +1 @@\n"
+            "-old-policy\n"
+            "+new-policy\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(
+                ["git", "init", "--quiet"],
+                cwd=repository,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            reference = repository / "ignored" / "reference"
+            targets = {
+                "harness.rs": "old-harness\n",
+                "heuristics.rs": "old-heuristics\n",
+                "policy.rs": "old-policy\n",
+            }
+            for filename, contents in targets.items():
+                path = reference / "core" / "src" / "bot" / filename
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(contents, encoding="utf-8")
+            patch = root / "reference.patch"
+            patch.write_text(patch_body, encoding="utf-8")
+
+            receipt = _apply_reference_probe_patch(
+                reference,
+                patch,
+                {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            )
+
+            self.assertNotEqual(
+                receipt["target_files_before_sha256"],
+                receipt["target_files_after_sha256"],
+            )
+            for filename in targets:
+                self.assertTrue(
+                    (reference / "core" / "src" / "bot" / filename)
+                    .read_text(encoding="utf-8")
+                    .startswith("new-")
+                )
+
     def test_probe_build_uses_its_own_target_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

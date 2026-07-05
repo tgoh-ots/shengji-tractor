@@ -301,20 +301,27 @@ def _apply_reference_probe_patch(
     if missing:
         raise FreezeError(f"reference source lacks patch targets: {missing}")
     before = {relative: _sha256_file(path) for relative, path in targets.items()}
+    # A run root may live inside the caller's Git worktree. Without a discovery
+    # ceiling, `git apply` treats this extracted archive as a deep subdirectory
+    # of that parent repository, filters every `core/...` path by the subdirectory
+    # prefix, and exits successfully after changing zero files. Force standalone
+    # apply semantics for the extracted reference tree.
+    apply_environment = dict(environment)
+    apply_environment["GIT_CEILING_DIRECTORIES"] = str(reference_source.parent.resolve())
     _run(
         ("git", "apply", "--check", "--whitespace=error-all", str(patch)),
         cwd=reference_source,
-        environment=environment,
+        environment=apply_environment,
     )
     _run(
         ("git", "apply", "--whitespace=error-all", str(patch)),
         cwd=reference_source,
-        environment=environment,
+        environment=apply_environment,
     )
     _run(
         ("git", "apply", "--check", "--reverse", str(patch)),
         cwd=reference_source,
-        environment=environment,
+        environment=apply_environment,
     )
     after = {relative: _sha256_file(path) for relative, path in targets.items()}
     unchanged = [relative for relative in targets if after[relative] == before[relative]]
