@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -13,6 +15,7 @@ from training.enoch_week1_freeze import (
     _build_control_probe,
     _build_current_evaluator,
     _bundle_artifact_path,
+    _extract_archive,
     _hardware_summary,
     _inject_control_probe,
     _safe_environment,
@@ -22,6 +25,45 @@ from training.enoch_week1_freeze import (
 
 
 class Week1FreezeTests(unittest.TestCase):
+    def test_archive_extraction_supports_python_without_data_filter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive_path = root / "source.tar"
+            payload = b"frozen source\n"
+            with tarfile.open(archive_path, "w:") as archive:
+                member = tarfile.TarInfo("nested/source.txt")
+                member.mode = 0o10644
+                member.size = len(payload)
+                archive.addfile(member, io.BytesIO(payload))
+            destination = root / "destination"
+            with mock.patch(
+                "training.enoch_week1_freeze.inspect.signature",
+                return_value=mock.Mock(parameters={}),
+            ):
+                _extract_archive(archive_path, destination)
+            extracted = destination / "nested" / "source.txt"
+            self.assertEqual(extracted.read_bytes(), payload)
+            self.assertEqual(extracted.stat().st_mode & 0o7777, 0o644)
+
+    def test_archive_extraction_rejects_traversal_and_special_members(self) -> None:
+        for name, configure in (
+            ("traversal", lambda member: setattr(member, "name", "../escape")),
+            ("symlink", lambda member: setattr(member, "type", tarfile.SYMTYPE)),
+        ):
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    archive_path = root / "source.tar"
+                    with tarfile.open(archive_path, "w:") as archive:
+                        member = tarfile.TarInfo("entry")
+                        configure(member)
+                        if member.issym():
+                            member.linkname = "target"
+                        archive.addfile(member, io.BytesIO(b""))
+                    with self.assertRaisesRegex(FreezeError, "unsafe"):
+                        _extract_archive(archive_path, root / "destination")
+                    self.assertFalse((root / "escape").exists())
+
     def test_hardware_summary_records_numeric_memory_without_host_identity(self) -> None:
         summary = _hardware_summary()
         fields = dict(item.split("=", 1) for item in summary.split(";"))

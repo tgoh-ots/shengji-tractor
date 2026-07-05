@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import os
 from pathlib import Path
 import platform
@@ -170,11 +171,24 @@ def _snapshot_sources(workspace: Path, destination: Path) -> tuple[str, list[dic
 def _extract_archive(archive_path: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=False)
     with tarfile.open(archive_path, "r:") as archive:
-        for member in archive.getmembers():
+        members = archive.getmembers()
+        destination_root = destination.resolve()
+        for member in members:
             target = (destination / member.name).resolve()
-            if destination.resolve() not in target.parents and target != destination.resolve():
+            if destination_root not in target.parents and target != destination_root:
                 raise FreezeError(f"unsafe path in git archive: {member.name!r}")
-        archive.extractall(destination, filter="data")
+            if not (member.isfile() or member.isdir()):
+                raise FreezeError(f"unsafe member type in git archive: {member.name!r}")
+        if "filter" in inspect.signature(archive.extractall).parameters:
+            archive.extractall(destination, members=members, filter="data")
+        else:
+            # Python 3.11 and older lack extraction filters. The fresh-root
+            # containment and regular-file/directory checks above provide the
+            # equivalent safety needed for a trusted local ``git archive``;
+            # clamp mode bits before using the legacy extractor as well.
+            for member in members:
+                member.mode &= 0o755
+            archive.extractall(destination, members=members)
 
 
 def _inject_control_probe(workspace: Path, reference_source: Path, bundle: Path) -> str:
