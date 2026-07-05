@@ -1,0 +1,270 @@
+{
+  "arms": [
+    {
+      "arm_id": "bid-ownership",
+      "comparison_id": "ablation-bid-ownership",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-bid-ownership-screen-v1",
+        "style_metric_bounds": {}
+      }
+    },
+    {
+      "arm_id": "compound-follow",
+      "comparison_id": "ablation-compound-follow",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-compound-follow-screen-v1",
+        "style_metric_bounds": {}
+      }
+    },
+    {
+      "arm_id": "failed-throw-better-player",
+      "comparison_id": "ablation-failed-throw-better-player",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-failed-throw-better-player-screen-v1",
+        "style_metric_bounds": {}
+      }
+    },
+    {
+      "arm_id": "friend-revelation",
+      "comparison_id": "ablation-friend-revelation",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-friend-revelation-screen-v1",
+        "style_metric_bounds": {}
+      }
+    },
+    {
+      "arm_id": "terminal-level-utility",
+      "comparison_id": "ablation-terminal-level-utility",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-terminal-level-utility-screen-v1",
+        "style_metric_bounds": {}
+      }
+    },
+    {
+      "arm_id": "kitty-burial",
+      "comparison_id": "ablation-kitty-burial",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-kitty-burial-screen-v1",
+        "style_metric_bounds": {}
+      }
+    },
+    {
+      "arm_id": "late-ruff-shape",
+      "comparison_id": "ablation-late-ruff-shape",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-late-ruff-shape-screen-v1",
+        "style_metric_bounds": {}
+      }
+    },
+    {
+      "arm_id": "contextual-empty-trick",
+      "comparison_id": "ablation-contextual-empty-trick",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-contextual-empty-trick-screen-v1",
+        "style_metric_bounds": {}
+      }
+    },
+    {
+      "arm_id": "relative-live-suit",
+      "comparison_id": "ablation-relative-live-suit",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-relative-live-suit-screen-v1",
+        "style_metric_bounds": {}
+      }
+    },
+    {
+      "arm_id": "team-void-boss",
+      "comparison_id": "ablation-team-void-boss",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-team-void-boss-screen-v1",
+        "style_metric_bounds": {}
+      }
+    },
+    {
+      "arm_id": "teammate-entry-return",
+      "comparison_id": "ablation-teammate-entry-return",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-teammate-entry-return-screen-v1",
+        "style_metric_bounds": {}
+      }
+    },
+    {
+      "arm_id": "low-trump-handoff",
+      "comparison_id": "ablation-low-trump-handoff",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-low-trump-handoff-screen-v1",
+        "style_metric_bounds": {}
+      }
+    },
+    {
+      "arm_id": "structural-family-coverage",
+      "comparison_id": "ablation-structural-family-coverage",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-structural-family-coverage-screen-v1",
+        "style_metric_bounds": {}
+      }
+    },
+    {
+      "arm_id": "progressive-admission",
+      "comparison_id": "ablation-progressive-admission",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-progressive-admission-screen-v1",
+        "style_metric_bounds": {}
+      }
+    },
+    {
+      "arm_id": "uncertain-legal-throws",
+      "comparison_id": "ablation-uncertain-legal-throws",
+      "development_rule": {
+        "maximum_candidate_p95_latency_ms": 750.0,
+        "minimum_candidate_completed_worlds_mean": null,
+        "minimum_level_utility_estimate": 0.0,
+        "minimum_level_utility_lower_95": -0.05,
+        "minimum_point_margin_estimate": 0.0,
+        "minimum_win_rate_estimate": -0.02,
+        "require_zero_invalidating_failures": true,
+        "rule_id": "w1.2-uncertain-legal-throws-screen-v1",
+        "style_metric_bounds": {}
+      }
+    }
+  ],
+  "automatic_production_promotion_allowed": false,
+  "available_parallelism": 10,
+  "baseline_worker_report_fingerprint": "79d47b95f65c4c9b5377c5a0894abecd4d02069eb8c965176eb1f69587b8dc6f",
+  "failure_disposition": "retire-protocol-on-any-claimed-incomplete-comparison",
+  "fixed_work": {
+    "budget_ms": null,
+    "candidates": 6,
+    "deadline_ms": 30000,
+    "rollout_tricks": 6,
+    "work_mode": "fixed-work",
+    "worlds": 24
+  },
+  "manifest_kind": "enoch-week1-w1.2-committed-plan",
+  "manifest_version": 1,
+  "pair_count_per_arm": 300,
+  "parent_phase_manifest_fingerprint": "24503b8909df96b6bb1cf47a91da3e830ea623c4ead6db98f9c4881b9043da63",
+  "preclaim_consumed_count": 10211,
+  "preclaim_ledger_fingerprint": "191b64125901c90d390e6db01bd83ef7054c1ec5a54aafd108699a5bc2cb0eee",
+  "protocol_fingerprint": "a1e48199e6cb153c68f442cac9f28400798b994d154e03d34cb64420e21db2b7",
+  "ranking_rule": [
+    "advancement-decision-descending",
+    "level-utility-lower-95-descending",
+    "level-utility-estimate-descending",
+    "point-margin-estimate-descending",
+    "win-rate-estimate-descending",
+    "canonical-arm-ordinal-ascending"
+  ],
+  "required_style_metrics": [
+    "compound-format-follow-rate",
+    "empty-trick-ruff-rate",
+    "failed-throw-rate",
+    "follow-rate",
+    "lead-rate",
+    "multi-card-play-rate",
+    "point-card-play-rate",
+    "throw-rate",
+    "trump-play-rate"
+  ],
+  "shard_count": 8,
+  "shard_timeout_seconds": 3600,
+  "worker_count": 8
+}
