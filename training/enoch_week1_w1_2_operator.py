@@ -1825,7 +1825,9 @@ def _run_arm(
         except (
             W12OperatorError,
             KeyError,
+            OverflowError,
             TypeError,
+            ValueError,
             enoch_week1.ProtocolError,
             enoch_week1_evidence.EvidenceError,
             enoch_week1_runner.RunnerError,
@@ -1958,7 +1960,9 @@ def _run_arm(
             except (
                 W12OperatorError,
                 KeyError,
+                OverflowError,
                 TypeError,
+                ValueError,
                 enoch_week1.ProtocolError,
                 enoch_week1_evidence.EvidenceError,
                 enoch_week1_runner.RunnerError,

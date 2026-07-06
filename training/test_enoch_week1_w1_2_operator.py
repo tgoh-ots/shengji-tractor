@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
@@ -563,65 +564,238 @@ class StateMachineTests(unittest.TestCase):
                 ).is_file()
             )
 
-    def test_cached_invalid_completion_retires(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            layout = w12.W12Layout(Path(temporary))
-            arm = {
-                "arm_id": "bid-ownership",
-                "comparison": {"seed_namespace": "dev/ablation/bid-ownership"},
-                "ordinal": 1,
-                "seed_namespace": "dev/ablation/bid-ownership",
-            }
-            execution = (
-                layout.arm(1, "bid-ownership")
-                / "attempts"
-                / "attempt-001"
-                / "execution"
-            )
-            execution.mkdir(parents=True)
-            (execution / "execution-complete.json").write_text(
-                "{}\n", encoding="utf-8"
-            )
-            ledger = {
-                "consumed": [
-                    {
-                        "consumer": "runner:x:shard-000",
-                        "index": 0,
-                        "namespace": arm["seed_namespace"],
-                        "seed": 1,
-                        "sequence": 0,
+    def test_cached_invalid_completion_errors_retire(self) -> None:
+        errors = (
+            w12.W12OperatorError("corrupt completion"),
+            ValueError("malformed completion path"),
+            OverflowError("malformed numeric conversion"),
+        )
+        for error in errors:
+            with self.subTest(error=type(error).__name__):
+                with tempfile.TemporaryDirectory() as temporary:
+                    layout = w12.W12Layout(Path(temporary))
+                    arm = {
+                        "arm_id": "bid-ownership",
+                        "comparison": {
+                            "seed_namespace": "dev/ablation/bid-ownership"
+                        },
+                        "ordinal": 1,
+                        "seed_namespace": "dev/ablation/bid-ownership",
                     }
-                ],
-                "ledger_fingerprint": _digest("ledger"),
-            }
-            enoch_week1.atomic_write_json(layout.base.ledger, ledger)
-            state = {"protocol": {"protocol_fingerprint": _digest("protocol")}}
-            ledger_patch = mock.patch.object(
-                w12.enoch_week1, "validate_seed_ledger"
-            )
-            completion_patch = mock.patch.object(
-                w12,
-                "_validate_completed_arm",
-                side_effect=w12.W12OperatorError("corrupt completion"),
-            )
-            with ledger_patch:
-                with completion_patch:
-                    with self.assertRaises(w12.W12OperatorError):
-                        w12._run_arm(  # noqa: SLF001
-                            layout,
-                            Path(temporary),
-                            state,
-                            {},
-                            {},
-                            {},
-                            arm,
-                            operator_id="test",
-                            base_environment={},
+                    execution = (
+                        layout.arm(1, "bid-ownership")
+                        / "attempts"
+                        / "attempt-001"
+                        / "execution"
+                    )
+                    execution.mkdir(parents=True)
+                    (execution / "execution-complete.json").write_text(
+                        "{}\n", encoding="utf-8"
+                    )
+                    ledger = {
+                        "consumed": [
+                            {
+                                "consumer": "runner:x:shard-000",
+                                "index": 0,
+                                "namespace": arm["seed_namespace"],
+                                "seed": 1,
+                                "sequence": 0,
+                            }
+                        ],
+                        "ledger_fingerprint": _digest("ledger"),
+                    }
+                    enoch_week1.atomic_write_json(layout.base.ledger, ledger)
+                    state = {
+                        "protocol": {"protocol_fingerprint": _digest("protocol")}
+                    }
+                    ledger_patch = mock.patch.object(
+                        w12.enoch_week1, "validate_seed_ledger"
+                    )
+                    completion_patch = mock.patch.object(
+                        w12,
+                        "_validate_completed_arm",
+                        side_effect=error,
+                    )
+                    with ledger_patch:
+                        with completion_patch:
+                            with self.assertRaises(w12.W12OperatorError):
+                                w12._run_arm(  # noqa: SLF001
+                                    layout,
+                                    Path(temporary),
+                                    state,
+                                    {},
+                                    {},
+                                    {},
+                                    arm,
+                                    operator_id="test",
+                                    base_environment={},
+                                )
+                    self.assertTrue(layout.retirement.is_file())
+                    self.assertTrue(
+                        (execution.parent / "failure-tombstone.json").is_file()
+                    )
+
+    def test_fresh_malformed_completion_conversion_errors_retire(self) -> None:
+        for error_type in (ValueError, OverflowError):
+            with self.subTest(error=error_type.__name__):
+                with tempfile.TemporaryDirectory() as temporary:
+                    layout = w12.W12Layout(Path(temporary))
+                    namespace = "dev/ablation/bid-ownership"
+                    arm = {
+                        "arm_id": "bid-ownership",
+                        "comparison": {"seed_namespace": namespace},
+                        "identity_bindings": {"evaluator": {}},
+                        "launch_configuration": {},
+                        "ordinal": 1,
+                        "seed_namespace": namespace,
+                    }
+                    initial_ledger = {
+                        "consumed": [],
+                        "ledger_fingerprint": _digest("initial-ledger"),
+                    }
+                    claimed_ledger = {
+                        "consumed": [
+                            {
+                                "consumer": "runner:x:shard-000",
+                                "index": 0,
+                                "namespace": namespace,
+                                "seed": 1,
+                                "sequence": 0,
+                            }
+                        ],
+                        "ledger_fingerprint": _digest("claimed-ledger"),
+                    }
+                    enoch_week1.atomic_write_json(
+                        layout.base.ledger, initial_ledger
+                    )
+                    protocol = {
+                        "evaluator_environment_policy": {"allowlist": []},
+                        "protocol_fingerprint": _digest("protocol"),
+                    }
+                    state = {
+                        "control": {},
+                        "fixture": {},
+                        "phase1": {},
+                        "protocol": protocol,
+                        "report": {},
+                    }
+                    declaration = {
+                        "execution_contract": {
+                            "available_parallelism": 1,
+                            "environment_identity": {},
+                            "timeout_seconds": 1,
+                            "worker_count": 1,
+                        }
+                    }
+
+                    def run_comparison(**arguments: object) -> dict[str, object]:
+                        if arguments["dry_run"]:
+                            return {}
+                        execution = Path(arguments["output_dir"])
+                        execution.mkdir(parents=True)
+                        enoch_week1.atomic_write_json(
+                            execution / "execution-complete.json", {}
                         )
-            self.assertTrue(layout.retirement.is_file())
-            self.assertTrue(
-                (execution.parent / "failure-tombstone.json").is_file()
-            )
+                        enoch_week1.atomic_write_json(
+                            layout.base.ledger, claimed_ledger, overwrite=True
+                        )
+                        return {}
+
+                    with contextlib.ExitStack() as stack:
+                        stack.enter_context(
+                            mock.patch.object(
+                                w12.enoch_week1, "validate_seed_ledger"
+                            )
+                        )
+                        stack.enter_context(
+                            mock.patch.object(
+                                w12,
+                                "validate_continuation_provenance",
+                            )
+                        )
+                        stack.enter_context(
+                            mock.patch.object(
+                                w12.enoch_week1_runner,
+                                "authoritative_campaign_lock",
+                                return_value=contextlib.nullcontext(object()),
+                            )
+                        )
+                        stack.enter_context(
+                            mock.patch.object(
+                                w12.enoch_week1_runner,
+                                "probe_evaluator_environment_identity",
+                                return_value={},
+                            )
+                        )
+                        stack.enter_context(
+                            mock.patch.object(w12, "_validate_environment_probe")
+                        )
+                        stack.enter_context(
+                            mock.patch.object(
+                                w12,
+                                "_finish_observation",
+                                side_effect=lambda started: started,
+                            )
+                        )
+                        stack.enter_context(
+                            mock.patch.object(
+                                w12.enoch_week1_evidence,
+                                "build_machine_contention_attestation",
+                                return_value={},
+                            )
+                        )
+                        stack.enter_context(
+                            mock.patch.object(
+                                w12.enoch_week1_evidence,
+                                "validate_machine_contention_attestation",
+                            )
+                        )
+                        stack.enter_context(
+                            mock.patch.object(
+                                w12.enoch_week1_evidence,
+                                "build_verified_external_evidence",
+                                return_value={},
+                            )
+                        )
+                        stack.enter_context(
+                            mock.patch.object(
+                                w12.enoch_week1_evidence,
+                                "validate_verified_external_evidence",
+                            )
+                        )
+                        stack.enter_context(
+                            mock.patch.object(
+                                w12.enoch_week1_runner,
+                                "run_comparison",
+                                side_effect=run_comparison,
+                            )
+                        )
+                        stack.enter_context(
+                            mock.patch.object(
+                                w12,
+                                "_validate_completed_arm",
+                                side_effect=error_type("malformed completion"),
+                            )
+                        )
+                        with self.assertRaises(w12.W12OperatorError):
+                            w12._run_arm(  # noqa: SLF001
+                                layout,
+                                Path(temporary),
+                                state,
+                                {},
+                                {},
+                                declaration,
+                                arm,
+                                operator_id="test",
+                                base_environment={},
+                            )
+                    attempt = (
+                        layout.arm(1, "bid-ownership")
+                        / "attempts"
+                        / "attempt-001"
+                    )
+                    self.assertTrue(layout.retirement.is_file())
+                    self.assertTrue((attempt / "failure-tombstone.json").is_file())
 
     def test_abandoned_preclaim_attempt_is_tombstoned(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
