@@ -1,7 +1,7 @@
 # Strongest-bot program: Enoch, Grandmaster v2, and Expert v2
 
-> **Status:** authoritative Week 1 phases W1.0--W1.2 complete as of 2026-07-05;
-> W1.3 survivor screening is next
+> **Status:** authoritative Week 1 phases W1.0--W1.3 complete and
+> recovery-sealed as of 2026-07-06; W1.4 combination screening is next
 > **Production reference:** `c813c8a`, including the promoted schema-v2
 > policy-only Expert model
 > **Promotion policy:** train and evaluate freely, but never promote or deploy a
@@ -10,14 +10,15 @@
 > execution order, estimated gains, and recommendations in the older roadmap
 > and handoff documents linked at the end.
 
-## Authoritative Week 1 status -- 2026-07-05
+## Authoritative Week 1 status -- 2026-07-06
 
 The active run is preserved at
 `.enoch-week1-runs/authoritative-2026-07-05-d048b79`. It uses protocol
 `a1e48199e6cb153c68f442cac9f28400798b994d154e03d34cb64420e21db2b7`
 and permanent production control `c813c8a`. W1.0, W1.1, and W1.2 have been
-sealed and independently reconstructed; W1.3--W1.8 have not run. There is no
-Enoch-1 yet, and none of these artifacts authorizes promotion or deployment.
+sealed and independently reconstructed. W1.3 is complete, recovery-sealed, and
+independently reconstructed; W1.4--W1.8 have not run. There is no Enoch-1 yet,
+and none of these artifacts authorizes promotion or deployment.
 
 ### Measured W1.1 calibration
 
@@ -83,6 +84,56 @@ Key sealed W1.2 fingerprints are:
 | Immutable W1.2 ledger snapshot (14,711 total claims) | `2500ae1fbc5e1f03dc04b62ac92564be014f565443b1e6b0e337234cc2e598d8` |
 | W1.2 phase | `70d8a05c0e17a372e42c80e93d760ebf5d9fcb26c03c5474b06d5e3bbf214264` |
 
+### Measured W1.3 survivor screens and seal recovery
+
+W1.3 ran each of the five W1.2 survivors for 800 fresh mirrored pairs: 4,000
+pairs and 8,000 orientations total under the same fixed-work configuration and
+on the same host. Evaluation wall time was approximately `3h49m`. Every pair
+completed and all 11 artifact-mismatch, cancellation, fixture,
+hidden-information, honesty, illegal-action, incomplete-pair,
+machine-contention, model-contract, fallback, and timeout counters were zero.
+
+The predeclared W1.3 decisions were:
+
+| Arm | Level utility (95% interval) | Point margin | Win-rate delta | p95 latency | Decision |
+|---|---:|---:|---:|---:|---|
+| `bid-ownership` | `+0.003125 [-0.010625, +0.01625]` | `+0.1875` | `+0.00125` | `231.2046 ms` | `advance-to-w1.4` |
+| `compound-follow` | `+0.00375 [-0.031875, +0.03875]` | `+0.028125` | `+0.00625` | `237.5414 ms` | `advance-to-w1.4` |
+| `friend-revelation` | `0.00000 [0.00000, 0.00000]` | `0.0000` | `0.0000` | `194.7366 ms` | `advance-to-w1.4` |
+| `team-void-boss` | `-0.0075 [-0.038125, +0.02375]` | `-0.2375` | `-0.0075` | `209.0476 ms` | `stop-and-record` |
+| `uncertain-legal-throws` | `+0.00875 [-0.006875, +0.02375]` | `+0.309375` | `+0.00125` | `211.9845 ms` | `advance-to-w1.4` |
+
+Only `bid-ownership`, `compound-follow`, `friend-revelation`, and
+`uncertain-legal-throws` may enter W1.4. `team-void-boss` is sealed as
+`stop-and-record`. Passing this permissive development rule is permission to
+test the four-change combination, not evidence that any arm is superior and
+not permission to promote or deploy a bot.
+
+The original `171ee31a1528085f2378c8db211ba74ea25b9925` W1.3 operator completed
+all evaluation and wrote the exact 18,711-claim final ledger, but its seal path
+mislabeled the external-evidence validator's counter map as a fingerprint. It
+therefore wrote a semantically hashed but malformed supported-set and failed
+before writing a phase; it did not retire the protocol. The audited
+`bc685a6f44961f32c80caacedf92a784a5bf0032` metadata-only recovery archived
+the malformed bytes, corrected exactly the five mislabeled fields from their
+already sealed evidence fingerprints, and wrote a recovery-bound W1.3 phase.
+Recovery performed zero new seed claims and zero evaluator invocations.
+
+Key W1.3 and recovery bindings are:
+
+| Artifact | Fingerprint or file SHA-256 |
+|---|---|
+| Original W1.3 continuation provenance | `d947489a73996558289e0f2815ad3742d97c717ebc97f447a24a56f04a3ee16e` |
+| Original W1.3 campaign declaration | `a9fe49ba40831844cafa8a56c9fe6663c659785385bac968d338486da676ac89` |
+| Immutable W1.3 final ledger snapshot (18,711 total claims) | `999e43c97bd27daa372df882a0208a71862cd7bc484e8a87605df5363e38c897` |
+| Archived malformed supported-set semantic fingerprint | `116b56f15c34d7dafe15579716d6adbc4b1a88e3eb0b75407d0a49e1f6ba0ee0` |
+| Archived malformed supported-set raw file SHA-256 | `79cd17778ff68582b7886ec0f4e382d060175aedd67b94b84ac6462fcd6816f7` |
+| Corrected supported-independent-change-set | `a6b2e8f0b79eb2199b141f68ce6d65a4716fbe6dbae2e2160738c0cd051ce025` |
+| Corrected supported-set raw file SHA-256 | `e6021dee34db462c7d2a5b102de09377fe5b0bda360b51ae4595a9ca4ac2a6dd` |
+| Seal-recovery provenance | `130bad03a3eff24ca57da15615df820f582b84f81e054e96bb7436bf6c02c267` |
+| Seal-recovery manifest | `8cea1459b32e530e7211d69c5f7c0e4cad281eada081a64a9c29c97d6912a11e` |
+| Recovery-aware W1.3 phase | `1059c449de8b4f181e1887f0064f4544ac8286b152094025246e11a3830b3a5e` |
+
 ### First-week progression and next step
 
 | Phase | Current state | Timing basis |
@@ -90,17 +141,20 @@ Key sealed W1.2 fingerprints are:
 | W1.0 | Complete: immutable control and evaluator | Measured |
 | W1.1 | Complete: calibration, baselines, fixtures, worker selection | Measured above |
 | W1.2 | Complete: 15 independent 300-pair screens; five advance | Measured `4:27:12` |
-| W1.3 | Next: five independent 800-pair survivor screens on fresh namespaces | Projected `3--10h`, not yet measured |
-| W1.4 | Conditional combination screen and interaction regression | Projection only |
+| W1.3 | Complete and recovery-sealed: five independent 800-pair screens; four supported | Measured approximately `3h49m` evaluation wall |
+| W1.4 | Next: four-change combination screen and interaction regression | Projection only |
 | W1.5 | Product-budget qualification matrix | Projection only |
 | W1.6--W1.7 | Primary locked gate and independent confirmation | Projection only |
 | W1.8 | Human-reviewed freeze-or-retain decision | Not started |
 
-The immediate next step is to commit and bind the W1.3 continuation, predeclare
-the five 800-pair comparisons against the immutable W1.2 snapshot, and run them
-one at a time under the same machine-global lock. Only arms that pass W1.3 may
-enter W1.4. Grandmaster/Expert strength work and final training-label generation
-remain blocked until the Week 1 terminal decision.
+The immediate next step is W1.4: predeclare and bind a candidate containing
+only `bid-ownership`, `compound-follow`, `friend-revelation`, and
+`uncertain-legal-throws`, then run the full fixture regression, combination
+screen, 800-pair development screen, and interaction decision on fresh
+namespaces. `team-void-boss` must not enter that candidate. W1.3 establishes
+only eligibility for this combination test; it makes no superiority, Enoch-1,
+promotion, or deployment claim. Grandmaster/Expert strength work and final
+training-label generation remain blocked until the Week 1 terminal decision.
 
 ## Objective
 

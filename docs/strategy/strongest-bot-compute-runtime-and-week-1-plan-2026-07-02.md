@@ -1,7 +1,8 @@
 # Strongest-bot compute runtime and Week 1 execution plan
 
 > **Status:** compute-execution supplement, recorded 2026-07-02; authoritative
-> execution complete through W1.2 as of 2026-07-05
+> execution complete and recovery-sealed through W1.3 as of 2026-07-06; W1.4
+> combination screening is next
 > **Parent roadmap:**
 > [`strongest-bot-program-2026-07-02.md`](strongest-bot-program-2026-07-02.md)
 > **Scope:** current-machine wall-clock only. This document deliberately excludes
@@ -380,6 +381,13 @@ metrics. Preserve every result, including neutral and negative arms.
 **Exit:** a small set of independently supported changes or an explicit
 no-survivor result.
 
+**Authoritative outcome (2026-07-06): complete and recovery-sealed.** Five
+survivors ran for 800 fresh pairs each, totaling 4,000 pairs and 8,000
+orientations in approximately `3h49m` of evaluation wall time on the same host.
+Four changes are eligible for W1.4; this eligibility is not a superiority or
+promotion claim. The detailed metrics, seal incident, recovery, and immutable
+bindings are recorded in the authoritative execution status below.
+
 ### W1.4 — Build and regress the Enoch-1 candidate
 
 **Target:** Day 2; about 3–6 hours of compute after fixtures.
@@ -534,14 +542,15 @@ teacher/baseline identity.
 9. Independent confirmation protocol, raw pairs, comparison, and audit.
 10. Either an Enoch-1 freeze manifest or a no-confirmed-candidate decision.
 
-## Authoritative execution status — 2026-07-05
+## Authoritative execution status — 2026-07-06
 
 The active authoritative run is preserved at
 `.enoch-week1-runs/authoritative-2026-07-05-d048b79`. It uses master seed
 `0x5eed202607040004` and protocol
 `a1e48199e6cb153c68f442cac9f28400798b994d154e03d34cb64420e21db2b7`.
-W1.0, W1.1, and W1.2 are sealed and independently reconstructible; W1.3--W1.8
-have not run. No result through W1.2 is an Enoch-1, production-promotion, or
+W1.0, W1.1, and W1.2 are sealed and independently reconstructible. W1.3 is
+complete, recovery-sealed, and independently reconstructible; W1.4--W1.8 have
+not run. No result through W1.3 is an Enoch-1, production-promotion, or
 deployment decision.
 
 W1.0 sealed the production control
@@ -588,11 +597,57 @@ and phase
 The offline verifier reproduced all four bindings from stored artifacts and
 stored Git objects.
 
-The immediate next step is a committed, provenance-bound W1.3 continuation
-that predeclares the five fresh 800-pair comparisons against the immutable
-W1.2 snapshot. This remaining Week 1 work is rollout-evaluation compute, not
-neural-network training. W1.4 and later phases remain conditional on the W1.3
-results.
+W1.3 then ran the five W1.2 survivors for 800 fresh mirrored pairs each: 4,000
+pairs and 8,000 orientations total. Evaluation wall time was approximately
+`3h49m` on the same host. Every pair completed, and all 11 artifact-mismatch,
+cancellation, fixture, hidden-information, honesty, illegal-action,
+incomplete-pair, machine-contention, model-contract, fallback, and timeout
+counters were zero.
+
+| Arm | Level utility (95% interval) | Point margin | Win-rate delta | p95 latency | Decision |
+|---|---:|---:|---:|---:|---|
+| `bid-ownership` | `+0.003125 [-0.010625, +0.01625]` | `+0.1875` | `+0.00125` | `231.2046 ms` | `advance-to-w1.4` |
+| `compound-follow` | `+0.00375 [-0.031875, +0.03875]` | `+0.028125` | `+0.00625` | `237.5414 ms` | `advance-to-w1.4` |
+| `friend-revelation` | `0.00000 [0.00000, 0.00000]` | `0.0000` | `0.0000` | `194.7366 ms` | `advance-to-w1.4` |
+| `team-void-boss` | `-0.0075 [-0.038125, +0.02375]` | `-0.2375` | `-0.0075` | `209.0476 ms` | `stop-and-record` |
+| `uncertain-legal-throws` | `+0.00875 [-0.006875, +0.02375]` | `+0.309375` | `+0.00125` | `211.9845 ms` | `advance-to-w1.4` |
+
+The supported W1.4 input is exactly `bid-ownership`, `compound-follow`,
+`friend-revelation`, and `uncertain-legal-throws`. `team-void-boss` is sealed
+as `stop-and-record`. These decisions grant only permission to test the
+four-change combination; they do not establish superiority and do not
+authorize production promotion or deployment.
+
+The original `171ee31a1528085f2378c8db211ba74ea25b9925` operator completed every
+W1.3 evaluation and sealed the exact 18,711-claim ledger. During final sealing,
+it mislabeled the external-evidence validator's counter map as a fingerprint,
+wrote a semantically hashed but malformed supported-set, and stopped before a
+phase was written. There was no retirement. The audited
+`bc685a6f44961f32c80caacedf92a784a5bf0032` metadata-only recovery archived
+the malformed file byte-for-byte, corrected exactly the five mislabeled fields
+from their sealed external-evidence fingerprints, and wrote a recovery-bound
+phase. It made zero new seed claims and invoked the evaluator zero times.
+
+| Artifact | Fingerprint or file SHA-256 |
+|---|---|
+| Original W1.3 continuation provenance | `d947489a73996558289e0f2815ad3742d97c717ebc97f447a24a56f04a3ee16e` |
+| Original W1.3 campaign declaration | `a9fe49ba40831844cafa8a56c9fe6663c659785385bac968d338486da676ac89` |
+| Immutable W1.3 final ledger snapshot (18,711 total claims) | `999e43c97bd27daa372df882a0208a71862cd7bc484e8a87605df5363e38c897` |
+| Archived malformed supported-set semantic fingerprint | `116b56f15c34d7dafe15579716d6adbc4b1a88e3eb0b75407d0a49e1f6ba0ee0` |
+| Archived malformed supported-set raw file SHA-256 | `79cd17778ff68582b7886ec0f4e382d060175aedd67b94b84ac6462fcd6816f7` |
+| Corrected supported-independent-change-set | `a6b2e8f0b79eb2199b141f68ce6d65a4716fbe6dbae2e2160738c0cd051ce025` |
+| Corrected supported-set raw file SHA-256 | `e6021dee34db462c7d2a5b102de09377fe5b0bda360b51ae4595a9ca4ac2a6dd` |
+| Seal-recovery provenance | `130bad03a3eff24ca57da15615df820f582b84f81e054e96bb7436bf6c02c267` |
+| Seal-recovery manifest | `8cea1459b32e530e7211d69c5f7c0e4cad281eada081a64a9c29c97d6912a11e` |
+| Recovery-aware W1.3 phase | `1059c449de8b4f181e1887f0064f4544ac8286b152094025246e11a3830b3a5e` |
+
+The immediate next step is W1.4. Its provenance-bound candidate must combine
+only the four supported changes, then pass the full fixture regression,
+combination screen, fresh 800-pair development screen, and reconstructable
+interaction decision. This remaining work is rollout-evaluation compute, not
+neural-network training. Neither the W1.3 survivors nor their future
+combination may be described as superior or promoted before the later
+qualification and locked gates succeed.
 
 ## Historical implementation and execution status — 2026-07-04
 
