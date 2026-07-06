@@ -1,9 +1,9 @@
 # Strongest-bot compute runtime and Week 1 execution plan
 
 > **Status:** compute-execution supplement, recorded 2026-07-02; authoritative
-> execution complete and independently reconstructed through W1.4 as of
-> 2026-07-06; W1.4 ended `combination-regressed`, W1.5--W1.7 are disallowed,
-> and W1.8 is next
+> Week 1 execution complete and independently reconstructed through W1.8 as of
+> 2026-07-06; W1.4 ended `combination-regressed`, W1.5--W1.7 were skipped, and
+> W1.8 retained Enoch-0
 > **Parent roadmap:**
 > [`strongest-bot-program-2026-07-02.md`](strongest-bot-program-2026-07-02.md)
 > **Scope:** current-machine wall-clock only. This document deliberately excludes
@@ -117,7 +117,7 @@ on the same machine during the same week.
 | Enoch 1,500–2,000-pair gate plus independent confirmation | 18–30h |
 | One complete Enoch candidate evaluation package | about 2–4d |
 | Grandmaster fixed-work development sweep | 4–12h |
-| One frozen Grandmaster candidate's primary four-comparison gate | 2–4d |
+| One frozen Grandmaster candidate's primary two-to-four-comparison gate | about 1–4d |
 | Five MLP policy/Q/V ablations from a frozen 8,000–12,000-game corpus | about 13–25h |
 | Five development model screens plus one 800-pair finalist | about 8–18h |
 | Week-bounded sparse Track C corpus, five MLPs, and development gates under the cheap-base contract below | about 5–7d |
@@ -127,9 +127,12 @@ on the same machine during the same week.
 | Search-controlled Enoch kitty-burial comparison | under 1d |
 | Expert v2 distillation that logs and reuses existing GM visits/Q/uncertainty | about 2–7d |
 
-For a Grandmaster candidate, the primary four-comparison gate means Enoch-1 and
-Enoch-0 at equal and intended product compute. It does not include the final two
-2,000–2,500-pair confirmations or the broad robustness matrix.
+For a Grandmaster candidate, the primary gate means the frozen downstream Enoch
+baseline at equal and intended product compute, plus Enoch-0 at both budgets
+only when it is a distinct identity. That produces two comparisons on the
+active retained-Enoch-0 branch and four after a future confirmed Enoch-1. It
+does not include the final two 2,000–2,500-pair confirmations or the broad
+robustness matrix.
 
 ## What does not fit inside seven days
 
@@ -526,6 +529,12 @@ gate without confirmation is not a freeze.
 **Exit:** one immutable Week 1 decision record and an unambiguous downstream
 teacher/baseline identity.
 
+**Authoritative outcome (2026-07-06): complete; Enoch-0 retained.** W1.8 sealed
+`no-confirmed-candidate`, recorded the human-reviewed retain-control decision,
+and left W1.5--W1.7 absent. Enoch-0 is both the permanent scientific control and
+the downstream primary baseline. Stage 2 rebaselining is authorized;
+production promotion and deployment are not.
+
 ## Week 1 stop and invalidation rules
 
 - A fixture failure blocks that ablation from self-play.
@@ -554,6 +563,7 @@ teacher/baseline identity.
 9. If admitted, independent-confirmation protocol, raw pairs, comparison, and
    audit.
 10. Either an Enoch-1 freeze manifest or a no-confirmed-candidate decision.
+    The active run completed the latter in W1.8.
 
 ## Authoritative execution status — 2026-07-06
 
@@ -561,12 +571,14 @@ The active authoritative run is preserved at
 `.enoch-week1-runs/authoritative-2026-07-05-d048b79`. It uses master seed
 `0x5eed202607040004` and protocol
 `a1e48199e6cb153c68f442cac9f28400798b994d154e03d34cb64420e21db2b7`.
-W1.0--W1.4 are sealed and independently reconstructible. W1.4 completed all
-1,100 declared pairs with zero invalidating counters, but the candidate failed
+W1.0--W1.4 and W1.8 are sealed and independently reconstructible. W1.4
+completed all 1,100 declared pairs with zero invalidating counters, but the
+candidate failed
 its predeclared qualification rule. The sealed exit is
 `combination-regressed`, no candidate was selected, and W1.5--W1.7 are not
-allowed. No result through W1.4 is an Enoch-1, production-promotion, or
-deployment decision. W1.8 has not run.
+allowed. W1.8 then sealed `no-confirmed-candidate`, retained Enoch-0 as both
+baselines, and recorded human review. There is no Enoch-1. Stage 2 rebaselining
+is authorized, but production promotion and deployment are not.
 
 W1.0 sealed the production control
 (`1aeb0c4f7d62d606eb554cf50aa83250a3672dd806587e695981196766e620f2`)
@@ -702,10 +714,35 @@ without running comparisons or claiming seeds.
 | W1.4 exit | `d3a449cf29a98f14bcfdcdca7bafe1c5ba9bafbbebd56a21f9d4617f11eddf8b` |
 | W1.4 phase | `ad353c33adda2a31dfb1a26c63e3802b8584aee0b711d457d8c1fa60dd88a399` |
 
-The immediate next step is W1.8, not W1.5. W1.4 sealed no eligible candidate,
-so the live ledger may not advance and W1.5--W1.7 may not be materialized.
-W1.8 must preserve this branch and record Enoch-0 as the retained downstream
-baseline. This result is rollout-evaluation evidence, not neural-network
+### Measured W1.8 terminal decision
+
+W1.8 ran as a metadata-only retain-control seal under source commit
+`8bd141dea3fcacb015a6b5a48ebe99e90ae801ad`. It claimed zero seeds, invoked the
+evaluator zero times, and kept the 19,811-claim ledger byte-identical to W1.4.
+The authoritative seal took `7:45.60`; the separate offline read-only verifier
+reconstructed the full lineage and terminal state in `5:44.72`.
+
+The W1.8 seal binds 118 evidence fingerprints and the complete preserved
+pre-W1.8 inventory: 5,103 files, 2,466,144,135 bytes, with fingerprint
+`c3772664722f3fa46ca3b5d1489382c84fd3079a3a13bb006c38ba8923c267e4`.
+The rejected evaluated candidate remains preserved, the selected-candidate
+binding remains null, W1.5--W1.7 are absent, and Enoch-0 is both terminal
+baselines.
+
+| Artifact | Fingerprint |
+|---|---|
+| Retained Enoch-0 identity | `5243de72c6669e233c1528f42f5de8e4b578165f55b0964dd48c3326df551e62` |
+| Rejected evaluated candidate | `abebed7aee684612282e37513b37592bf3fe64f96a34f597870fe72cf3bbe706` |
+| W1.8 input plan | `430351610de11f15554643aa7e8d6dc499fd2f1834069f8d561b4892afce8289` |
+| W1.8 continuation provenance | `d95a812b1391effbabbf52f2ca0b200a455db7eb6686b1b1c95b160b09584c32` |
+| Immutable final ledger (19,811 claims) | `17d6eecf5a8119946de82853e34e314a1b3a4a4b18404c3209c217fd52c0fbea` |
+| Human-review attestation | `b8745960c0d6d5d9af847c4bbfcfbcb708985ed80bccf96f5fa770cace138b32` |
+| Terminal no-confirmed-candidate decision | `799be65915b7c60a280e03cbcd038e94bfc3af7340763c86dfe2b93070e5bd84` |
+| W1.8 phase | `61eaba943d1ad417408f2ba3f190e1d4e5ea270bc840e582c6ea17c0c16a3cdf` |
+
+Week 1 is complete. The immediate next step is Stage 2: rebaseline Expert and
+Grandmaster against Enoch-0 and begin authoritative Grandmaster policy
+selection. This result is rollout-evaluation evidence, not neural-network
 training, and it authorizes neither promotion nor deployment.
 
 ## Historical implementation and execution status — 2026-07-04

@@ -1,8 +1,8 @@
 # Strongest-bot program: Enoch, Grandmaster v2, and Expert v2
 
-> **Status:** authoritative Week 1 phases W1.0--W1.4 complete and
+> **Status:** authoritative Week 1 terminal chain complete and
 > independently reconstructed as of 2026-07-06; W1.4 ended
-> `combination-regressed`, W1.5--W1.7 are disallowed, and W1.8 is next
+> `combination-regressed`, W1.5--W1.7 were skipped, and W1.8 retained Enoch-0
 > **Production reference:** `c813c8a`, including the promoted schema-v2
 > policy-only Expert model
 > **Promotion policy:** train and evaluate freely, but never promote or deploy a
@@ -16,13 +16,15 @@
 The active run is preserved at
 `.enoch-week1-runs/authoritative-2026-07-05-d048b79`. It uses protocol
 `a1e48199e6cb153c68f442cac9f28400798b994d154e03d34cb64420e21db2b7`
-and permanent production control `c813c8a`. W1.0--W1.4 are sealed and
+and permanent production control `c813c8a`. W1.0--W1.4 and W1.8 are sealed and
 independently reconstructed. W1.4 completed all 1,100 declared pairs with zero
 invalidating counters, but the four-change combination failed its predeclared
-acceptance rule. The sealed exit is `combination-regressed`, no candidate was
-selected, and W1.5 is not allowed. There is no Enoch-1 and no artifact
-authorizes promotion or deployment. W1.8 must now record retention of Enoch-0
-before downstream strength work begins.
+acceptance rule. W1.4 therefore disallowed W1.5--W1.7. W1.8 sealed
+`no-confirmed-candidate`, verified those phases remained absent, and retained
+Enoch-0 as both the permanent scientific control and downstream primary
+baseline. There is no Enoch-1 and no artifact authorizes promotion or
+deployment. Human review is recorded and Stage 2 rebaselining may now begin
+from Enoch-0.
 
 ### Measured W1.1 calibration
 
@@ -185,6 +187,36 @@ terminal bindings without executing comparisons or claiming seeds.
 | W1.4 exit | `d3a449cf29a98f14bcfdcdca7bafe1c5ba9bafbbebd56a21f9d4617f11eddf8b` |
 | W1.4 phase | `ad353c33adda2a31dfb1a26c63e3802b8584aee0b711d457d8c1fa60dd88a399` |
 
+### Measured W1.8 terminal decision
+
+W1.8 ran as a metadata-only retain-control seal under source commit
+`8bd141dea3fcacb015a6b5a48ebe99e90ae801ad`. It invoked no evaluator, claimed
+no seeds, and left the canonical ledger byte-identical at 19,811 claims. The
+seal completed in `7:45.60`; a separate offline read-only reconstruction
+completed in `5:44.72` and reproduced the terminal result.
+
+The decision is `no-confirmed-candidate` because W1.4 ended
+`combination-regressed`. The evaluated candidate remains preserved as rejected,
+the selected-candidate binding remains null, W1.5--W1.7 are absent, and Enoch-0
+is now explicitly bound as both the permanent scientific control and downstream
+primary baseline. Human review authorized Stage 2 rebaselining from Enoch-0;
+production promotion and deployment remain unauthorized.
+
+The terminal seal binds 118 evidence fingerprints and the full preserved
+pre-W1.8 inventory: 5,103 files, 2,466,144,135 bytes, inventory fingerprint
+`c3772664722f3fa46ca3b5d1489382c84fd3079a3a13bb006c38ba8923c267e4`.
+
+| Artifact | Fingerprint |
+|---|---|
+| Retained Enoch-0 identity | `5243de72c6669e233c1528f42f5de8e4b578165f55b0964dd48c3326df551e62` |
+| Rejected evaluated candidate | `abebed7aee684612282e37513b37592bf3fe64f96a34f597870fe72cf3bbe706` |
+| W1.8 input plan | `430351610de11f15554643aa7e8d6dc499fd2f1834069f8d561b4892afce8289` |
+| W1.8 continuation provenance | `d95a812b1391effbabbf52f2ca0b200a455db7eb6686b1b1c95b160b09584c32` |
+| Immutable final ledger (19,811 claims) | `17d6eecf5a8119946de82853e34e314a1b3a4a4b18404c3209c217fd52c0fbea` |
+| Human-review attestation | `b8745960c0d6d5d9af847c4bbfcfbcb708985ed80bccf96f5fa770cace138b32` |
+| Terminal no-confirmed-candidate decision | `799be65915b7c60a280e03cbcd038e94bfc3af7340763c86dfe2b93070e5bd84` |
+| W1.8 phase | `61eaba943d1ad417408f2ba3f190e1d4e5ea270bc840e582c6ea17c0c16a3cdf` |
+
 ### First-week progression and next step
 
 | Phase | Current state | Timing basis |
@@ -195,12 +227,12 @@ terminal bindings without executing comparisons or claiming seeds.
 | W1.3 | Complete and recovery-sealed: five independent 800-pair screens; four supported | Measured approximately `3h49m` evaluation wall |
 | W1.4 | Complete: 1,100 combination pairs; candidate rejected | Measured `1:18:14` declaration-to-phase |
 | W1.5--W1.7 | Skipped and disallowed by the W1.4 exit | Not run |
-| W1.8 | Next: human-reviewed retain-control decision | Not started |
+| W1.8 | Complete: human-reviewed no-candidate decision; Enoch-0 retained | Measured `7:45.60` seal; `5:44.72` offline reconstruction |
 
-The immediate next step is W1.8. It must preserve the W1.4 no-candidate exit,
-record Enoch-0 as the downstream baseline, and present that decision for human
-review. No W1.5, locked-gate, promotion, or deployment artifact may be created
-from the rejected candidate.
+Week 1 is complete. The immediate next step is Stage 2: rebaseline Expert and
+Grandmaster against the retained Enoch-0 identity, then begin authoritative
+Grandmaster policy selection. No W1.5, locked-gate, promotion, or deployment
+artifact may be created from the rejected candidate.
 
 ## Objective
 
@@ -225,9 +257,11 @@ system, suitable where Grandmaster v2's full compute budget is not practical.
 
 ## Strategic decision: improve Enoch first, while preserving the old yardstick
 
-Enoch-1 will be completed and frozen before Grandmaster v2 development, model
-training, or their authoritative gates. This is the better product sequence for
-four reasons:
+The program first attempts to complete and freeze Enoch-1 before Grandmaster v2
+development, model training, or their authoritative gates. If no Enoch-1
+candidate confirms, W1.8 instead records the already frozen Enoch-0 as the
+downstream Enoch baseline and authorizes those later stages to proceed. This
+ordering has four reasons:
 
 1. downstream systems are measured against the strongest validated opponent,
    not a baseline we already know how to improve;
@@ -250,10 +284,13 @@ baselines:
   it becomes the primary yardstick, search prior, league member, and downstream
   training reference. It never erases Enoch-0 results.
 
-Every serious Grandmaster v2 or Expert v2 candidate will be selected against
-Enoch-1 and will also report against Enoch-0. This gives us practical strength
-against the best Enoch we have and continuity against a permanent control. If
-no Enoch-1 candidate proves superior, Enoch-0 remains both baselines.
+In the remainder of this plan, the **frozen downstream Enoch baseline** means
+Enoch-1 only after a successful locked confirmation; otherwise it means the
+human-reviewed retained Enoch-0. Every serious Grandmaster v2 or Expert v2
+candidate is selected against that identity and also reports against Enoch-0
+when the identities differ. This gives us practical strength against the best
+validated Enoch and continuity against a permanent control. The active Week 1
+branch confirmed no Enoch-1, so Enoch-0 currently fills both roles.
 
 Changes to shared heuristics can affect both sides of an in-process comparison
 and cancel out. Enoch experiments must therefore compare versioned policies or
@@ -301,9 +338,11 @@ Two older positive/negative results also constrain the sequence:
   a standalone priority, even though the later schema-v2 policy-only campaign
   did produce the confirmed improvement above.
 
-The most promising sequence is therefore Enoch-1 first, then stronger model-free
-Grandmaster search, then multi-world action-value learning, and only then more
-ambitious representation learning.
+The selected sequence was therefore to attempt Enoch-1 first, then use the
+frozen downstream Enoch baseline for stronger model-free Grandmaster search,
+then multi-world action-value learning, and only then more ambitious
+representation learning. Week 1 completed the first step without confirming an
+Enoch-1, so the active sequence now continues from Enoch-0.
 
 ## Target designs
 
@@ -427,13 +466,14 @@ out or remains an explicit experiment. Only after the independent locked
 confirmations pass is Enoch-1 frozen and allowed to become the primary yardstick
 for every later phase.
 
-## Track B: build model-free Grandmaster v2 after Enoch-1 freezes
+## Track B: build model-free Grandmaster v2 after the downstream Enoch baseline freezes
 
-This track begins only after Enoch-1 freezes. Grandmaster v2 inherits its proven
-safety proposals and is selected primarily by direct play against it. The first
-Grandmaster v2 milestone should be stronger without relying on a new neural
-artifact. This creates a better teacher and tells us how much gain comes from
-search rather than training.
+This track begins only after Week 1 freezes the downstream Enoch baseline.
+Grandmaster v2 inherits the baseline's proven safety proposals and is selected
+primarily by direct play against it. On the active branch, W1.8 satisfied this
+dependency by retaining Enoch-0. The first Grandmaster v2 milestone should be
+stronger without relying on a new neural artifact. This creates a better
+teacher and tells us how much gain comes from search rather than training.
 
 ### B1. Better allocation at the root
 
@@ -505,8 +545,8 @@ observation:
 - record mean return, variance, sample count, win, point margin, level result,
   and final-kitty result.
 
-Here `Enoch action` means frozen Enoch-1. Oversample score thresholds,
-final-kitty decisions, ruffs, throws, bombs,
+Here `Enoch action` means the frozen downstream Enoch baseline, currently
+Enoch-0. Oversample score thresholds, final-kitty decisions, ruffs, throws, bombs,
 pair/tractor preservation, partner feeds, and states where Enoch and Grandmaster
 disagree.
 
@@ -636,9 +676,9 @@ network:
   distributional V head.
 
 Train against a frozen checkpoint league with heterogeneous partners and
-opponents. Include Enoch-0, Enoch-1, prior Experts, Grandmasters, human-like
-scripts, and candidate best responses. Evaluate cross-play and robustness, not
-only homogeneous mirror self-play.
+opponents. Include Enoch-0, any independently confirmed Enoch-1 checkpoint,
+prior Experts, Grandmasters, human-like scripts, and candidate best responses.
+Evaluate cross-play and robustness, not only homogeneous mirror self-play.
 
 Verified strong-human replays may supply policy, history, and belief examples,
 but counterfactual Q must be stripped unless independently recomputed. A small
@@ -682,14 +722,16 @@ For Enoch-1, run 1,500–2,000 matched-deal pairs against frozen Enoch-0, coveri
 both seat/team orientations. It becomes the primary yardstick only after an
 independently seeded confirmation passes the same predeclared superiority rule.
 
-For Grandmaster v2 and Expert v2, run 1,500–2,000 matched-deal pairs against
-frozen Enoch-1 as the primary gate and against Enoch-0 for historical continuity.
+For Grandmaster v2 and Expert v2, run 1,500–2,000 matched-deal pairs against the
+frozen downstream Enoch baseline as the primary gate. When that identity is
+Enoch-1, also compare against Enoch-0 for historical continuity. When it is
+Enoch-0, one comparison fills both roles; do not duplicate an identical gate.
 Run both intended product budgets and equal-compute budgets.
 
 For the final claim that a bot is stronger than Enoch, run two independently
-seeded confirmations of 2,000–2,500 pairs against frozen Enoch-1, plus the
-predeclared Enoch-0 continuity comparison. After the protocol is locked, do not
-tune on those seeds.
+seeded confirmations of 2,000–2,500 pairs against the frozen downstream Enoch
+baseline, plus a predeclared Enoch-0 continuity comparison when that is a
+distinct identity. After the protocol is locked, do not tune on those seeds.
 
 Primary success criterion:
 
@@ -732,8 +774,8 @@ influence downstream policy selection runs alongside it:
 | Stage | Work | Dependency |
 |---|---|---|
 | 0 | Freeze controls; harden evaluator, lineage, determinism, and style metrics | Starts immediately |
-| 1 | Enoch A1–A5 ablations and locked Enoch-1 confirmation | Starts after Enoch-0 freeze; no downstream strength campaign yet |
-| 2 | Rebaseline Expert/Grandmaster against Enoch-1; build model-free Grandmaster v2 | Starts only after Enoch-1 freezes |
+| 1 | Enoch A1–A5 ablations, candidate confirmation if admitted, and terminal baseline freeze | Starts after Enoch-0 freeze; W1.8 chooses confirmed Enoch-1 or retained Enoch-0 |
+| 2 | Rebaseline Expert/Grandmaster against the frozen downstream Enoch baseline; build model-free Grandmaster v2 | Starts only after the terminal Week 1 baseline freeze; authorized on the active Enoch-0 branch |
 | 3 | Corpus generation and P/Q/V training | Starts only after the Grandmaster v2 teacher freezes |
 | 4 | Belief, bid/kitty, structured-model, and bounded-iteration experiments | Starts after the relevant simpler baseline is locked |
 | 5 | Expert v2 distillation and final confirmation | Starts after a winning Grandmaster v2 freezes |
@@ -745,9 +787,11 @@ seeds before its upstream baseline freezes.
 ## Recommended order of execution
 
 1. Freeze Enoch-0 and the complete evaluation contract.
-2. Build, ablate, and independently confirm Enoch-1; freeze it as the primary
-   yardstick.
-3. Rebaseline current Expert and Grandmaster against Enoch-1.
+2. Build and ablate an Enoch-1 candidate. If admitted, independently confirm
+   it; otherwise record the no-candidate branch. Freeze the resulting downstream
+   Enoch baseline. The active run completed this step by retaining Enoch-0.
+3. Rebaseline current Expert and Grandmaster against the frozen downstream
+   Enoch baseline, currently Enoch-0.
 4. Build and gate model-free Grandmaster v2; freeze the winning teacher.
 5. Generate the multi-world, common-random-number Q corpus.
 6. Train and gate policy/P+Q/P+V/P+Q+V independently.
@@ -756,8 +800,9 @@ seeds before its upstream baseline freezes.
 9. Test bounded expert iteration, the structured encoder, and the heterogeneous
    frozen-checkpoint league.
 10. Distill the final Grandmaster v2 into Expert v2.
-11. Run locked confirmations against Enoch-1, preserve the Enoch-0 continuity
-    results, characterize style, and present all evidence to the human operator.
+11. Run locked confirmations against the frozen downstream Enoch baseline,
+    preserve separate Enoch-0 continuity results when the identities differ,
+    characterize style, and present all evidence to the human operator.
 
 No step in this document authorizes automatic promotion or deployment.
 
