@@ -1,7 +1,8 @@
 # Strongest-bot program: Enoch, Grandmaster v2, and Expert v2
 
-> **Status:** authoritative Week 1 phases W1.0--W1.3 complete and
-> recovery-sealed as of 2026-07-06; W1.4 combination screening is next
+> **Status:** authoritative Week 1 phases W1.0--W1.4 complete and
+> independently reconstructed as of 2026-07-06; W1.4 ended
+> `combination-regressed`, W1.5--W1.7 are disallowed, and W1.8 is next
 > **Production reference:** `c813c8a`, including the promoted schema-v2
 > policy-only Expert model
 > **Promotion policy:** train and evaluate freely, but never promote or deploy a
@@ -15,10 +16,13 @@
 The active run is preserved at
 `.enoch-week1-runs/authoritative-2026-07-05-d048b79`. It uses protocol
 `a1e48199e6cb153c68f442cac9f28400798b994d154e03d34cb64420e21db2b7`
-and permanent production control `c813c8a`. W1.0, W1.1, and W1.2 have been
-sealed and independently reconstructed. W1.3 is complete, recovery-sealed, and
-independently reconstructed; W1.4--W1.8 have not run. There is no Enoch-1 yet,
-and none of these artifacts authorizes promotion or deployment.
+and permanent production control `c813c8a`. W1.0--W1.4 are sealed and
+independently reconstructed. W1.4 completed all 1,100 declared pairs with zero
+invalidating counters, but the four-change combination failed its predeclared
+acceptance rule. The sealed exit is `combination-regressed`, no candidate was
+selected, and W1.5 is not allowed. There is no Enoch-1 and no artifact
+authorizes promotion or deployment. W1.8 must now record retention of Enoch-0
+before downstream strength work begins.
 
 ### Measured W1.1 calibration
 
@@ -134,6 +138,53 @@ Key W1.3 and recovery bindings are:
 | Seal-recovery manifest | `8cea1459b32e530e7211d69c5f7c0e4cad281eada081a64a9c29c97d6912a11e` |
 | Recovery-aware W1.3 phase | `1059c449de8b4f181e1887f0064f4544ac8286b152094025246e11a3830b3a5e` |
 
+### Measured W1.4 combination regression and screens
+
+W1.4 evaluated exactly `bid-ownership`, `compound-follow`,
+`friend-revelation`, and `uncertain-legal-throws` under source commit
+`73d36330502f6a138c63ffa4092abd5447c28233`. The prerequisite regression gate
+passed all 31 fixtures, the full mechanics suite, model contracts, strict
+evaluator test, and frozen-model validation.
+
+Both predeclared stages used the same rule: level-utility estimate at least
+`0.0`, lower 95% bound at least `-0.05`, point margin at least `0.0`, win-rate
+delta at least `-0.02`, candidate p95 latency at most `750 ms`, and zero
+invalidating counters.
+
+| Stage | Pairs | Level utility (95% interval) | Point margin | Win-rate delta | Candidate p95 | Rule result |
+|---|---:|---:|---:|---:|---:|---|
+| W1.4 qualification screen | 300 | `-0.006667 [-0.068333, +0.053333]` | `+0.116667` | `+0.008333` | `248.8802 ms` | Fail: estimate and lower-bound gates |
+| W1.4 development screen | 800 | `+0.010625 [-0.023750, +0.046250]` | `+0.637500` | `+0.006875` | `249.1276 ms` | Pass |
+
+The four W1.3 survivor estimates summed to `+0.015625`. The combination measured
+`-0.006667` in the 300-pair stage and `+0.010625` in the 800-pair stage; the
+final screen-minus-individual-sum interaction was `-0.005000`. The reconstructed
+decision reasons were
+`qualification:level-utility-estimate-below-rule` and
+`qualification:level-utility-lower-95-below-rule`. Because both stages had to
+pass, the candidate was rejected and the exit sealed
+`selected_candidate_fingerprint: null`, `status: combination-regressed`, and
+`w1_5_allowed: false`.
+
+The declaration-to-phase interval was `1:18:14` (`2026-07-06 03:47:59 PDT`
+through `05:06:13 PDT`), including `49:15` for the 800-pair screen. A separate
+offline reconstruction completed successfully in `5:10.98` and reproduced all
+terminal bindings without executing comparisons or claiming seeds.
+
+| Artifact | Fingerprint |
+|---|---|
+| W1.4 continuation provenance | `731b06228dc5a602b89a66d7e7902adf470a684e25ca802ffdc3cdbe184c34c1` |
+| Campaign declaration | `2e8b9a6f530c5595b8b6ba32367fbc9fbcb971cb2e919f2fb8d907126db59765` |
+| Campaign lineage | `b81c9709773431adea7e266d18badb2bcfb4f4fb4ce9d79e4b9444b5fee162fd` |
+| Evaluated candidate | `abebed7aee684612282e37513b37592bf3fe64f96a34f597870fe72cf3bbe706` |
+| Combination regression gate | `abef9967133b0c86af263f6550b7b9381abfbdcf6525c50209be5d5fa19c6241` |
+| Qualification merged result | `d143d275bd559d4fe5d02949235b4c41a888dbd3298b6791651b27e9a07efd0a` |
+| Screen merged result | `a804bdd6ca7ab76aaa4662a774440a6ac1ab84011ac0a22dbf11bb0401e43bd4` |
+| Candidate decision | `cd80e82024d4d97b71f53d680883a5a0f462fa2792b13770355216a07ede95ae` |
+| Immutable W1.4 ledger snapshot (19,811 claims) | `17d6eecf5a8119946de82853e34e314a1b3a4a4b18404c3209c217fd52c0fbea` |
+| W1.4 exit | `d3a449cf29a98f14bcfdcdca7bafe1c5ba9bafbbebd56a21f9d4617f11eddf8b` |
+| W1.4 phase | `ad353c33adda2a31dfb1a26c63e3802b8584aee0b711d457d8c1fa60dd88a399` |
+
 ### First-week progression and next step
 
 | Phase | Current state | Timing basis |
@@ -142,19 +193,14 @@ Key W1.3 and recovery bindings are:
 | W1.1 | Complete: calibration, baselines, fixtures, worker selection | Measured above |
 | W1.2 | Complete: 15 independent 300-pair screens; five advance | Measured `4:27:12` |
 | W1.3 | Complete and recovery-sealed: five independent 800-pair screens; four supported | Measured approximately `3h49m` evaluation wall |
-| W1.4 | Next: four-change combination screen and interaction regression | Projection only |
-| W1.5 | Product-budget qualification matrix | Projection only |
-| W1.6--W1.7 | Primary locked gate and independent confirmation | Projection only |
-| W1.8 | Human-reviewed freeze-or-retain decision | Not started |
+| W1.4 | Complete: 1,100 combination pairs; candidate rejected | Measured `1:18:14` declaration-to-phase |
+| W1.5--W1.7 | Skipped and disallowed by the W1.4 exit | Not run |
+| W1.8 | Next: human-reviewed retain-control decision | Not started |
 
-The immediate next step is W1.4: predeclare and bind a candidate containing
-only `bid-ownership`, `compound-follow`, `friend-revelation`, and
-`uncertain-legal-throws`, then run the full fixture regression, combination
-screen, 800-pair development screen, and interaction decision on fresh
-namespaces. `team-void-boss` must not enter that candidate. W1.3 establishes
-only eligibility for this combination test; it makes no superiority, Enoch-1,
-promotion, or deployment claim. Grandmaster/Expert strength work and final
-training-label generation remain blocked until the Week 1 terminal decision.
+The immediate next step is W1.8. It must preserve the W1.4 no-candidate exit,
+record Enoch-0 as the downstream baseline, and present that decision for human
+review. No W1.5, locked-gate, promotion, or deployment artifact may be created
+from the rejected candidate.
 
 ## Objective
 

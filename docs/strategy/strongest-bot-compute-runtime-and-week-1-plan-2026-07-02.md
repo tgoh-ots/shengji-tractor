@@ -1,8 +1,9 @@
 # Strongest-bot compute runtime and Week 1 execution plan
 
 > **Status:** compute-execution supplement, recorded 2026-07-02; authoritative
-> execution complete and recovery-sealed through W1.3 as of 2026-07-06; W1.4
-> combination screening is next
+> execution complete and independently reconstructed through W1.4 as of
+> 2026-07-06; W1.4 ended `combination-regressed`, W1.5--W1.7 are disallowed,
+> and W1.8 is next
 > **Parent roadmap:**
 > [`strongest-bot-program-2026-07-02.md`](strongest-bot-program-2026-07-02.md)
 > **Scope:** current-machine wall-clock only. This document deliberately excludes
@@ -414,7 +415,17 @@ The candidate cannot be called Enoch-1 if a parent-roadmap Track A correctness,
 fixture, or legal-coverage prerequisite remains incomplete. In that case W1.8
 records a provisional candidate and Enoch-0 remains the downstream baseline.
 
+**Authoritative outcome (2026-07-06): complete; candidate rejected.** The
+four-change candidate passed the full regression gate and completed both
+declared screens, but failed the common predeclared acceptance rule. The sealed
+exit is `combination-regressed`, no candidate was selected, and W1.5 is
+disallowed. Detailed metrics and immutable bindings appear below.
+
 ### W1.5 — Product-budget qualification
+
+**Current applicability:** this phase is skipped for the active campaign because
+the sealed W1.4 exit has `w1_5_allowed: false`. The protocol below remains the
+contract for a future campaign that reaches W1.5.
 
 **Target:** Day 2–4; about 12–30 hours.
 
@@ -537,9 +548,11 @@ teacher/baseline identity.
 4. Fixture report for every attempted ablation.
 5. Independent 200–300-pair ablation results.
 6. Every 800-pair survivor result.
-7. Combination and product-budget qualification results.
-8. First locked gate protocol, raw pairs, comparison, and audit.
-9. Independent confirmation protocol, raw pairs, comparison, and audit.
+7. Combination results and, only if W1.4 admits a candidate, product-budget
+   qualification results.
+8. If admitted, first locked-gate protocol, raw pairs, comparison, and audit.
+9. If admitted, independent-confirmation protocol, raw pairs, comparison, and
+   audit.
 10. Either an Enoch-1 freeze manifest or a no-confirmed-candidate decision.
 
 ## Authoritative execution status — 2026-07-06
@@ -548,10 +561,12 @@ The active authoritative run is preserved at
 `.enoch-week1-runs/authoritative-2026-07-05-d048b79`. It uses master seed
 `0x5eed202607040004` and protocol
 `a1e48199e6cb153c68f442cac9f28400798b994d154e03d34cb64420e21db2b7`.
-W1.0, W1.1, and W1.2 are sealed and independently reconstructible. W1.3 is
-complete, recovery-sealed, and independently reconstructible; W1.4--W1.8 have
-not run. No result through W1.3 is an Enoch-1, production-promotion, or
-deployment decision.
+W1.0--W1.4 are sealed and independently reconstructible. W1.4 completed all
+1,100 declared pairs with zero invalidating counters, but the candidate failed
+its predeclared qualification rule. The sealed exit is
+`combination-regressed`, no candidate was selected, and W1.5--W1.7 are not
+allowed. No result through W1.4 is an Enoch-1, production-promotion, or
+deployment decision. W1.8 has not run.
 
 W1.0 sealed the production control
 (`1aeb0c4f7d62d606eb554cf50aa83250a3672dd806587e695981196766e620f2`)
@@ -641,13 +656,57 @@ phase. It made zero new seed claims and invoked the evaluator zero times.
 | Seal-recovery manifest | `8cea1459b32e530e7211d69c5f7c0e4cad281eada081a64a9c29c97d6912a11e` |
 | Recovery-aware W1.3 phase | `1059c449de8b4f181e1887f0064f4544ac8286b152094025246e11a3830b3a5e` |
 
-The immediate next step is W1.4. Its provenance-bound candidate must combine
-only the four supported changes, then pass the full fixture regression,
-combination screen, fresh 800-pair development screen, and reconstructable
-interaction decision. This remaining work is rollout-evaluation compute, not
-neural-network training. Neither the W1.3 survivors nor their future
-combination may be described as superior or promoted before the later
-qualification and locked gates succeed.
+### Measured W1.4 combination regression and screens
+
+W1.4 evaluated exactly `bid-ownership`, `compound-follow`,
+`friend-revelation`, and `uncertain-legal-throws` under source commit
+`73d36330502f6a138c63ffa4092abd5447c28233`. The prerequisite regression gate
+passed all 31 fixtures, the full mechanics suite, model contracts, strict
+evaluator test, and frozen-model validation.
+
+Both stages used the same predeclared rule: level-utility estimate at least
+`0.0`, lower 95% bound at least `-0.05`, point margin at least `0.0`, win-rate
+delta at least `-0.02`, candidate p95 latency at most `750 ms`, and zero
+invalidating counters.
+
+| Stage | Pairs | Level utility (95% interval) | Point margin | Win-rate delta | Candidate p95 | Rule result |
+|---|---:|---:|---:|---:|---:|---|
+| W1.4 qualification screen | 300 | `-0.006667 [-0.068333, +0.053333]` | `+0.116667` | `+0.008333` | `248.8802 ms` | Fail: estimate and lower-bound gates |
+| W1.4 development screen | 800 | `+0.010625 [-0.023750, +0.046250]` | `+0.637500` | `+0.006875` | `249.1276 ms` | Pass |
+
+Every pair completed and all 11 artifact-mismatch, cancellation, fixture,
+hidden-information, honesty, illegal-action, incomplete-pair,
+machine-contention, model-contract, fallback, and timeout counters were zero.
+The four individual W1.3 estimates summed to `+0.015625`; the 800-pair
+combination estimate was `+0.010625`, for a screen-minus-individual-sum
+interaction of `-0.005000`. The exact rejection reasons are
+`qualification:level-utility-estimate-below-rule` and
+`qualification:level-utility-lower-95-below-rule`.
+
+The declaration-to-phase interval was `1:18:14` (`2026-07-06 03:47:59 PDT`
+through `05:06:13 PDT`), including `49:15` for the 800-pair screen. The offline
+verifier then reconstructed the complete parent and W1.4 evidence in `5:10.98`,
+without running comparisons or claiming seeds.
+
+| Artifact | Fingerprint |
+|---|---|
+| W1.4 continuation provenance | `731b06228dc5a602b89a66d7e7902adf470a684e25ca802ffdc3cdbe184c34c1` |
+| Campaign declaration | `2e8b9a6f530c5595b8b6ba32367fbc9fbcb971cb2e919f2fb8d907126db59765` |
+| Campaign lineage | `b81c9709773431adea7e266d18badb2bcfb4f4fb4ce9d79e4b9444b5fee162fd` |
+| Evaluated candidate | `abebed7aee684612282e37513b37592bf3fe64f96a34f597870fe72cf3bbe706` |
+| Combination regression gate | `abef9967133b0c86af263f6550b7b9381abfbdcf6525c50209be5d5fa19c6241` |
+| Qualification merged result | `d143d275bd559d4fe5d02949235b4c41a888dbd3298b6791651b27e9a07efd0a` |
+| Screen merged result | `a804bdd6ca7ab76aaa4662a774440a6ac1ab84011ac0a22dbf11bb0401e43bd4` |
+| Candidate decision | `cd80e82024d4d97b71f53d680883a5a0f462fa2792b13770355216a07ede95ae` |
+| Immutable W1.4 ledger snapshot (19,811 claims) | `17d6eecf5a8119946de82853e34e314a1b3a4a4b18404c3209c217fd52c0fbea` |
+| W1.4 exit | `d3a449cf29a98f14bcfdcdca7bafe1c5ba9bafbbebd56a21f9d4617f11eddf8b` |
+| W1.4 phase | `ad353c33adda2a31dfb1a26c63e3802b8584aee0b711d457d8c1fa60dd88a399` |
+
+The immediate next step is W1.8, not W1.5. W1.4 sealed no eligible candidate,
+so the live ledger may not advance and W1.5--W1.7 may not be materialized.
+W1.8 must preserve this branch and record Enoch-0 as the retained downstream
+baseline. This result is rollout-evaluation evidence, not neural-network
+training, and it authorizes neither promotion nor deployment.
 
 ## Historical implementation and execution status — 2026-07-04
 
@@ -815,8 +874,9 @@ published.
 6. Build W1.3 decisions from actual fixture and merged-result artifacts. Build
    W1.4's pre-run lineage and post-run candidate decision from both combination
    results; W1.5 cannot be created from lineage alone.
-7. Run the full W1.5 matrix, freeze both locked manifests before W1.6, execute
-   W1.6 and W1.7 one comparison at a time, and reconstruct every decision from
-   raw merged evidence.
+7. If and only if the sealed W1.4 exit permits W1.5, run the full W1.5 matrix,
+   freeze both locked manifests before W1.6, and execute W1.6 and W1.7 one
+   comparison at a time. If W1.4 seals no candidate, do not materialize those
+   phases and proceed directly to W1.8.
 8. Build W1.8 only from the contiguous phase chain. Present the terminal record
    to the human operator; it cannot authorize deployment.
