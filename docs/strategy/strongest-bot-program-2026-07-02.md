@@ -1,6 +1,7 @@
 # Strongest-bot program: Enoch, Grandmaster v2, and Expert v2
 
-> **Status:** execution plan, recorded 2026-07-02
+> **Status:** authoritative Week 1 phases W1.0--W1.2 complete as of 2026-07-05;
+> W1.3 survivor screening is next
 > **Production reference:** `c813c8a`, including the promoted schema-v2
 > policy-only Expert model
 > **Promotion policy:** train and evaluate freely, but never promote or deploy a
@@ -8,6 +9,98 @@
 > **Authority:** this is the current bot-strength roadmap. It supersedes the
 > execution order, estimated gains, and recommendations in the older roadmap
 > and handoff documents linked at the end.
+
+## Authoritative Week 1 status -- 2026-07-05
+
+The active run is preserved at
+`.enoch-week1-runs/authoritative-2026-07-05-d048b79`. It uses protocol
+`a1e48199e6cb153c68f442cac9f28400798b994d154e03d34cb64420e21db2b7`
+and permanent production control `c813c8a`. W1.0, W1.1, and W1.2 have been
+sealed and independently reconstructed; W1.3--W1.8 have not run. There is no
+Enoch-1 yet, and none of these artifacts authorizes promotion or deployment.
+
+### Measured W1.1 calibration
+
+W1.1 completed the 100-seed frozen-policy equivalence check, two 5,000-pair
+searchless baselines, 31/31 fixtures, and the 1/10/100-pair product-smoke ramp
+with zero invalidating counters. The product smokes took approximately `3:05`,
+`9:06`, and `38:21`, respectively, on this host and fixed eight workers/shards
+for later phases. The 100-pair smoke compared identical runtime policies; its
+level-utility delta was `+0.030` with 95% interval `[-0.045, +0.110]`, point
+margin was `+0.900` with interval `[-2.200, +3.700]`, and win-rate delta was
+`+0.015` with interval `[-0.030, +0.060]`. These are evaluator-noise and
+throughput measurements, not evidence of a stronger bot.
+
+Key sealed W1.1 fingerprints are:
+
+| Artifact | Fingerprint |
+|---|---|
+| Control manifest | `1aeb0c4f7d62d606eb554cf50aa83250a3672dd806587e695981196766e620f2` |
+| Deterministic-search authority | `9b344bfd8b4463b02e5e4fc3388186cdbd7e156bb8ce2d4327993ecc77a63c6f` |
+| Fixture report | `1fd410dca00fdd83631ae893980176113e621f1eebdec90c3b61f4d87dc7bc50` |
+| Full preflight | `1ec318070aa22631eec52acf398ce2daec1f32b433bb583c628f1e0ab2b643ca` |
+| Baseline/worker report | `79d47b95f65c4c9b5377c5a0894abecd4d02069eb8c965176eb1f69587b8dc6f` |
+| W1.1 phase | `24503b8909df96b6bb1cf47a91da3e830ea623c4ead6db98f9c4881b9043da63` |
+
+### Measured W1.2 independent ablations
+
+W1.2 ran all 15 arms for 300 mirrored pairs each: 4,500 pairs total under the
+committed 24-world, six-candidate, six-trick fixed-work configuration. The
+declaration-to-phase interval was approximately `4:27:12` (`2026-07-05
+22:49:36Z` through `2026-07-06 03:16:48Z`). All raw shards reconstructed, all
+4,500 pairs completed, and every illegal-action, honesty, fallback,
+model-contract, incomplete-pair, contention, cancellation, and timeout counter
+was zero.
+
+Five arms met the predeclared W1.2 development rule and advance to fresh
+800-pair W1.3 screens:
+
+| Arm | Level utility (95% interval) | Point margin | Win-rate delta |
+|---|---:|---:|---:|
+| `friend-revelation` | `0.0000 [0.0000, 0.0000]` | `0.0000` | `0.0000` |
+| `uncertain-legal-throws` | `+0.0117 [-0.0150, +0.0383]` | `+0.0250` | `+0.0083` |
+| `bid-ownership` | `+0.0017 [-0.0200, +0.0233]` | `+0.1250` | `-0.0017` |
+| `team-void-boss` | `+0.0150 [-0.0317, +0.0633]` | `+0.4417` | `+0.0183` |
+| `compound-follow` | `+0.0233 [-0.0350, +0.0833]` | `+1.1083` | `+0.0150` |
+
+The other ten arms were preserved as `stop-and-record`: `failed-throw-better-player`,
+`terminal-level-utility`, `kitty-burial`, `late-ruff-shape`,
+`contextual-empty-trick`, `relative-live-suit`, `teammate-entry-return`,
+`low-trump-handoff`, `structural-family-coverage`, and `progressive-admission`.
+Advancement means only that an arm passed the deliberately permissive cheap
+screen; it is not a superiority claim. In particular, `friend-revelation`
+produced no measured delta in this sample, while `progressive-admission` was
+materially negative at `-0.2017` level utility with interval
+`[-0.2700, -0.1317]`.
+
+Key sealed W1.2 fingerprints are:
+
+| Artifact | Fingerprint |
+|---|---|
+| Continuation provenance | `d84719bae7e1bfbd7292bb1200cd369841d6c2dd117726ba7629783c78b2757d` |
+| Campaign declaration | `16c1a9d28d490beb624d313ed7aab0b177a2cbc458a8a07ff884b83599b29bc1` |
+| Ranked ablation table | `71b68e51cd46c4c6cb9a14b0893df046ef3beb7deba325e9e350a6c2b7ef5f06` |
+| Immutable W1.2 ledger snapshot (14,711 total claims) | `2500ae1fbc5e1f03dc04b62ac92564be014f565443b1e6b0e337234cc2e598d8` |
+| W1.2 phase | `70d8a05c0e17a372e42c80e93d760ebf5d9fcb26c03c5474b06d5e3bbf214264` |
+
+### First-week progression and next step
+
+| Phase | Current state | Timing basis |
+|---|---|---|
+| W1.0 | Complete: immutable control and evaluator | Measured |
+| W1.1 | Complete: calibration, baselines, fixtures, worker selection | Measured above |
+| W1.2 | Complete: 15 independent 300-pair screens; five advance | Measured `4:27:12` |
+| W1.3 | Next: five independent 800-pair survivor screens on fresh namespaces | Projected `3--10h`, not yet measured |
+| W1.4 | Conditional combination screen and interaction regression | Projection only |
+| W1.5 | Product-budget qualification matrix | Projection only |
+| W1.6--W1.7 | Primary locked gate and independent confirmation | Projection only |
+| W1.8 | Human-reviewed freeze-or-retain decision | Not started |
+
+The immediate next step is to commit and bind the W1.3 continuation, predeclare
+the five 800-pair comparisons against the immutable W1.2 snapshot, and run them
+one at a time under the same machine-global lock. Only arms that pass W1.3 may
+enter W1.4. Grandmaster/Expert strength work and final training-label generation
+remain blocked until the Week 1 terminal decision.
 
 ## Objective
 

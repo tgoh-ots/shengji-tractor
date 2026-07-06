@@ -1,6 +1,7 @@
 # Strongest-bot compute runtime and Week 1 execution plan
 
-> **Status:** compute-execution supplement, recorded 2026-07-02
+> **Status:** compute-execution supplement, recorded 2026-07-02; authoritative
+> execution complete through W1.2 as of 2026-07-05
 > **Parent roadmap:**
 > [`strongest-bot-program-2026-07-02.md`](strongest-bot-program-2026-07-02.md)
 > **Scope:** current-machine wall-clock only. This document deliberately excludes
@@ -533,7 +534,71 @@ teacher/baseline identity.
 9. Independent confirmation protocol, raw pairs, comparison, and audit.
 10. Either an Enoch-1 freeze manifest or a no-confirmed-candidate decision.
 
-## Implementation and execution status — 2026-07-04
+## Authoritative execution status — 2026-07-05
+
+The active authoritative run is preserved at
+`.enoch-week1-runs/authoritative-2026-07-05-d048b79`. It uses master seed
+`0x5eed202607040004` and protocol
+`a1e48199e6cb153c68f442cac9f28400798b994d154e03d34cb64420e21db2b7`.
+W1.0, W1.1, and W1.2 are sealed and independently reconstructible; W1.3--W1.8
+have not run. No result through W1.2 is an Enoch-1, production-promotion, or
+deployment decision.
+
+W1.0 sealed the production control
+(`1aeb0c4f7d62d606eb554cf50aa83250a3672dd806587e695981196766e620f2`)
+and phase
+`6b2b63187981da256476256b673d2f809ed4ede3089790233a249b50fe5d937c`.
+W1.1 then completed the deterministic-search authority, 100-seed
+frozen-policy equivalence check, two 5,000-pair searchless baselines, all 31
+fixtures, and the 1/10/100-pair product-smoke ramp. All 111 smoke pairs and 222
+orientations completed with zero invalidating counters. The build-to-seal
+interval on this host was about 2 hours 7 minutes; the individual product
+smokes took about 3:05, 9:06, and 38:21. W1.1 selected eight workers/shards for
+later phases and sealed report
+`79d47b95f65c4c9b5377c5a0894abecd4d02069eb8c965176eb1f69587b8dc6f`
+and phase
+`24503b8909df96b6bb1cf47a91da3e830ea623c4ead6db98f9c4881b9043da63`.
+
+W1.2 predeclared all 15 independent arms before claiming a seed, then ran each
+for 300 mirrored pairs under the fixed 24-world, six-candidate, six-trick
+configuration. The declaration-to-phase interval was 4:27:12
+(`2026-07-05 15:49:36 PDT` through `20:16:48 PDT`) on this same machine. All
+4,500 pairs and 9,000 orientations completed; every artifact-mismatch,
+cancellation, fixture, hidden-information, honesty, illegal-action,
+incomplete-pair, machine-contention, model-contract, fallback, and timeout
+counter was zero. The five arms advancing to fresh 800-pair W1.3 screens are:
+
+- `friend-revelation`;
+- `uncertain-legal-throws`;
+- `bid-ownership`;
+- `team-void-boss`; and
+- `compound-follow`.
+
+The other ten arms are sealed as `stop-and-record`; their negative or
+insufficient independent results remain part of the ranked table. Advancement
+is only permission to run W1.3, not evidence of superiority or permission to
+combine or promote an arm. W1.2 sealed declaration
+`16c1a9d28d490beb624d313ed7aab0b177a2cbc458a8a07ff884b83599b29bc1`,
+ranked table
+`71b68e51cd46c4c6cb9a14b0893df046ef3beb7deba325e9e350a6c2b7ef5f06`,
+14,711-claim immutable ledger snapshot
+`2500ae1fbc5e1f03dc04b62ac92564be014f565443b1e6b0e337234cc2e598d8`,
+and phase
+`70d8a05c0e17a372e42c80e93d760ebf5d9fcb26c03c5474b06d5e3bbf214264`.
+The offline verifier reproduced all four bindings from stored artifacts and
+stored Git objects.
+
+The immediate next step is a committed, provenance-bound W1.3 continuation
+that predeclares the five fresh 800-pair comparisons against the immutable
+W1.2 snapshot. This remaining Week 1 work is rollout-evaluation compute, not
+neural-network training. W1.4 and later phases remain conditional on the W1.3
+results.
+
+## Historical implementation and execution status — 2026-07-04
+
+The status below is retained as the incident record that led to the corrected
+July 5 run. Its external-block statements are historical and are superseded by
+the sealed W1.1/W1.2 record above.
 
 The Week 1 package is implemented, but there is no valid completed
 authoritative W1.1 calibration and the 40–84-hour strength campaign has **not**
