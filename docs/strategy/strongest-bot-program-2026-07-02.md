@@ -1,15 +1,14 @@
 # Strongest-bot program: Enoch, Grandmaster v2, and Expert v2
 
-> **Status:** authoritative Week 1 terminal chain complete and
-> independently reconstructed as of 2026-07-06; W1.4 ended
-> `combination-regressed`, W1.5--W1.7 were skipped, and W1.8 retained Enoch-0
+> **Status:** historical roadmap; the exploration was closed by human decision
+> on 2026-07-11 with no candidate proven superior to Enoch-0
+> **Terminal disposition:**
+> [`four-player-bot-exploration-closure-2026-07-11.md`](four-player-bot-exploration-closure-2026-07-11.md)
 > **Production reference:** `c813c8a`, including the promoted schema-v2
 > policy-only Expert model
-> **Promotion policy:** train and evaluate freely, but never promote or deploy a
-> model automatically. Present every final gate to the human operator.
-> **Authority:** this is the current bot-strength roadmap. It supersedes the
-> execution order, estimated gains, and recommendations in the older roadmap
-> and handoff documents linked at the end.
+> **Authority:** measured evidence remains valid historical context, but no
+> future-work item, ordering, seed, slot, operator, promotion, or deployment
+> instruction in this document remains active
 
 ## Authoritative Week 1 status -- 2026-07-06
 
@@ -23,8 +22,8 @@ acceptance rule. W1.4 therefore disallowed W1.5--W1.7. W1.8 sealed
 `no-confirmed-candidate`, verified those phases remained absent, and retained
 Enoch-0 as both the permanent scientific control and downstream primary
 baseline. There is no Enoch-1 and no artifact authorizes promotion or
-deployment. Human review is recorded and Stage 2 rebaselining may now begin
-from Enoch-0.
+deployment. Human review authorized Stage 2 rebaselining from Enoch-0 at that
+time; the later exploration is now terminal under the 2026-07-11 disposition.
 
 ### Measured W1.1 calibration
 
@@ -217,7 +216,7 @@ pre-W1.8 inventory: 5,103 files, 2,466,144,135 bytes, inventory fingerprint
 | Terminal no-confirmed-candidate decision | `799be65915b7c60a280e03cbcd038e94bfc3af7340763c86dfe2b93070e5bd84` |
 | W1.8 phase | `61eaba943d1ad417408f2ba3f190e1d4e5ea270bc840e582c6ea17c0c16a3cdf` |
 
-### First-week progression and next step
+### First-week progression and terminal handoff
 
 | Phase | Current state | Timing basis |
 |---|---|---|
@@ -229,12 +228,13 @@ pre-W1.8 inventory: 5,103 files, 2,466,144,135 bytes, inventory fingerprint
 | W1.5--W1.7 | Skipped and disallowed by the W1.4 exit | Not run |
 | W1.8 | Complete: human-reviewed no-candidate decision; Enoch-0 retained | Measured `7:45.60` seal; `5:44.72` offline reconstruction |
 
-Week 1 is complete. The immediate next step is Stage 2: rebaseline Expert and
-Grandmaster against the retained Enoch-0 identity, then begin authoritative
-Grandmaster policy selection. No W1.5, locked-gate, promotion, or deployment
-artifact may be created from the rejected candidate.
+Week 1 is complete. Later Stage 2 and multi-avenue work produced no confirmed
+candidate and is closed by the
+[2026-07-11 terminal disposition](four-player-bot-exploration-closure-2026-07-11.md).
+No W1.5, locked-gate, promotion, or deployment artifact may be created from the
+rejected candidate, and there is no active downstream step in this roadmap.
 
-## Objective
+## Historical objective
 
 Build the strongest honest Shengji bot we can, without requiring it to play like
 Enoch.
@@ -766,53 +766,34 @@ The target is roughly 10–15% meaningful decision divergence while still beatin
 Enoch. This is a characterization target, not permission to choose weaker moves
 for novelty.
 
-## Execution dependencies
+## Terminal execution status
 
-The strength work is deliberately Enoch-first. Only infrastructure that cannot
-influence downstream policy selection runs alongside it:
-
-| Stage | Work | Dependency |
+| Stage | Historical work | Final state |
 |---|---|---|
-| 0 | Freeze controls; harden evaluator, lineage, determinism, and style metrics | Starts immediately |
-| 1 | Enoch A1–A5 ablations, candidate confirmation if admitted, and terminal baseline freeze | Starts after Enoch-0 freeze; W1.8 chooses confirmed Enoch-1 or retained Enoch-0 |
-| 2 | Rebaseline Expert/Grandmaster against the frozen downstream Enoch baseline; build model-free Grandmaster v2 | Starts only after the terminal Week 1 baseline freeze; authorized on the active Enoch-0 branch |
-| 3 | Corpus generation and P/Q/V training | Starts only after the Grandmaster v2 teacher freezes |
-| 4 | Belief, bid/kitty, structured-model, and bounded-iteration experiments | Starts after the relevant simpler baseline is locked |
-| 5 | Expert v2 distillation and final confirmation | Starts after a winning Grandmaster v2 freezes |
+| 0 | Freeze controls; harden evaluator, lineage, determinism, and style metrics | Complete |
+| 1 | Enoch ablations and terminal baseline freeze | Complete; no Enoch-1, Enoch-0 retained |
+| 2 | Rebaseline and model-free Grandmaster exploration | Closed; no candidate passed a locked Enoch superiority gate |
+| 3 | Corpus generation and P/Q/V training | Not authorized as an active continuation; the partial soft-Q proxy was rejected |
+| 4 | Belief, bid/kitty, structured-model, and bounded-iteration experiments | No active campaign; bounded attempts are terminal or deferred outside this program |
+| 5 | Expert v2 distillation and final confirmation | Not run because no winning Grandmaster v2 teacher froze |
 
-Evaluator and corpus-tooling reliability work may be prepared early, but it may
-not generate final labels, tune downstream policies, or consume locked test
-seeds before its upstream baseline freezes.
-
-## Recommended order of execution
-
-1. Freeze Enoch-0 and the complete evaluation contract.
-2. Build and ablate an Enoch-1 candidate. If admitted, independently confirm
-   it; otherwise record the no-candidate branch. Freeze the resulting downstream
-   Enoch baseline. The active run completed this step by retaining Enoch-0.
-3. Rebaseline current Expert and Grandmaster against the frozen downstream
-   Enoch baseline, currently Enoch-0.
-4. Build and gate model-free Grandmaster v2; freeze the winning teacher.
-5. Generate the multi-world, common-random-number Q corpus.
-6. Train and gate policy/P+Q/P+V/P+Q+V independently.
-7. Integrate the winning heads into Grandmaster v2 without double counting.
-8. Run belief/RIS-MCTS and bid/kitty outcome-supervision experiments.
-9. Test bounded expert iteration, the structured encoder, and the heterogeneous
-   frozen-checkpoint league.
-10. Distill the final Grandmaster v2 into Expert v2.
-11. Run locked confirmations against the frozen downstream Enoch baseline,
-    preserve separate Enoch-0 continuity results when the identities differ,
-    characterize style, and present all evidence to the human operator.
-
-No step in this document authorizes automatic promotion or deployment.
+The former execution order is retained in the preceding sections only as design
+history. It is not a queue. There is no recommended next experiment in this
+program, and no step authorizes automatic promotion or deployment. See the
+[terminal disposition](four-player-bot-exploration-closure-2026-07-11.md) for
+the final evidence, cleanup boundary, and requirements for any separately
+authorized future initiative.
 
 ## Related documents and precedence
 
-The documents below remain useful as evidence or technical references, but none
-of their older future-work ordering overrides this plan.
+The documents below remain useful as evidence or technical references. Their
+future-work ordering is historical and does not override the terminal
+disposition.
 
+- [Four-player bot exploration closure](four-player-bot-exploration-closure-2026-07-11.md)
+  — authoritative terminal status and resumption boundary
 - [Compute runtime and Week 1 execution plan](strongest-bot-compute-runtime-and-week-1-plan-2026-07-02.md)
-  — current-machine wall-clock estimates and the Stage 0–1 execution contract
+  — historical current-machine wall-clock estimates and Stage 0–1 record
 - [Policy-only Expert promotion](policy-only-promotion-2026-07-02.md)
 - [Human refinement evaluation](human-refinement-evaluation-2026-06-30.md)
 - [Bot overhaul and alternative training paths](../bot-overhaul-2026-06-30.md) — historical implementation audit

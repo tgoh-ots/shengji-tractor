@@ -2,9 +2,9 @@
 
 > **Historical evaluation record.** The evaluated refinement commits were later
 > incorporated into `master`; this document is evidence, not the current
-> execution plan. Follow the Enoch-first
-> [2026-07-02 strongest-bot program](strongest-bot-program-2026-07-02.md) for
-> subsequent work and strength gates.
+> execution plan. The later Enoch-first work is historical and the exploration
+> is closed under the
+> [2026-07-11 terminal disposition](four-player-bot-exploration-closure-2026-07-11.md).
 
 ## Decision
 

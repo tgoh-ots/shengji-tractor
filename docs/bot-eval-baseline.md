@@ -5,8 +5,8 @@
 > (`core/tests/baseline_gate.rs`) and the `paired_eval` example check against.
 > This remains a historical baseline and harness reference; its old
 > non-inferiority floors are not sufficient for a new superiority claim. The
-> authoritative current protocol is the
-> [2026-07-02 strongest-bot program](strategy/strongest-bot-program-2026-07-02.md).
+> later exploration is closed under the
+> [2026-07-11 terminal disposition](strategy/four-player-bot-exploration-closure-2026-07-11.md).
 
 ## How strength was measured in this baseline
 

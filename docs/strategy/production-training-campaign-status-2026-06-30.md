@@ -2,9 +2,10 @@
 
 > **Historical snapshot.** The stopped-campaign facts and “do not resume” rule
 > remain valid, but the deployment/model inventory below is no longer current:
-> the schema-v2 policy-only Expert was later promoted in `c813c8a`. Use the
-> [2026-07-02 strongest-bot program](strongest-bot-program-2026-07-02.md) for
-> current sequencing and gates.
+> the schema-v2 policy-only Expert was later promoted in `c813c8a`. The later
+> bot-strength work is closed under the
+> [2026-07-11 terminal disposition](four-player-bot-exploration-closure-2026-07-11.md);
+> there is no current continuation queue.
 
 Audit timestamp: 2026-06-30 17:59:57 PDT
 

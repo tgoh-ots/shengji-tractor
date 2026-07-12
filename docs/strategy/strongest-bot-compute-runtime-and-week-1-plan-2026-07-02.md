@@ -1,21 +1,18 @@
 # Strongest-bot compute runtime and Week 1 execution plan
 
-> **Status:** compute-execution supplement, recorded 2026-07-02; authoritative
-> Week 1 execution complete and independently reconstructed through W1.8 as of
-> 2026-07-06; W1.4 ended `combination-regressed`, W1.5--W1.7 were skipped, and
-> W1.8 retained Enoch-0
-> **Parent roadmap:**
+> **Status:** historical compute record; no active campaign
+> **Terminal disposition:**
+> [`four-player-bot-exploration-closure-2026-07-11.md`](four-player-bot-exploration-closure-2026-07-11.md)
+> **Historical parent roadmap:**
 > [`strongest-bot-program-2026-07-02.md`](strongest-bot-program-2026-07-02.md)
 > **Scope:** current-machine wall-clock only. This document deliberately excludes
 > person-week and staffing estimates.
-> **Authority:** the parent roadmap still controls sequencing, strength gates,
-> and promotion. This supplement records runtime measurements, defines which
-> campaigns fit inside seven days, and turns Stage 0–1 into an executable first
-> week.
+> **Authority:** measured runtimes remain useful, but the estimates and workflow
+> below are not an execution queue and authorize no continuation.
 > **Promotion policy:** no result in this document authorizes automatic promotion
 > or deployment. Final gates are presented to the human operator.
 
-## Decision summary
+## Historical decision summary
 
 On the current machine, neural-network fitting is not the main schedule risk.
 The measured schema-v2 MLP fits in roughly 1.5 hours. The expensive work is:
@@ -104,7 +101,7 @@ The 4,000-game corpus is especially instructive. Easy shards finished at about
 seconds/game and Enoch-continuation shards about 191.9 seconds/game. Continuation
 strength, not gradient descent, controls the campaign duration.
 
-## What fits inside seven days
+## Historical estimates: what fit inside seven days
 
 Each row is an independent seven-day-sized compute unit. The rows do not all fit
 on the same machine during the same week.
@@ -134,7 +131,7 @@ active retained-Enoch-0 branch and four after a future confirmed Enoch-1. It
 does not include the final two 2,000–2,500-pair confirmations or the broad
 robustness matrix.
 
-## What does not fit inside seven days
+## Historical estimates: what did not fit inside seven days
 
 | Roadmap work | Current-machine wall time |
 |---|---:|
@@ -532,8 +529,9 @@ teacher/baseline identity.
 **Authoritative outcome (2026-07-06): complete; Enoch-0 retained.** W1.8 sealed
 `no-confirmed-candidate`, recorded the human-reviewed retain-control decision,
 and left W1.5--W1.7 absent. Enoch-0 is both the permanent scientific control and
-the downstream primary baseline. Stage 2 rebaselining is authorized;
-production promotion and deployment are not.
+the downstream primary baseline. Stage 2 rebaselining was authorized at that
+time; the later exploration is now closed under the 2026-07-11 terminal
+disposition. Production promotion and deployment remain unauthorized.
 
 ## Week 1 stop and invalidation rules
 
@@ -740,10 +738,11 @@ baselines.
 | Terminal no-confirmed-candidate decision | `799be65915b7c60a280e03cbcd038e94bfc3af7340763c86dfe2b93070e5bd84` |
 | W1.8 phase | `61eaba943d1ad417408f2ba3f190e1d4e5ea270bc840e582c6ea17c0c16a3cdf` |
 
-Week 1 is complete. The immediate next step is Stage 2: rebaseline Expert and
-Grandmaster against Enoch-0 and begin authoritative Grandmaster policy
-selection. This result is rollout-evaluation evidence, not neural-network
-training, and it authorizes neither promotion nor deployment.
+Week 1 is complete. Later Stage 2 and multi-avenue work produced no confirmed
+candidate and is closed by the
+[2026-07-11 terminal disposition](four-player-bot-exploration-closure-2026-07-11.md).
+The material below remains rollout-evaluation and compute-history evidence; it
+authorizes neither more work, promotion, nor deployment.
 
 ## Historical implementation and execution status — 2026-07-04
 

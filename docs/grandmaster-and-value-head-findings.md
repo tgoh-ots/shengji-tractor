@@ -5,9 +5,9 @@
 > group-collision bug below was ALSO independently caught + fixed on master in
 > `79f79e0`. Companion to `docs/bot-training-roadmap.md` and
 > `docs/bot-eval-baseline.md`. Toolchain pinned to rustc 1.92.0 via `rust-toolchain.toml`.
-> **This is historical experiment evidence, not a current roadmap.** Current
-> sequencing and gates are defined in the
-> [2026-07-02 strongest-bot program](strategy/strongest-bot-program-2026-07-02.md).
+> **This is historical experiment evidence, not a current roadmap.** The later
+> bot-strength exploration is closed under the
+> [2026-07-11 terminal disposition](strategy/four-player-bot-exploration-closure-2026-07-11.md).
 
 ## TL;DR (read this first)
 

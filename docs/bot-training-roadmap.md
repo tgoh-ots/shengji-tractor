@@ -2,8 +2,10 @@
 
 > **DEPRECATED AS AN EXECUTION PLAN (2026-07-02).** This document is retained
 > only for historical findings, completed-tooling provenance, and prior
-> experiment results. The authoritative bot-strength roadmap is
-> [Strongest-bot program: Enoch, Grandmaster v2, and Expert v2](strategy/strongest-bot-program-2026-07-02.md).
+> experiment results. The bot-strength exploration is closed under the
+> [2026-07-11 terminal disposition](strategy/four-player-bot-exploration-closure-2026-07-11.md);
+> the [strongest-bot program](strategy/strongest-bot-program-2026-07-02.md)
+> is now a historical roadmap and evidence record.
 > Do not execute this document's unchecked items, ordering, estimated gains, or
 > promotion recommendations. Where the documents conflict—especially on
 > value-head priority, training targets, experiment order, or strength

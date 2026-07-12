@@ -1,9 +1,10 @@
 # Honest action-value and belief training
 
-> **Status:** technical design note, not the current execution roadmap. The
-> [2026-07-02 strongest-bot program](strategy/strongest-bot-program-2026-07-02.md)
-> governs sequencing, Enoch-first evaluation, campaign scale, and gates. The
-> limitations and target-design guidance below remain applicable.
+> **Status:** historical technical design note, not an execution roadmap. The
+> later exploration is closed under the
+> [2026-07-11 terminal disposition](strategy/four-player-bot-exploration-closure-2026-07-11.md).
+> The limitations and target-design guidance below remain applicable to any
+> separately authorized future initiative.
 
 Policy distillation answers what a perfect-information teacher chose. It does
 not identify action value, inherits hidden-information teacher behavior, and

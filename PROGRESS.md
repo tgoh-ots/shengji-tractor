@@ -1,11 +1,13 @@
 # Shengji Online — Project Progress & Recovery Log
 
 > Durable status doc so work can resume after a crashed/restarted session.
-> **Last updated: 2026-07-02.** This is a historical chronology, not the current
-> bot execution roadmap. Use
+> **Last updated: 2026-07-11.** This is a historical chronology, not an active
+> bot execution roadmap. The Enoch/Stage 2 exploration is closed with no
+> candidate proven superior; use
+> [`docs/strategy/four-player-bot-exploration-closure-2026-07-11.md`](docs/strategy/four-player-bot-exploration-closure-2026-07-11.md)
+> for the terminal disposition and
 > [`docs/strategy/strongest-bot-program-2026-07-02.md`](docs/strategy/strongest-bot-program-2026-07-02.md)
-> for current Enoch-first sequencing and gates. Update this at every milestone
-> boundary.
+> only as the historical roadmap and evidence record.
 >
 > **Status: LIVE & actively iterated** at https://shengji-tractor.fly.dev.
 > The original milestones (M0–M6) are all done; work since then has been a
