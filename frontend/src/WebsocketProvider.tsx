@@ -9,8 +9,20 @@ import { GameMessage } from "./gen-types";
 
 import type { JSX } from "react";
 
+interface SendOptions {
+  /**
+   * Skip the 5-second "no reply => we must be disconnected" watchdog for this
+   * message. Set it for requests the server may legitimately take longer than
+   * that to answer — today only the play suggestion, whose reply waits for a
+   * global CPU slot and then runs a full search. Without this, a slow (but
+   * perfectly healthy) suggestion makes the whole app flash "reconnecting".
+   * Such requests must carry their own timeout for the UI they drive.
+   */
+  slowReply?: boolean;
+}
+
 interface Context {
-  send: (value: any) => void;
+  send: (value: any, options?: SendOptions) => void;
   reconnectNow: () => void;
 }
 
@@ -302,20 +314,24 @@ const WebsocketProvider: React.FunctionComponent<
     };
   }, []);
 
-  const send = (value: any): void => {
+  const send = (value: any, options?: SendOptions): void => {
     if (timerRef.current !== null) {
       clearTimeoutRef.current(timerRef.current);
+      setTimerRef.current(null);
     }
     // We expect a response back from the server within 5 seconds. Otherwise,
-    // we should assume we have lost our websocket connection.
+    // we should assume we have lost our websocket connection. Requests flagged
+    // `slowReply` opt out: the server may take longer for legitimate reasons, so
+    // a slow answer is not evidence of a dead socket.
+    if (options?.slowReply !== true) {
+      const localTimerRef = setTimeoutRef.current(() => {
+        if (timerRef.current === localTimerRef) {
+          updateStateRef.current({ connected: false });
+        }
+      }, 5000);
 
-    const localTimerRef = setTimeoutRef.current(() => {
-      if (timerRef.current === localTimerRef) {
-        updateStateRef.current({ connected: false });
-      }
-    }, 5000);
-
-    setTimerRef.current(localTimerRef);
+      setTimerRef.current(localTimerRef);
+    }
     (wsRef.current ?? websocket)?.send(JSON.stringify(value));
   };
 

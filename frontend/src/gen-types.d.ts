@@ -342,6 +342,12 @@ export type GameMessage =
         target: string;
         [k: string]: unknown;
       };
+    }
+  | {
+      PlaySuggestion: {
+        cards: Card[];
+        [k: string]: unknown;
+      };
     };
 export type GameState =
   | {
@@ -862,6 +868,10 @@ export interface Trick {
   [k: string]: unknown;
 }
 export interface PlayedCards {
+  /**
+   * Exact decomposition selected for the original compound lead before a failed throw was reduced to its forced unit. This preserves a human's explicit format hint for later public-evidence reconstruction.
+   */
+  attempted_format?: TrickFormat | null;
   bad_throw_cards: Card[];
   better_player?: number | null;
   cards: Card[];
@@ -1129,6 +1139,10 @@ export interface PlayPhase {
    * Completed public play history with trick boundaries and seat attribution. The multiset above remains a compact compatibility/indexing aid; this log is the belief-model-ready record needed to condition hidden-card proposals on *who* played *what* and in which trick. `PlayedCards` also retains throw metadata. The current in-progress trick remains in [`PlayPhase::trick`].
    */
   public_play_history?: PlayedCards[][];
+  /**
+   * The exact mechanics-selected format for every completed public trick. This is parallel to `public_play_history` and avoids asking bot code to reconstruct an ambiguous throw decomposition later. Older snapshots have no entries; callers must then decline decomposition-dependent inference.
+   */
+  public_trick_formats?: (TrickFormat | null)[];
   removed_cards?: Card[];
   trick: Trick;
   trump: Trump;

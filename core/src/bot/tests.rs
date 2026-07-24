@@ -1271,6 +1271,206 @@ fn test_observed_state_reveals_real_cards_only_for_omniscient() {
     }
 }
 
+// ===========================================================================
+// "Suggest a play" advice (the ✨ button) — see `crate::bot::advice`.
+// ===========================================================================
+
+/// Step an all-bot game forward until a seat is about to LEAD a fresh trick
+/// mid-hand (the trick is empty but a previous one has already been played).
+/// This is the case the old rules-only helper could not advise at all — there is
+/// no trick format to decompose when you are on lead.
+fn step_to_fresh_lead(game: &mut InteractiveGame, logger: &Logger) {
+    let mut steps = 0;
+    loop {
+        let state = game.dump_state().unwrap();
+        if let GameState::Play(p) = &state {
+            let leading = p.trick().played_cards().is_empty();
+            let mid_hand = p.last_trick().is_some();
+            if !p.game_finished() && leading && mid_hand && p.trick().next_player().is_some() {
+                break;
+            }
+        }
+        match next_bot_action(game, false).unwrap() {
+            Some((bot_id, action)) => {
+                game.interact(action, bot_id, logger).unwrap();
+            }
+            None => panic!("ran out of bot actions before reaching a fresh lead"),
+        }
+        steps += 1;
+        assert!(steps < 5000, "could not reach a mid-hand lead");
+    }
+}
+
+/// A seat on LEAD gets advice too. The old client-side helper decomposed the
+/// trick format, so it was silent when leading; the grandmaster policy has an
+/// opinion about what to lead, and it must be a legal one.
+#[test]
+fn test_suggest_play_advises_a_lead() {
+    use crate::bot::advice::suggest_play;
+
+    let logger = null_logger();
+    let (mut game, _) = setup_all_bot_game(&logger);
+    step_to_fresh_lead(&mut game, &logger);
+
+    let state = game.dump_state().unwrap();
+    let leader = match &state {
+        GameState::Play(p) => {
+            assert!(
+                p.trick().played_cards().is_empty(),
+                "the helper must have stopped on an empty trick"
+            );
+            p.trick().next_player().unwrap()
+        }
+        other => panic!("expected Play phase, got {:?}", other),
+    };
+
+    let suggestion = suggest_play(&game, leader)
+        .unwrap()
+        .expect("the seat on lead must receive a suggestion");
+    assert!(
+        !suggestion.is_empty(),
+        "a lead suggestion must not be empty"
+    );
+    match &state {
+        GameState::Play(p) => p
+            .can_play_cards(leader, &suggestion)
+            .expect("a suggested lead must be legal"),
+        other => panic!("expected Play phase, got {:?}", other),
+    }
+}
+
+/// The seat on turn gets a LEGAL suggestion built only out of cards it actually
+/// holds; seats that are not on turn get no advice at all.
+#[test]
+fn test_suggest_play_is_legal_and_only_uses_own_cards() {
+    use crate::bot::advice::suggest_play;
+
+    let logger = null_logger();
+    let (mut game, bot_ids) = setup_all_bot_game(&logger);
+    step_to_mid_play(&mut game, &logger);
+
+    let state = game.dump_state().unwrap();
+    let on_turn = match &state {
+        GameState::Play(p) => p.trick().next_player().expect("a seat must be on turn"),
+        other => panic!("expected Play phase, got {:?}", other),
+    };
+
+    let suggestion = suggest_play(&game, on_turn)
+        .unwrap()
+        .expect("the seat on turn must receive a suggestion");
+    assert!(!suggestion.is_empty(), "a suggestion must not be empty");
+
+    // Every suggested card must come out of that seat's OWN hand, with enough
+    // copies to cover duplicates (suggesting a pair requires holding two).
+    let own_hand = match &state {
+        GameState::Play(p) => p.hands().get(on_turn).unwrap().clone(),
+        other => panic!("expected Play phase, got {:?}", other),
+    };
+    for (card, count) in Card::count(suggestion.iter().copied()) {
+        assert_ne!(
+            card,
+            Card::Unknown,
+            "a suggestion must never contain a redacted card"
+        );
+        assert!(
+            own_hand.get(&card).copied().unwrap_or(0) >= count,
+            "suggested {count}x {card:?} but the seat holds {:?}",
+            own_hand.get(&card)
+        );
+    }
+
+    // ...and it must be a play the rules engine accepts.
+    match &state {
+        GameState::Play(p) => p
+            .can_play_cards(on_turn, &suggestion)
+            .expect("a suggested play must be legal"),
+        other => panic!("expected Play phase, got {:?}", other),
+    }
+
+    for &pid in &bot_ids {
+        if pid == on_turn {
+            continue;
+        }
+        assert!(
+            suggest_play(&game, pid).unwrap().is_none(),
+            "seat {:?} is not on turn and must not be advised",
+            pid
+        );
+    }
+}
+
+/// There is nothing to advise outside the play phase (here: a freshly started
+/// game, still drawing).
+#[test]
+fn test_suggest_play_none_outside_play_phase() {
+    use crate::bot::advice::suggest_play;
+
+    let logger = null_logger();
+    let (game, bot_ids) = setup_all_bot_game(&logger);
+    for &pid in &bot_ids {
+        assert!(
+            suggest_play(&game, pid).unwrap().is_none(),
+            "no play advice is available during the draw phase"
+        );
+    }
+}
+
+/// Honesty: the hidden cards must contribute NOTHING to the advice. Handing the
+/// advisor a game whose state has ALREADY had every other seat's cards stripped
+/// must work exactly as well as handing it the true, unredacted game — it only
+/// ever looks at `dump_state_for_player`, so the two inputs are the same state
+/// as far as the advisor is concerned.
+///
+/// We can't assert the two moves are byte-identical: the underlying search is
+/// time-boxed, so the number of simulations that fit in the budget (and hence
+/// the chosen move) legitimately varies with machine load. What must hold on
+/// EVERY run is that stripping the hidden cards costs the advisor nothing —
+/// both inputs still yield a legal play drawn only from the advisee's own hand.
+#[test]
+fn test_suggest_play_ignores_other_seats_real_cards() {
+    use crate::bot::advice::suggest_play;
+
+    let logger = null_logger();
+    let (mut game, _) = setup_all_bot_game(&logger);
+    step_to_mid_play(&mut game, &logger);
+
+    let state = game.dump_state().unwrap();
+    let on_turn = match &state {
+        GameState::Play(p) => p.trick().next_player().unwrap(),
+        other => panic!("expected Play phase, got {:?}", other),
+    };
+    let own_hand = match &state {
+        GameState::Play(p) => p.hands().get(on_turn).unwrap().clone(),
+        other => panic!("expected Play phase, got {:?}", other),
+    };
+
+    let pre_redacted = InteractiveGame::new_from_state(state.for_player(on_turn));
+    for (label, advised) in [
+        ("true state", suggest_play(&game, on_turn).unwrap()),
+        (
+            "pre-redacted state",
+            suggest_play(&pre_redacted, on_turn).unwrap(),
+        ),
+    ] {
+        let advised = advised.unwrap_or_else(|| panic!("{}: expected a suggestion", label));
+        for (card, count) in Card::count(advised.iter().copied()) {
+            assert!(
+                own_hand.get(&card).copied().unwrap_or(0) >= count,
+                "{}: advised {}x {:?}, which the seat does not hold",
+                label,
+                count,
+                card
+            );
+        }
+        match &state {
+            GameState::Play(p) => p
+                .can_play_cards(on_turn, &advised)
+                .unwrap_or_else(|e| panic!("{}: advised an illegal play: {:?}", label, e)),
+            other => panic!("expected Play phase, got {:?}", other),
+        }
+    }
+}
+
 /// Omniscient legality: an all-Omniscient self-play game must complete using
 /// only legal moves (mirrors `test_bot_self_play_runs_to_finished_hand`). Even
 /// though it cheats by seeing all hands, every move it submits still goes through

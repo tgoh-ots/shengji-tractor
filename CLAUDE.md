@@ -72,6 +72,10 @@ cargo test -p shengji-core legacy_hard_difficulty_deserializes_as_expert
 cargo test -p shengji-core --test baseline_gate
 # Coarse release-only search/net gate (Expert beats Easy):
 SHENGJI_BOT_BUDGET_MS=60 cargo test -p shengji-core --release --test baseline_gate -- --ignored
+
+# The "suggest a play" (✨) advisor: legality, own-cards-only, leads, honesty.
+cargo test -p shengji-core suggest_play
+cargo test -p shengji --test e2e_game e2e_suggest_play_returns_legal_play_from_own_hand
 ```
 
 ### Bot benchmarks (headless self-play harnesses)
@@ -286,6 +290,10 @@ Key files:
 - `expert.rs` — the ONNX net inference + the `candidate_features` honest-feature encoding (the contract shared with training).
 - `determinize.rs` — samples plausible hidden hands consistent with the redacted view (`Knowledge`, void tracking). `sample_hidden_hands(.., full_memory, ..)`: Enoch passes `true` (perfect public memory — never re-deals a played card, full-hand voids); Easy/Expert pass `false`.
 - `harness.rs` — the SHARED self-play benchmark engine: `seeded_draw_phase`, the `Seat`/`PlayBrain` per-hand driver (`play_one_hand`, honesty-correct `play_cards_for`), and the paired-on-mirrored-deck A/B + stats (`run_paired_ab`, Wilson/bootstrap CIs, MDE). Every `core/examples/` benchmark builds on this; `core/tests/baseline_gate.rs` gates on it.
+- `advice.rs` — the human-facing **"suggest a play" (✨)** advisor: `suggest_play(game, player)` returns the move the **Grandmaster** tier would make in that seat (via `policy::grandmaster_play`, the same search the bot runs), re-validated with `PlayPhase::can_play_cards`. It only ever calls `dump_state_for_player` — NEVER `dump_state` — so advice can't leak a hidden card. Reached over the wire by `UserMessage::RequestPlaySuggestion` → `GameMessage::PlaySuggestion { cards }` (single-subscriber reply, no game mutation). Three things to preserve if you touch it:
+  1. **Budget**: capped at the BASE per-decision budget, NOT Grandmaster's 3× `GM_BUDGET_MULT` (~6.6s), because a human is watching a spinner. `SHENGJI_SUGGEST_BUDGET_MS` overrides it but is clamped to `MAX_SUGGEST_BUDGET_MS` (3.5s) so it can never outrun the client's 5s-silence "lost connection" watchdog. Unlike the other tiers a GM search USES its whole budget (full-hand rollouts over 400 worlds ⇒ ~2.2s/click, vs tens of ms for Enoch).
+  2. **CPU slot**: the handler takes a `BotRuntime::search_slots` permit before computing, exactly like the bot planner — on the single-shared-vCPU deploy (`MAX_PARALLEL_BOT_SEARCHES=1`) an unpermitted suggestion would run alongside a bot's search and halve both their simulation counts.
+  3. **Client watchdog**: the request is sent with `send(.., { slowReply: true })` so a legitimately slow answer (queued behind another room's search) doesn't flash "reconnecting"; the button carries its own `SUGGESTION_TIMEOUT_MS`.
 - `mod.rs` — `BotDifficulty` (with `#[serde(alias = "Hard")]` on Expert so old states still deserialize), the `advance_bots` driver, and the **plan/apply split** for the non-blocking driver: `classify_next_bot_work` (cheaply decides whose turn / what kind of work), `plan_next_bot_action` (does the expensive search OFF the lock on a snapshot), `apply_planned_bot_action` (briefly re-acquires the lock to apply the precomputed move). This is why bot thinking doesn't lag chat/UI — see `shengji_handler.rs::drive_bots_non_blocking` (snapshot → `spawn_blocking` compute → apply-under-lock).
 - `tests.rs` — bot unit tests incl. the cheat-boundary and `legacy_hard_difficulty_deserializes_as_expert` regression tests.
 
@@ -298,6 +306,7 @@ React 19 + TypeScript + Webpack 5 + `shengji-wasm`. `gen-types.d.ts` is auto-gen
 - **frontend/src/Players.tsx**, **StatusRail.tsx**: lobby team coloring and the declarer/points/turn status rail.
 - **frontend/src/AddAIPlayer.tsx**: lobby UI for adding bots — offers the five tiers `Easy / Expert / Enoch / Grandmaster / Omniscient` (default Expert).
 - **frontend/src/BidArea.tsx**: bidding UI incl. the **"Done bidding"** button (see Development Notes).
+- **frontend/src/Play.tsx** — the "Need help?" row holds two SEPARATE helpers: `TrickFormatHelper` (the `?` button; a client-side RULES explainer over `decomposeTrickFormat`, shown only when following) and `SuggestPlayButton` (the ✨ button; asks the SERVER for the grandmaster play, shown whenever it's your turn — including when leading). The reply lands in `AppState.playSuggestion` via `websocketHandler.ts` and is consumed/cleared by the button.
 - **frontend/src/i18n.tsx**, **GameMode.tsx**: bilingual 中文/English (custom React-context i18n, `localStorage["lang"]`, single en/zh toggle — **English mode shows no Chinese**).
 - **frontend/src/ChatMessage.tsx**, **Chat.tsx**: in-game chat + game-log rendering (incl. the kitty-points line).
 - **frontend/src/Draw.tsx**, **Card.tsx**, **SvgCard.tsx**: card rendering (real SVG cards, four-color suits).

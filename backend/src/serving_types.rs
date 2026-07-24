@@ -54,6 +54,11 @@ pub enum UserMessage {
     Beep,
     ReadyCheck,
     Ready,
+    /// Ask for advice on what to play right now ("suggest a play"). Answered
+    /// with a `GameMessage::PlaySuggestion` sent ONLY back to the requesting
+    /// socket, computed by the Grandmaster policy from the requester's
+    /// own redacted view. Purely advisory — it never mutates the game.
+    RequestPlaySuggestion,
 }
 
 #[derive(Clone, Serialize)]

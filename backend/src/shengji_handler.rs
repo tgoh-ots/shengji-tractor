@@ -7,8 +7,8 @@ use slog::{debug, error, info, o, Logger};
 use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 
 use shengji_core::bot::{
-    apply_planned_bot_action, classify_next_bot_work, plan_next_bot_action, BotPause, BotStep,
-    NextBotWork,
+    advice::suggest_play, apply_planned_bot_action, classify_next_bot_work, plan_next_bot_action,
+    BotPause, BotStep, NextBotWork,
 };
 use shengji_core::game_state::GameState;
 use shengji_core::interactive::{Action, InteractiveGame};
@@ -354,6 +354,10 @@ async fn player_subscribe_task(
                 | GameMessage::Header { .. } => true,
                 GameMessage::Beep { target } | GameMessage::Kicked { target } => *target == name_,
                 GameMessage::ReadyCheck { from } => *from != name_,
+                // Only ever published to the single socket that asked for it
+                // (`publish_to_single_subscriber`), and it only contains that
+                // player's own cards, so there is nothing to filter here.
+                GameMessage::PlaySuggestion { .. } => true,
             };
             let v = if should_send {
                 if let GameMessage::State { state } = v {
@@ -636,6 +640,66 @@ async fn handle_user_action<S: Storage<VersionedGame, E> + 'static, E: Send + 's
                 "kick user",
             )
             .await;
+        }
+        UserMessage::RequestPlaySuggestion => {
+            // "Suggest a play": advise this player with the move the Grandmaster
+            // tier would make in their seat. This is READ-ONLY — it takes a
+            // snapshot under a brief read lock (no version bump, no State
+            // republish) and never mutates the game.
+            //
+            // The advice is computed on a `spawn_blocking` worker, exactly like a
+            // bot's move: it runs the same time-boxed determinized search, which
+            // is CPU-bound with no await points, so it must stay off the async
+            // runtime and off the game lock (chat and other players keep flowing
+            // while it thinks). We `await` it inline rather than detaching, so a
+            // client can only ever have ONE suggestion in flight on its socket —
+            // the connection's own message loop provides the backpressure.
+            //
+            // It ALSO takes a `search_slots` permit, exactly like the bot planner:
+            // a suggestion is a full Grandmaster search that uses its whole budget,
+            // so on the single-shared-vCPU deploy (`MAX_PARALLEL_BOT_SEARCHES=1`)
+            // letting it run alongside a bot's planner would halve both their
+            // effective simulation counts and make the wall-clock budgets
+            // meaningless — the exact oversubscription that semaphore exists to
+            // prevent.
+            //
+            // Honesty: `suggest_play` only ever reads `dump_state_for_player`, so
+            // the reply can contain nothing the requester can't already see.
+            let cards = match snapshot_state(ws_id, room_name, backend_storage.clone()).await {
+                Some(snapshot) => match bot_runtime.search_slots.clone().acquire_owned().await {
+                    Ok(search_permit) => {
+                        let advise_logger = logger.clone();
+                        let cards = tokio::task::spawn_blocking(move || {
+                            let game = InteractiveGame::new_from_state(snapshot.state);
+                            match suggest_play(&game, caller) {
+                                Ok(cards) => cards.unwrap_or_default(),
+                                Err(e) => {
+                                    error!(advise_logger, "Failed to compute play suggestion";
+                                        "error" => format!("{e:?}"));
+                                    vec![]
+                                }
+                            }
+                        })
+                        .await
+                        .unwrap_or_default();
+                        drop(search_permit);
+                        cards
+                    }
+                    // The semaphore was closed (shutdown): reply with no advice
+                    // rather than hanging the client's spinner.
+                    Err(_) => vec![],
+                },
+                None => vec![],
+            };
+            // Always reply (even with an empty suggestion) so the client can
+            // clear its pending state instead of spinning.
+            let _ = backend_storage
+                .publish_to_single_subscriber(
+                    room_name.as_bytes().to_vec(),
+                    ws_id,
+                    GameMessage::PlaySuggestion { cards },
+                )
+                .await;
         }
         UserMessage::Action(action) => {
             // Sanitize free-text carried by actions before applying them. A bot

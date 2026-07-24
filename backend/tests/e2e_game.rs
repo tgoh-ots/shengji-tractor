@@ -38,7 +38,7 @@ use shengji::state_dump::InMemoryStats;
 use shengji_core::bot::{policy, BotDifficulty};
 use shengji_core::game_state::GameState;
 use shengji_core::interactive::Action;
-use shengji_mechanics::types::PlayerID;
+use shengji_mechanics::types::{Card, PlayerID};
 use storage::HashMapStorage;
 
 /// The redaction glyph the server substitutes for every hidden card
@@ -167,6 +167,19 @@ where
         .send(WsMessage::Text(serde_json::to_string(&payload).unwrap()))
         .await
         .expect("send action");
+}
+
+/// Send a `UserMessage::RequestPlaySuggestion` ("suggest a play") as JSON over
+/// the socket. A unit variant serializes as a bare string.
+async fn send_suggestion_request<S>(socket: &mut S)
+where
+    S: SinkExt<WsMessage> + Unpin,
+    <S as futures::Sink<WsMessage>>::Error: std::fmt::Debug,
+{
+    socket
+        .send(WsMessage::Text("\"RequestPlaySuggestion\"".to_string()))
+        .await
+        .expect("send suggestion request");
 }
 
 /// Send a `UserMessage::Message(text)` (a chat message) as JSON over the socket.
@@ -427,6 +440,207 @@ fn next_action_for(view: &GameState, me: PlayerID) -> Option<Action> {
             }
         }
     }
+}
+
+/// End-to-end test for the "suggest a play" (✨) button.
+///
+/// A human drives into the Play phase, then — on their own turn — asks the
+/// server for advice (`UserMessage::RequestPlaySuggestion`). We assert the full
+/// contract of the reply:
+///
+///   * it comes back as a `GameMessage::PlaySuggestion` on the requester's own
+///     socket, non-empty;
+///   * every suggested card is one the requester ACTUALLY HOLDS — the advice is
+///     computed from their own redacted view, so it can never surface a hidden
+///     card (this is the honesty invariant reaching all the way to the wire);
+///   * it is a LEGAL play — proven twice over: by the rules engine
+///     (`PlayPhase::can_play_cards`) and by actually submitting it and watching
+///     the server accept it and the hand shrink.
+#[tokio::test]
+async fn e2e_suggest_play_returns_legal_play_from_own_hand() {
+    // Keep the per-decision search budget tiny: both the bots' moves and the
+    // suggestion itself run the time-boxed search.
+    std::env::set_var("SHENGJI_BOT_BUDGET_MS", "10");
+
+    let addr = spawn_server().await;
+    let url = format!("ws://{addr}/api");
+    let (mut socket, _resp) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("connect to /api websocket");
+
+    let my_name = "human-advice";
+    let room_name = "adviceroom16chr_";
+    assert_eq!(room_name.len(), 16, "room name must be exactly 16 chars");
+
+    let join = json!({
+        "room_name": room_name,
+        "name": my_name,
+        "disable_compression": true,
+    });
+    socket
+        .send(WsMessage::Text(join.to_string()))
+        .await
+        .expect("send JoinRoom");
+
+    let mut saw_initial_state = false;
+    for _ in 0..20 {
+        match next_json(&mut socket).await {
+            Some(v) => {
+                if v.get("State").is_some() {
+                    saw_initial_state = true;
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    assert!(saw_initial_state, "never received an initial lobby State");
+
+    // Easy bots keep the drive fast; the ADVICE always uses the grandmaster
+    // (Enoch) policy regardless of which tiers are seated.
+    for _ in 0..3 {
+        send_action(
+            &mut socket,
+            &Action::AddAIPlayer {
+                difficulty: BotDifficulty::Easy,
+            },
+        )
+        .await;
+    }
+    send_action(&mut socket, &Action::StartGame).await;
+
+    // Drive to the Play phase; on our first turn there, ask for advice instead
+    // of playing, then submit exactly what we were advised.
+    let mut requested = false;
+    let mut suggested: Option<Vec<Card>> = None;
+    let mut submitted = false;
+    let mut hand_size_when_advised = 0usize;
+    let mut accepted = false;
+    let mut reached_play = false;
+    // The position we were in when we asked, so we can independently check the
+    // advice against the rules engine before submitting it.
+    let mut position_when_advised: Option<GameState> = None;
+
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(60) && !accepted {
+        let msg = match next_json(&mut socket).await {
+            Some(v) => v,
+            None => break,
+        };
+
+        // The advice reply: validate it, then play it.
+        if let Some(payload) = msg.get("PlaySuggestion") {
+            let cards: Vec<Card> =
+                serde_json::from_value(payload.get("cards").expect("cards field").clone())
+                    .expect("PlaySuggestion.cards must deserialize as cards");
+            assert!(
+                !cards.is_empty(),
+                "asked for advice on our own turn but got an empty suggestion"
+            );
+            assert!(
+                cards.iter().all(|c| *c != Card::Unknown),
+                "a suggestion must never contain a redacted card: {cards:?}"
+            );
+            // Independently confirm, against our OWN redacted view of the
+            // position we asked about, that the advice is (a) drawn entirely
+            // from cards we hold and (b) a legal play.
+            match position_when_advised.as_ref().expect("position captured") {
+                GameState::Play(p) => {
+                    let me = p.propagated().players().iter().find(|x| x.name == my_name);
+                    let me = me.expect("we are seated").id;
+                    let hand = p.hands().get(me).expect("our own hand").clone();
+                    for (card, count) in Card::count(cards.iter().copied()) {
+                        assert!(
+                            hand.get(&card).copied().unwrap_or(0) >= count,
+                            "suggested {count}x {card:?} but our hand holds {:?}",
+                            hand.get(&card)
+                        );
+                    }
+                    p.can_play_cards(me, &cards)
+                        .expect("the suggested play must be legal in the position we asked about");
+                }
+                other => panic!("expected to have asked during the Play phase, got {other:?}"),
+            }
+            suggested = Some(cards.clone());
+            send_action(&mut socket, &Action::PlayCards(cards)).await;
+            submitted = true;
+            continue;
+        }
+
+        if let Some(err) = msg.get("Error") {
+            assert!(
+                !submitted,
+                "the server rejected the play it suggested to us: {err}"
+            );
+            eprintln!("server error message: {err}");
+            continue;
+        }
+
+        let game = match assert_no_leak_and_parse(&msg, my_name) {
+            Some(g) => g,
+            None => continue,
+        };
+        let me = match game
+            .propagated()
+            .players()
+            .iter()
+            .find(|p| p.name == my_name)
+            .map(|p| p.id)
+        {
+            Some(id) => id,
+            None => continue,
+        };
+
+        if let GameState::Play(p) = &game {
+            if p.game_finished() {
+                break;
+            }
+            reached_play = true;
+            let my_hand_size: usize = p.hands().get(me).map(|h| h.values().sum()).unwrap_or(0);
+
+            // Once the play we were advised has been applied, our hand must have
+            // shrunk by exactly that many cards.
+            if submitted {
+                if let Some(cards) = &suggested {
+                    if my_hand_size + cards.len() == hand_size_when_advised {
+                        accepted = true;
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            if p.trick().next_player() == Some(me) && !requested {
+                // Our turn: the suggestion must be legal in THIS position, so
+                // remember it and ask the server for advice.
+                hand_size_when_advised = my_hand_size;
+                position_when_advised = Some(game.clone());
+                requested = true;
+                send_suggestion_request(&mut socket).await;
+                continue;
+            }
+            if requested {
+                // Waiting on the advice; don't act.
+                continue;
+            }
+        }
+
+        if let Some(action) = next_action_for(&game, me) {
+            send_action(&mut socket, &action).await;
+        }
+    }
+
+    assert!(
+        reached_play,
+        "the game never reached the Play phase, so advice was never requested"
+    );
+    let cards = suggested.expect("never received a PlaySuggestion reply from the server");
+    assert!(
+        accepted,
+        "the suggested play {cards:?} was never applied by the server"
+    );
+
+    let _ = socket.close(None).await;
 }
 
 /// Concurrency regression test: chat must stay responsive while a bot is mid

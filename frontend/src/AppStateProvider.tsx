@@ -12,6 +12,20 @@ import {
 
 import type { JSX } from "react";
 
+/**
+ * The server's reply to a "suggest a play" (✨) request: the cards the
+ * Grandmaster policy advises for THIS player, computed from their own
+ * redacted view. `cards` is empty when no advice was available.
+ *
+ * `id` is a monotonic counter so that two consecutive, identical suggestions
+ * still read as distinct events. Like `confetti`, this is transient: the play UI
+ * consumes it and clears it back to `null`.
+ */
+export interface PlaySuggestion {
+  cards: string[];
+  id: number;
+}
+
 export interface AppState {
   settings: Settings;
   gameStatistics: GameStatistics;
@@ -25,6 +39,7 @@ export interface AppState {
   errors: string[];
   messages: Message[];
   confetti: string | null;
+  playSuggestion: PlaySuggestion | null;
   changeLogLastViewed: number;
 }
 
@@ -68,6 +83,7 @@ const appState: State<AppState> = combineState({
   errors: noPersistence<string[]>(() => []),
   messages: noPersistence<Message[]>(() => []),
   confetti: noPersistence<string | null>(() => null),
+  playSuggestion: noPersistence<PlaySuggestion | null>(() => null),
 });
 
 interface Context {

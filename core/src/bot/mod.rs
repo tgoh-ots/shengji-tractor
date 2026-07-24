@@ -8,6 +8,7 @@ use shengji_mechanics::types::PlayerID;
 use crate::game_state::GameState;
 use crate::interactive::{Action, BroadcastMessage, InteractiveGame};
 
+pub mod advice;
 pub mod belief;
 pub mod determinize;
 pub mod endgame;

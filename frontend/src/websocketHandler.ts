@@ -87,6 +87,27 @@ const stateHandler: WebsocketHandler = (_: AppState, message: GameMessage) => {
   }
 };
 
+// Monotonic id for suggestion replies, so that asking twice in the same
+// position (which legitimately returns the same cards) still registers as a new
+// event for the play UI to consume.
+let suggestionCount = 0;
+const playSuggestionHandler: WebsocketHandler = (
+  _: AppState,
+  message: GameMessage,
+) => {
+  if ("PlaySuggestion" in message) {
+    suggestionCount += 1;
+    return {
+      playSuggestion: {
+        cards: message.PlaySuggestion.cards,
+        id: suggestionCount,
+      },
+    };
+  } else {
+    return null;
+  }
+};
+
 const headerMessageHandler: WebsocketHandler = (
   _: AppState,
   message: GameMessage,
@@ -189,6 +210,7 @@ const allHandlers: WebsocketHandler[] = [
   errorHandler,
   stateHandler,
   headerMessageHandler,
+  playSuggestionHandler,
   gameFinishedHandler,
 ];
 

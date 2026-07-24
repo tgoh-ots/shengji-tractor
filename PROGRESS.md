@@ -1,7 +1,7 @@
 # Shengji Online — Project Progress & Recovery Log
 
 > Durable status doc so work can resume after a crashed/restarted session.
-> **Last updated: 2026-07-11.** This is a historical chronology, not an active
+> **Last updated: 2026-07-24.** This is a historical chronology, not an active
 > bot execution roadmap. The Enoch/Stage 2 exploration is closed with no
 > candidate proven superior; use
 > [`docs/strategy/four-player-bot-exploration-closure-2026-07-11.md`](docs/strategy/four-player-bot-exploration-closure-2026-07-11.md)
@@ -14,7 +14,46 @@
 > **bot-ladder overhaul**, a round of **UI/game-flow polish**, and a
 > **security/reliability audit + hygiene sweep** (all shipped).
 
-## Current state (2026-06-30)
+## Current state (2026-07-24)
+
+### 2026-07-24 — "Suggest a play" (✨) now returns the Grandmaster move
+The in-game ✨ button now answers **"what is the best play?"** instead of merely
+**"what am I allowed to play?"**. It used to run client-side over
+`TrickFormat::decomposition` and pre-select the first structural match — legal,
+but blind to points, boss cards and who was winning the trick, and it could not
+advise a LEAD at all (no trick format to decompose).
+- **New advisor**: `core/src/bot/advice.rs::suggest_play` returns the move the
+  **`Grandmaster`** tier would make in that seat, via `policy::grandmaster_play`
+  — the same calculation-driven search the bot runs, so advice and bot play can't
+  drift apart. Re-validated with `PlayPhase::can_play_cards` before being sent.
+- **Cost/latency (measured)**: unlike the other tiers, a GM search USES its whole
+  budget (full-hand rollouts over 400 worlds), so a click costs ~2.2s of CPU
+  where Enoch would have taken tens of ms. It is therefore capped at the BASE
+  budget rather than GM's 3× `GM_BUDGET_MULT` (~6.6s), and
+  `SHENGJI_SUGGEST_BUDGET_MS` is clamped to 3.5s so it can never outrun the
+  client's 5s-silence "lost connection" watchdog. NOTE: GM and Enoch are
+  statistically tied in strength at equal budget, so the tier choice here buys
+  GM's calculation-driven STYLE, not extra strength — switch
+  `policy::grandmaster_play` to `BotDifficulty::Enoch` if the CPU cost ever
+  matters more.
+- **Shares the global CPU slot**: the handler takes a `BotRuntime::search_slots`
+  permit like the bot planner, so a suggestion can't oversubscribe the single
+  shared vCPU and silently halve a bot's effective search. The request is sent
+  with `slowReply: true` so a queued (slow but healthy) answer doesn't flash
+  "reconnecting".
+- **Honesty preserved**: `suggest_play` only ever calls `dump_state_for_player`
+  (never `dump_state`), so the advice comes from exactly the view the asking
+  human already has and can't leak a hidden card. Covered by
+  `test_suggest_play_*` in `bot/tests.rs` and the e2e
+  `e2e_suggest_play_returns_legal_play_from_own_hand`.
+- **Wire protocol**: new `UserMessage::RequestPlaySuggestion` →
+  `GameMessage::PlaySuggestion { cards }`, published only to the requesting
+  socket. Read-only (snapshot, no version bump) and computed on `spawn_blocking`
+  like a bot move, so it never holds the game lock; awaited inline so one socket
+  can only have one suggestion in flight.
+- **UI**: the ✨ button now also appears when LEADING, is split from the `?`
+  rules helper (`SuggestPlayButton` / `TrickFormatHelper` in `Play.tsx`), shows a
+  "thinking…" state, and its strings are bilingual.
 
 ### 2026-06-30 — Unsafe Joker throws fixed (live v39) + endgame ruff/model handoff
 
@@ -245,7 +284,8 @@ secrets in the repo. Forked from **rbtying/shengji** (MIT). Repo:
     `policy.rs` (per-tier knobs + dispatch, search budget), `heuristics.rs` (the
     shared `score_lead`/`score_follow`/`EvalCtx` + the `*_enoch` playbook),
     `search.rs` (determinized search + `Policy` enum), `expert.rs` (ONNX net +
-    feature encoding), `determinize.rs` (world sampling), `tests.rs`.
+    feature encoding), `determinize.rs` (world sampling), `advice.rs` (the
+    human-facing "suggest a play" advisor), `tests.rs`.
   - **Cheat boundary:** `GameState::for_player(id)` redacts other hands; honest
     bots get only this view via `observed_state`.
 - `backend/` — Axum WS server (`GET /api`); `shengji_handler.rs` (per-connection

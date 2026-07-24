@@ -1665,6 +1665,26 @@
             }
           },
           "additionalProperties": false
+        },
+        {
+          "description": "The answer to a `UserMessage::RequestPlaySuggestion`: the cards the Grandmaster policy would play in the requesting player's seat, computed from THAT PLAYER'S OWN redacted view (see `shengji_core::bot::advice`). Published only to the requesting socket, and it only ever contains cards that socket's player already holds.\n\n`cards` is empty when no advice is available — it isn't their turn, the game isn't in the play phase, or no legal suggestion could be produced — so the client always gets a reply to clear its pending state.",
+          "type": "object",
+          "required": ["PlaySuggestion"],
+          "properties": {
+            "PlaySuggestion": {
+              "type": "object",
+              "required": ["cards"],
+              "properties": {
+                "cards": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/definitions/Card"
+                  }
+                }
+              }
+            }
+          },
+          "additionalProperties": false
         }
       ]
     },
@@ -3056,6 +3076,21 @@
             }
           }
         },
+        "public_trick_formats": {
+          "description": "The exact mechanics-selected format for every completed public trick. This is parallel to `public_play_history` and avoids asking bot code to reconstruct an ambiguous throw decomposition later. Older snapshots have no entries; callers must then decline decomposition-dependent inference.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/TrickFormat"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
         "removed_cards": {
           "default": [],
           "type": "array",
@@ -3090,6 +3125,18 @@
       "type": "object",
       "required": ["bad_throw_cards", "cards", "id"],
       "properties": {
+        "attempted_format": {
+          "description": "Exact decomposition selected for the original compound lead before a failed throw was reduced to its forced unit. This preserves a human's explicit format hint for later public-evidence reconstruction.",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TrickFormat"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "bad_throw_cards": {
           "type": "array",
           "items": {

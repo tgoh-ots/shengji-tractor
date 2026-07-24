@@ -124,6 +124,14 @@ const en: Dict = {
   "play.seat.across": "Across",
   "play.seat.right": "Right",
   "play.waitingTurn": "Waiting for other players...",
+  "play.needHelp": "Need help?",
+  "play.rulesHelp": "What am I allowed to play?",
+  "play.rulesHelpAria": "What can I play?",
+  "play.suggest": "Suggest the strongest play",
+  "play.suggestAria": "Suggest a play",
+  "play.suggestThinking": "thinking…",
+  "play.suggestNone": "no suggestion available",
+  "play.suggestError": "couldn't get a suggestion",
 
   // Team / allegiance roles on the table
   "team.you": "You",
@@ -292,6 +300,14 @@ const zh: Dict = {
   "play.seat.across": "对家",
   "play.seat.right": "右家",
   "play.waitingTurn": "等待其他玩家…",
+  "play.needHelp": "需要帮助吗？",
+  "play.rulesHelp": "我可以出什么牌？",
+  "play.rulesHelpAria": "我可以出什么牌？",
+  "play.suggest": "推荐最佳出牌",
+  "play.suggestAria": "推荐出牌",
+  "play.suggestThinking": "思考中…",
+  "play.suggestNone": "暂无推荐",
+  "play.suggestError": "获取推荐失败",
 
   // Team / allegiance roles on the table
   "team.you": "你",

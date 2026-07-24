@@ -519,6 +519,57 @@ fn rng_for(p: &PlayPhase, me: PlayerID) -> StdRng {
     StdRng::seed_from_u64(observation_seed(p, me))
 }
 
+/// Hard ceiling (ms) on a human-requested play suggestion.
+///
+/// The web client treats **5s of silence after a `send` as a lost connection**
+/// (`WebsocketProvider.tsx`), and a suggestion request is answered by exactly one
+/// reply — so a search that outruns that window makes the whole app flash
+/// "reconnecting" on every ✨ click. We clamp well under it, leaving room for the
+/// snapshot, the queue wait for a CPU slot, and the round trip.
+const MAX_SUGGEST_BUDGET_MS: u64 = 3500;
+
+/// The wall-clock budget (ms) for a human-requested play suggestion.
+///
+/// A suggestion is NOT a bot move: a human is sitting there watching a spinner,
+/// so it is capped at the BASE per-decision budget rather than the Grandmaster
+/// tier's `GM_BUDGET_MULT` (3×, ~6.6s at the production base). The advisor keeps
+/// Grandmaster's search SHAPE (wide root, full-hand rollouts, high world cap) and
+/// simply completes fewer worlds inside the smaller budget. Override with
+/// `SHENGJI_SUGGEST_BUDGET_MS`, which is still clamped to
+/// [`MAX_SUGGEST_BUDGET_MS`] so no configuration can trip the client's
+/// lost-connection heuristic.
+fn suggest_budget_ms() -> u64 {
+    std::env::var("SHENGJI_SUGGEST_BUDGET_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or_else(search_budget_ms)
+        .min(MAX_SUGGEST_BUDGET_MS)
+}
+
+/// The play the **Grandmaster** tier — the apex HONEST tier — would make in
+/// `me`'s seat, given ONLY `me`'s own redacted view.
+///
+/// This is the engine behind the human-facing "suggest a play" button (see
+/// [`crate::bot::advice`]). It runs the very same code path a Grandmaster bot
+/// seated there would run — the calculation-driven search that uses the Enoch
+/// playbook only to PROPOSE candidates and then commits to whatever the
+/// full-hand determinized rollouts value highest — so the advice a human gets
+/// and the move the bot would make can't drift apart. Like every bot play it is
+/// always a legal move.
+///
+/// The one deliberate difference is the time budget (see [`suggest_budget_ms`]):
+/// a human waiting on a click gets the base budget, not Grandmaster's 3×.
+///
+/// # Honesty invariant
+///
+/// `p` MUST be the play phase from the redacted per-player view
+/// (`GameState::for_player(me)`); see [`select_action`]. Nothing here reads a
+/// hidden hand — the search only ever *samples* the unseen cards.
+pub fn grandmaster_play(p: &PlayPhase, me: PlayerID) -> Vec<Card> {
+    choose_play(p, me, BotDifficulty::Grandmaster, Some(suggest_budget_ms()))
+}
+
 /// Choose the cards to play in the current trick for the given difficulty.
 /// Always returns a legal play (falling back to the dumb policy on any failure).
 fn choose_play(

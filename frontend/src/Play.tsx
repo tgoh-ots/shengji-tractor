@@ -23,7 +23,7 @@ import BeepButton from "./BeepButton";
 import StatusRail from "./StatusRail";
 import { useTranslation } from "./i18n";
 import { WebsocketContext } from "./WebsocketProvider";
-import { SettingsContext } from "./AppStateProvider";
+import { AppStateContext, SettingsContext } from "./AppStateProvider";
 import { useEngine } from "./useEngine";
 import InlineCard from "./InlineCard";
 import {
@@ -262,6 +262,22 @@ const Play = (props: IProps): JSX.Element => {
     playPhase.penalties,
   );
 
+  // The rules helper ("what am I allowed to play?") only makes sense while
+  // FOLLOWING a trick that has a format, and only for a seat that still owes a
+  // play to it.
+  const canAskRulesHelp =
+    playPhase.trick.trick_format !== null &&
+    playPhase.trick.player_queue.includes(currentPlayer.id);
+
+  // Apply a set of cards (from either helper) as the current selection.
+  const selectSuggestion = (newSelected: string[]): void => {
+    updateSelectionAndGrouping(
+      newSelected,
+      playPhase.trump,
+      playPhase.propagated.tractor_requirements!,
+    );
+  };
+
   const noCardsLeft =
     remainingCardsInHands === 0 && playPhase.trick.played_cards.length === 0;
 
@@ -466,22 +482,27 @@ const Play = (props: IProps): JSX.Element => {
       )}
       {!canFinish && (
         <>
-          {playPhase.trick.trick_format !== null &&
-          !isSpectator &&
-          playPhase.trick.player_queue.includes(currentPlayer.id) ? (
-            <TrickFormatHelper
-              format={playPhase.trick.trick_format!}
-              hands={playPhase.hands}
-              playerId={currentPlayer.id}
-              trickDrawPolicy={playPhase.propagated.trick_draw_policy!}
-              setSelected={(newSelected) => {
-                updateSelectionAndGrouping(
-                  newSelected,
-                  playPhase.trump,
-                  playPhase.propagated.tractor_requirements!,
-                );
-              }}
-            />
+          {(canAskRulesHelp || isCurrentPlayerTurn) && !isSpectator ? (
+            <div className="my-2 flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold text-[var(--text-on-felt)]">
+                {t("play.needHelp")}
+              </span>
+              {canAskRulesHelp && (
+                <TrickFormatHelper
+                  format={playPhase.trick.trick_format!}
+                  hands={playPhase.hands}
+                  playerId={currentPlayer.id}
+                  trickDrawPolicy={playPhase.propagated.trick_draw_policy!}
+                  setSelected={selectSuggestion}
+                />
+              )}
+              {/* The suggestion needs it to actually be our turn (the engine
+                  only advises the seat on turn), but unlike the rules helper it
+                  works when LEADING too. */}
+              {isCurrentPlayerTurn && (
+                <SuggestPlayButton onSuggestion={selectSuggestion} />
+              )}
+            </div>
           ) : null}
           {lastPlay === undefined &&
             isCurrentPlayerTurn &&
@@ -752,6 +773,12 @@ const HelperContents = (props: {
   return modalContents;
 };
 
+/**
+ * The RULES helper ("?"): explains what the trick format allows this player to
+ * play, and offers an example selection for each rung of the requirement ladder.
+ * Purely a legality question — it says nothing about what is *good* to play (see
+ * `SuggestPlayButton` for that).
+ */
 const TrickFormatHelper = (props: {
   format: TrickFormat;
   hands: Hands;
@@ -759,25 +786,16 @@ const TrickFormatHelper = (props: {
   trickDrawPolicy: TrickDrawPolicy;
   setSelected: (selected: string[]) => void;
 }): JSX.Element => {
-  const engine = useEngine();
+  const { t } = useTranslation();
   const [modalOpen, setModalOpen] = React.useState<boolean>(false);
-  const [message, setMessage] = React.useState<string>("");
-  const [isLoading, setIsLoading] = React.useState<boolean>(false);
-
-  React.useEffect(() => {
-    setMessage("");
-  }, [props.hands]);
 
   return (
-    <div className="my-2 flex flex-wrap items-center gap-2">
-      <span className="text-sm font-semibold text-[var(--text-on-felt)]">
-        Need help?
-      </span>
+    <>
       <Tooltip id="helpTip" place="top" />
       <button
         data-tooltip-id="helpTip"
-        data-tooltip-content="Get help on what you can play"
-        aria-label="What can I play?"
+        data-tooltip-content={t("play.rulesHelp")}
+        aria-label={t("play.rulesHelpAria")}
         className="sj-btn !min-h-[40px] !px-3"
         onClick={(evt) => {
           evt.preventDefault();
@@ -786,51 +804,6 @@ const TrickFormatHelper = (props: {
       >
         ?
       </button>
-      <Tooltip id="suggestTip" place="top" />
-      <button
-        data-tooltip-id="suggestTip"
-        data-tooltip-content="Suggest a play (not guaranteed to succeed)"
-        aria-label="Suggest a play"
-        className="sj-btn !min-h-[40px] !px-3"
-        disabled={isLoading}
-        onClick={async (evt) => {
-          evt.preventDefault();
-          setIsLoading(true);
-          try {
-            const decomp = await engine.decomposeTrickFormat({
-              trick_format: props.format,
-              hands: props.hands,
-              player_id: props.playerId,
-              trick_draw_policy: props.trickDrawPolicy,
-            });
-            const bestMatch = decomp.findIndex((d) => d.playable.length > 0);
-            if (bestMatch >= 0) {
-              props.setSelected(decomp[bestMatch].playable);
-              setMessage("success");
-              setTimeout(() => setMessage(""), 500);
-            } else {
-              setMessage("cannot suggest a play");
-              setTimeout(() => setMessage(""), 2000);
-            }
-          } catch (error) {
-            console.error("Error getting play suggestion:", error);
-            setMessage("error suggesting play");
-            setTimeout(() => setMessage(""), 2000);
-          } finally {
-            setIsLoading(false);
-          }
-        }}
-      >
-        {isLoading ? "..." : "✨"}
-      </button>
-      {message !== "" && (
-        <span
-          className="cursor-pointer text-sm font-semibold text-[#ff6b6b]"
-          onClick={() => setMessage("")}
-        >
-          {message}
-        </span>
-      )}
       <ReactModal
         isOpen={modalOpen}
         onRequestClose={() => setModalOpen(false)}
@@ -851,7 +824,114 @@ const TrickFormatHelper = (props: {
           />
         )}
       </ReactModal>
-    </div>
+    </>
+  );
+};
+
+/** How long to wait for the server's advice before giving up on the spinner. */
+const SUGGESTION_TIMEOUT_MS = 15000;
+
+/**
+ * The STRATEGY helper ("✨"): asks the server what to play and pre-selects the
+ * answer.
+ *
+ * The advice is computed server-side by the Grandmaster policy — the apex
+ * honest bot tier — from THIS PLAYER'S OWN redacted view, so it is the move that
+ * bot would make in this seat and it can never reveal a hidden card.
+ * (It replaces the old client-side helper, which just took the first structural
+ * match out of the trick-format decomposition: legal, but blind to points, boss
+ * cards and who is winning the trick, and unable to advise a lead at all.)
+ *
+ * The request/response is a plain WebSocket round trip: we `send` a
+ * `RequestPlaySuggestion` and the reply lands in app state as `playSuggestion`,
+ * which we consume here.
+ */
+const SuggestPlayButton = (props: {
+  onSuggestion: (cards: string[]) => void;
+}): JSX.Element => {
+  const { t } = useTranslation();
+  const { send } = React.useContext(WebsocketContext);
+  const { state, updateState } = React.useContext(AppStateContext);
+  const [pending, setPending] = React.useState<boolean>(false);
+  const [message, setMessage] = React.useState<string>("");
+
+  const { onSuggestion } = props;
+  const suggestion = state.playSuggestion;
+
+  React.useEffect(() => {
+    if (suggestion === null) {
+      return;
+    }
+    // Consume the reply so a later render can't re-apply it.
+    updateState({ playSuggestion: null });
+    if (!pending) {
+      // We aren't waiting on advice: this reply outlived the turn it was asked
+      // about (e.g. it landed after we'd already played). Applying it now would
+      // select cards for the WRONG position, so drop it.
+      return;
+    }
+    setPending(false);
+    if (suggestion.cards.length > 0) {
+      setMessage("");
+      onSuggestion(suggestion.cards);
+    } else {
+      setMessage(t("play.suggestNone"));
+      setTimeout(() => setMessage(""), 2000);
+    }
+    // Keyed on the suggestion's id ONLY: `updateState` is recreated on every
+    // render, so depending on it would loop, and the id already changes exactly
+    // once per reply (even when the advised cards are identical).
+  }, [suggestion?.id]);
+
+  // Don't spin forever if the reply never arrives (e.g. the socket dropped
+  // mid-request and reconnected).
+  React.useEffect(() => {
+    if (!pending) {
+      return;
+    }
+    const timeout = setTimeout(() => {
+      setPending(false);
+      setMessage(t("play.suggestError"));
+      setTimeout(() => setMessage(""), 2000);
+    }, SUGGESTION_TIMEOUT_MS);
+    return () => clearTimeout(timeout);
+  }, [pending, t]);
+
+  return (
+    <>
+      <Tooltip id="suggestTip" place="top" />
+      <button
+        data-tooltip-id="suggestTip"
+        data-tooltip-content={t("play.suggest")}
+        aria-label={t("play.suggestAria")}
+        className="sj-btn !min-h-[40px] !px-3"
+        disabled={pending}
+        onClick={(evt) => {
+          evt.preventDefault();
+          setMessage("");
+          setPending(true);
+          // `slowReply`: the server queues this behind a global CPU slot and then
+          // runs a full search, so it can legitimately outlast the socket's
+          // 5s-silence watchdog. Our own SUGGESTION_TIMEOUT_MS covers the button.
+          send("RequestPlaySuggestion", { slowReply: true });
+        }}
+      >
+        {pending ? "…" : "✨"}
+      </button>
+      {pending && (
+        <span className="text-sm text-[var(--text-on-felt-soft)]">
+          {t("play.suggestThinking")}
+        </span>
+      )}
+      {message !== "" && (
+        <span
+          className="cursor-pointer text-sm font-semibold text-[#ff6b6b]"
+          onClick={() => setMessage("")}
+        >
+          {message}
+        </span>
+      )}
+    </>
   );
 };
 
