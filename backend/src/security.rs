@@ -39,6 +39,14 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// Read an environment-variable-overridable `u64` tunable.
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
 /// Read an environment-variable-overridable `f64` tunable.
 fn env_f64(key: &str, default: f64) -> f64 {
     std::env::var(key)
@@ -66,6 +74,17 @@ pub struct ResourceLimits {
     /// oversubscribing a small VM both weakens every bot and can starve request
     /// handling.  Keep this at one on the production single-vCPU machine.
     pub max_parallel_bot_searches: usize,
+    /// Minimum interval between accepted "suggest a play" requests on ONE
+    /// connection.
+    ///
+    /// A suggestion is a full Grandmaster search that USES its whole budget
+    /// (~2.2s) and takes the same process-wide `search_slots` permit as the bot
+    /// planner. Without a cooldown, a single on-turn player clicking ✨
+    /// repeatedly holds that one permit at ~100% duty cycle and stalls bot
+    /// planning in EVERY room, not just their own. The generic 40 msg/s inbound
+    /// limit is far too coarse to prevent that, so suggestions are throttled
+    /// separately.
+    pub suggestion_min_interval: std::time::Duration,
 }
 
 impl Default for ResourceLimits {
@@ -80,6 +99,14 @@ impl Default for ResourceLimits {
             msg_rate_per_sec: env_f64("WS_MSG_RATE_PER_SEC", 40.0),
             msg_burst: env_f64("WS_MSG_BURST", 60.0),
             max_parallel_bot_searches: env_usize("MAX_PARALLEL_BOT_SEARCHES", 1).max(1),
+            // A human clicking the button cannot reasonably need advice more
+            // than once every couple of seconds, and a suggestion costs about
+            // that much CPU, so this bounds one connection to roughly its own
+            // fair share without ever being noticeable in normal play.
+            suggestion_min_interval: std::time::Duration::from_millis(env_u64(
+                "SUGGESTION_MIN_INTERVAL_MS",
+                2500,
+            )),
         }
     }
 }

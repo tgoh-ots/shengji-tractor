@@ -3,17 +3,106 @@ use shengji_types::wasm_rpc::{
     BatchCardInfoResponse, NextThresholdReachableResponse, WasmRpcRequest, WasmRpcResponse,
 };
 
+/// Maximum accepted request body for `/api/rpc`.
+///
+/// The endpoint is unauthenticated and its work is combinatorial in the number
+/// of cards, so the body size is the first line of defence. A real request
+/// carries at most a hand plus a trick plus the deck configuration — a few KB.
+/// 64 KB leaves enormous headroom while making it impossible to post the tens of
+/// thousands of cards that axum's ~2 MB default would have allowed.
+pub const MAX_RPC_BODY_BYTES: usize = 64 * 1024;
+
 pub async fn handle_wasm_rpc(Json(request): Json<WasmRpcRequest>) -> impl IntoResponse {
-    match process_request(request) {
-        Ok(response) => (StatusCode::OK, Json(response)),
-        Err(err) => (
+    // `process_request` is synchronous, CPU-bound, and combinatorial (the trick
+    // format matcher). Running it inline would block an async worker thread; on
+    // the single-vCPU deployment a handful of concurrent requests could wedge the
+    // whole server, WebSockets included. Move it to a blocking worker.
+    let outcome = tokio::task::spawn_blocking(move || process_request(request)).await;
+    match outcome {
+        Ok(Ok(response)) => (StatusCode::OK, Json(response)),
+        Ok(Err(message)) => (
+            StatusCode::BAD_REQUEST,
+            Json(WasmRpcResponse::Error { message }),
+        ),
+        // The worker panicked or the runtime is shutting down.
+        Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(WasmRpcResponse::Error(err)),
+            Json(WasmRpcResponse::Error {
+                message: "request could not be processed".to_string(),
+            }),
         ),
     }
 }
 
+/// Largest card vector this endpoint will evaluate.
+///
+/// The combinatorial work (`TrickUnit::find_plays`, the format matcher) grows
+/// explosively with the number of cards, so size is capped before any of it
+/// runs. A legitimate play or hand is bounded by the deck configuration: even 16
+/// seats sharing several decks leaves a hand well under 200 cards, so this is
+/// generous for real traffic while refusing pathological inputs outright.
+const MAX_CARDS_PER_REQUEST: usize = 200;
+
+/// Largest batch of per-card info lookups. Each is cheap, but the batch is
+/// unbounded work otherwise.
+const MAX_CARD_INFO_BATCH: usize = 512;
+
+/// Largest number of decks a scoring request may describe.
+const MAX_DECKS_PER_REQUEST: usize = 16;
+
+fn too_many(what: &str, got: usize, max: usize) -> String {
+    format!("{what} too large: {got} (maximum {max})")
+}
+
+/// Reject oversized inputs BEFORE doing any combinatorial work. This is the
+/// untrusted-input boundary: `/api/rpc` is unauthenticated, so every size that
+/// drives an exponential search is bounded here. The same validation is
+/// deliberately NOT in `wasm-rpc-impl`, which is also compiled into the
+/// client-side wasm where the caller is only ever attacking itself.
+fn validate_request(request: &WasmRpcRequest) -> Result<(), String> {
+    let check_cards = |n: usize| {
+        if n > MAX_CARDS_PER_REQUEST {
+            Err(too_many("cards", n, MAX_CARDS_PER_REQUEST))
+        } else {
+            Ok(())
+        }
+    };
+    let check_decks = |n: usize| {
+        if n > MAX_DECKS_PER_REQUEST {
+            Err(too_many("decks", n, MAX_DECKS_PER_REQUEST))
+        } else {
+            Ok(())
+        }
+    };
+    match request {
+        WasmRpcRequest::FindViablePlays(req) => check_cards(req.cards.len()),
+        WasmRpcRequest::CanPlayCards(req) => check_cards(req.cards.len()),
+        WasmRpcRequest::SortAndGroupCards(req) => check_cards(req.cards.len()),
+        WasmRpcRequest::DecomposeTrickFormat(_) | WasmRpcRequest::FindValidBids(_) => {
+            // These read from `hands`, whose size is bounded by the body limit
+            // rather than a single field; nothing further to cap here.
+            Ok(())
+        }
+        WasmRpcRequest::NextThresholdReachable(req) => check_decks(req.decks.len()),
+        WasmRpcRequest::ExplainScoring(req) => check_decks(req.decks.len()),
+        WasmRpcRequest::ComputeScore(req) => check_decks(req.decks.len()),
+        WasmRpcRequest::ComputeDeckLen(req) => check_decks(req.decks.len()),
+        WasmRpcRequest::BatchGetCardInfo(req) => {
+            if req.requests.len() > MAX_CARD_INFO_BATCH {
+                Err(too_many(
+                    "card info batch",
+                    req.requests.len(),
+                    MAX_CARD_INFO_BATCH,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
 fn process_request(request: WasmRpcRequest) -> Result<WasmRpcResponse, String> {
+    validate_request(&request)?;
     match request {
         WasmRpcRequest::FindViablePlays(req) => Ok(WasmRpcResponse::FindViablePlays(
             wasm_rpc_impl::find_viable_plays(req),
@@ -71,6 +160,67 @@ mod tests {
     fn test_app() -> TestServer {
         let app = axum::Router::new().route("/api/rpc", axum::routing::post(handle_wasm_rpc));
         TestServer::new(app).unwrap()
+    }
+
+    /// `/api/rpc` is unauthenticated and its work is combinatorial in the card
+    /// count, so oversized inputs must be refused BEFORE any of that work runs.
+    #[tokio::test]
+    async fn oversized_card_vectors_are_rejected_without_computing() {
+        let server = test_app();
+        let huge = vec![S_3; MAX_CARDS_PER_REQUEST + 1];
+        let request = WasmRpcRequest::FindViablePlays(FindViablePlaysRequest {
+            trump: Trump::Standard {
+                suit: Suit::Hearts,
+                number: Number::Two,
+            },
+            tractor_requirements: TractorRequirements::default(),
+            cards: huge,
+        });
+
+        // This must return promptly with an error rather than attempting the
+        // exponential decomposition search over 201 identical cards.
+        let response = server.post("/api/rpc").json(&request).await;
+        assert_eq!(response.status_code(), 400);
+        match response.json::<WasmRpcResponse>() {
+            WasmRpcResponse::Error { message } => assert!(
+                message.contains("cards too large"),
+                "unexpected error text: {}",
+                message
+            ),
+            other => panic!("expected an Error response, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_realistically_sized_request_is_still_accepted() {
+        let server = test_app();
+        // Comfortably larger than any real hand, and still under the cap.
+        let cards = vec![S_3; MAX_CARDS_PER_REQUEST / 4];
+        let request = WasmRpcRequest::SortAndGroupCards(SortAndGroupCardsRequest {
+            trump: Trump::Standard {
+                suit: Suit::Hearts,
+                number: Number::Two,
+            },
+            cards,
+        });
+        let response = server.post("/api/rpc").json(&request).await;
+        response.assert_status_ok();
+    }
+
+    #[tokio::test]
+    async fn oversized_card_info_batches_are_rejected() {
+        let server = test_app();
+        let request = WasmRpcRequest::BatchGetCardInfo(BatchCardInfoRequest {
+            requests: vec![
+                CardInfoRequest {
+                    card: S_5,
+                    trump: Trump::NoTrump { number: None },
+                };
+                MAX_CARD_INFO_BATCH + 1
+            ],
+        });
+        let response = server.post("/api/rpc").json(&request).await;
+        assert_eq!(response.status_code(), 400);
     }
 
     #[tokio::test]

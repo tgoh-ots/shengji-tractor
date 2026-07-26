@@ -324,6 +324,7 @@ async fn handle_user_connected<
         backend_storage.clone(),
         rx,
         bot_runtime,
+        resource_limits.clone(),
     )
     .await;
 
@@ -489,12 +490,30 @@ async fn run_game_for_player<
     backend_storage: S,
     mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
     bot_runtime: BotRuntime,
+    resource_limits: Arc<ResourceLimits>,
 ) {
     debug!(logger, "Entering main game loop");
+    // Per-connection throttle for the "suggest a play" button. It lives here,
+    // in the socket's own loop, so it needs no shared state or locking.
+    let mut last_suggestion: Option<Instant> = None;
     // Handle the main game loop
     while let Some(result) = rx.recv().await {
         match serde_json::from_slice::<UserMessage>(&result) {
             Ok(msg) => {
+                // Only charge the cooldown against requests that will actually
+                // run a search, and only advance the clock when one is accepted.
+                let suggestion_allowed = if matches!(msg, UserMessage::RequestPlaySuggestion) {
+                    let now = Instant::now();
+                    let allowed = last_suggestion.is_none_or(|previous| {
+                        now.duration_since(previous) >= resource_limits.suggestion_min_interval
+                    });
+                    if allowed {
+                        last_suggestion = Some(now);
+                    }
+                    allowed
+                } else {
+                    true
+                };
                 if let Err(e) = handle_user_action(
                     logger.clone(),
                     ws_id,
@@ -504,6 +523,7 @@ async fn run_game_for_player<
                     backend_storage.clone(),
                     msg,
                     bot_runtime.clone(),
+                    suggestion_allowed,
                 )
                 .await
                 {
@@ -543,6 +563,7 @@ async fn handle_user_action<S: Storage<VersionedGame, E> + 'static, E: Send + 's
     backend_storage: S,
     msg: UserMessage,
     bot_runtime: BotRuntime,
+    suggestion_allowed: bool,
 ) -> Result<(), E> {
     match msg {
         UserMessage::Beep => {
@@ -640,6 +661,27 @@ async fn handle_user_action<S: Storage<VersionedGame, E> + 'static, E: Send + 's
                 "kick user",
             )
             .await;
+        }
+        UserMessage::RequestPlaySuggestion if !suggestion_allowed => {
+            // Throttled: a suggestion is a full Grandmaster search holding the
+            // process-wide search permit, so one connection spamming the button
+            // would stall bot planning in every room. Reply with no advice (the
+            // client clears its spinner on any reply) plus an explanatory error.
+            let _ = backend_storage
+                .clone()
+                .publish_to_single_subscriber(
+                    room_name.as_bytes().to_vec(),
+                    ws_id,
+                    GameMessage::PlaySuggestion { cards: vec![] },
+                )
+                .await;
+            let _ = backend_storage
+                .publish_to_single_subscriber(
+                    room_name.as_bytes().to_vec(),
+                    ws_id,
+                    GameMessage::Error("Please wait a moment before asking again.".to_string()),
+                )
+                .await;
         }
         UserMessage::RequestPlaySuggestion => {
             // "Suggest a play": advise this player with the move the Grandmaster
@@ -864,6 +906,14 @@ fn bot_pause(kind: BotPause) -> std::time::Duration {
 struct BotSnapshot {
     state: GameState,
     version: u64,
+    /// What the bot driver should do next, classified UNDER the same read lock
+    /// that produced `state`.
+    ///
+    /// `classify_next_bot_work` is deliberately cheap (it never searches), so
+    /// running it here saves the driver a second full `GameState` clone and a
+    /// second lock round-trip on the hot path of every bot turn. Only
+    /// `drive_bots_non_blocking` consumes it; the suggestion path ignores it.
+    work: NextBotWork,
 }
 
 async fn snapshot_state<S: Storage<VersionedGame, E> + 'static, E: Send + 'static>(
@@ -881,16 +931,25 @@ async fn snapshot_state<S: Storage<VersionedGame, E> + 'static, E: Send + 'stati
         backend_storage,
         move |game, version| {
             if let Ok(state) = game.dump_state() {
-                *sink.lock().unwrap_or_else(|p| p.into_inner()) =
-                    Some(BotSnapshot { state, version });
+                // Classify while we still hold the lock and the live game, so the
+                // caller does not have to clone the state a second time just to
+                // ask whose turn it is.
+                let work = classify_next_bot_work(game, true).unwrap_or(NextBotWork::None);
+                *sink.lock().unwrap_or_else(|p| p.into_inner()) = Some(BotSnapshot {
+                    state,
+                    version,
+                    work,
+                });
             }
             Ok(vec![])
         },
         "snapshot game state",
     )
     .await;
-    let state = captured.lock().unwrap_or_else(|p| p.into_inner()).take();
-    state
+    // NOT a redundant binding: it drops the `MutexGuard` before `captured` goes
+    // out of scope. Returning the expression directly fails to compile.
+    let snapshot = captured.lock().unwrap_or_else(|p| p.into_inner()).take();
+    snapshot
 }
 
 /// Detached task that drives any bots that need to act AFTER a user action, WITHOUT
@@ -957,12 +1016,9 @@ async fn drive_bots_non_blocking<S: Storage<VersionedGame, E> + 'static, E: Send
             Some(s) => s,
             None => break,
         };
-        let work = {
-            let game = InteractiveGame::new_from_state(snapshot.state.clone());
-            classify_next_bot_work(&game, true).unwrap_or(NextBotWork::None)
-        };
-
-        match work {
+        // Already classified under the snapshot's own read lock — no second
+        // clone, no second lock acquisition.
+        match snapshot.work {
             // Nothing for a bot to do (human's turn, parked, game over). Stop
             // WITHOUT writing, so we don't republish an unchanged State.
             NextBotWork::None => break,

@@ -17,6 +17,7 @@ use std::sync::{
 
 use axum::{
     extract::ws::{Message, WebSocketUpgrade},
+    extract::DefaultBodyLimit,
     http::StatusCode,
     response::{IntoResponse, Redirect},
     routing::{get, post},
@@ -152,7 +153,17 @@ fn build_app_with_bot_runtime(
             "/api",
             get(handle_websocket).layer(axum::middleware::from_fn(enforce_ws_origin)),
         )
-        .route("/api/rpc", post(wasm_rpc_handler::handle_wasm_rpc))
+        .route(
+            "/api/rpc",
+            post(wasm_rpc_handler::handle_wasm_rpc)
+                // This endpoint is UNAUTHENTICATED and runs combinatorial rules
+                // work (the format matcher is exponential in the play size), so
+                // it is bounded on two axes: the body can't be big enough to
+                // carry a pathological input, and `handle_wasm_rpc` moves the
+                // CPU work off the async runtime. Real requests are a single
+                // hand plus a trick, orders of magnitude under this cap.
+                .layer(DefaultBodyLimit::max(wasm_rpc_handler::MAX_RPC_BODY_BYTES)),
+        )
         .route(
             "/default_settings.json",
             get(|| async { Json(settings::PropagatedState::default()) }),

@@ -216,5 +216,17 @@ pub enum WasmRpcResponse {
     ComputeScore(ComputeScoreResponse),
     ComputeDeckLen(ComputeDeckLenResponse),
     BatchGetCardInfo(BatchCardInfoResponse),
-    Error(String),
+    /// An error carrying a human-readable message.
+    ///
+    /// This MUST be a struct variant: the enum is internally tagged
+    /// (`tag = "type"`), and serde cannot serialize an internally-tagged NEWTYPE
+    /// variant wrapping a primitive. As `Error(String)` every error response
+    /// failed to serialize at runtime, so clients received a broken body instead
+    /// of the message. The field is renamed to `Error` to keep the exact wire
+    /// shape the generated TypeScript type and `WasmOrRpcProvider` already
+    /// expect: `{ "type": "Error", "Error": "..." }`.
+    Error {
+        #[serde(rename = "Error")]
+        message: String,
+    },
 }
