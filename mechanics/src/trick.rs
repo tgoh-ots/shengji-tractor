@@ -604,6 +604,23 @@ pub struct PlayCards<'a, 'b, 'c> {
     pub compound_formats: CompoundFormats,
 }
 
+/// Cached running state of the winner fold (see [`Trick::fold_winner`]).
+///
+/// Purely derived data: it is `#[serde(skip)]` on [`Trick`], and every consumer
+/// falls back to a full recompute when it is absent or does not match the
+/// current prefix, so a cold, stale, or dropped cache can only cost time.
+#[derive(Clone, Debug)]
+struct WinnerFold {
+    /// How many `played_cards` entries this fold has consumed.
+    folded: usize,
+    /// Index into `played_cards` of the seat currently winning.
+    winner_idx: usize,
+    /// The winning decomposition — what a further play must defeat.
+    winner_units: Units,
+    /// The policy this fold was computed under; a different policy invalidates it.
+    policy: ThrowEvaluationPolicy,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Trick {
     player_queue: VecDeque<PlayerID>,
@@ -619,6 +636,9 @@ pub struct Trick {
     trump: Trump,
     #[serde(default)]
     bomb_policy: BombPolicy,
+    /// Derived cache; never serialized (a restored trick simply re-derives it).
+    #[serde(skip)]
+    winner_fold: Option<WinnerFold>,
 }
 
 impl Trick {
@@ -636,6 +656,7 @@ impl Trick {
             player_queue,
             trump,
             bomb_policy,
+            winner_fold: None,
         }
     }
 
@@ -659,6 +680,9 @@ impl Trick {
         }
         self.trick_format = None;
         self.played_card_mappings.fill(None);
+        // The cached fold was derived from the now-erased card identities and
+        // format. Drop it so nothing can resume from a redacted prefix.
+        self.winner_fold = None;
     }
 
     pub fn next_player(&self) -> Option<PlayerID> {
@@ -996,7 +1020,8 @@ impl Trick {
             attempted_format,
         });
 
-        self.current_winner = self.compute_winner(throw_eval_policy);
+        // Fold ONLY the play just appended (see `extend_winner_with_last_play`).
+        self.extend_winner_with_last_play(throw_eval_policy);
 
         Ok(msgs)
     }
@@ -1019,7 +1044,8 @@ impl Trick {
             if self.played_cards.is_empty() {
                 self.trick_format = None;
             }
-            self.current_winner = self.compute_winner(throw_eval_policy);
+            // A pop invalidates the cached prefix; rebuild the fold from scratch.
+            self.recompute_winner_and_cache(throw_eval_policy);
             Ok(())
         } else {
             Err(TrickError::OutOfOrder)
@@ -1124,17 +1150,44 @@ impl Trick {
         }
     }
 
-    fn compute_winner(&self, throw_eval_policy: ThrowEvaluationPolicy) -> Option<PlayerID> {
+    /// The winner fold over `played_cards`, as `(winner_index, winning_units)`.
+    ///
+    /// This is a deterministic LEFT FOLD: [`Self::_defeats`] is a pure function of
+    /// `(challenger, incumbent, policy)`, so folding a prefix of length `k` yields
+    /// exactly the state reached after processing index `k`. `resume` therefore
+    /// lets a caller continue an already-computed prefix instead of redoing it.
+    ///
+    /// This matters a lot: each non-bomb step runs `tf.matches`, the full
+    /// combinatorial format matcher. Recomputing the whole fold after every play
+    /// made trick resolution quadratic in the number of players and made
+    /// `TrickFormat::matches` ~12% of all bot CPU, about half of it redundant.
+    fn fold_winner(
+        &self,
+        throw_eval_policy: ThrowEvaluationPolicy,
+        resume: Option<(usize, usize, &Units)>,
+    ) -> Option<(usize, Units)> {
         let tf = self.trick_format.as_ref()?;
 
-        // Rainbow trick: highest same-number set wins.
+        // Rainbow trick: highest same-number set wins. Evaluated whole (it does
+        // not use the format matcher, so there is nothing to amortize).
         if tf.is_rainbow {
-            return self.compute_rainbow_winner();
+            let idx = self.compute_rainbow_winner_idx()?;
+            return Some((idx, tf.units.to_vec()));
         }
 
-        let mut winner = (0usize, tf.units.to_vec());
+        // Resume from a cached prefix when one was supplied and is in range;
+        // otherwise start from the leader.
+        let (start, mut winner) = match resume {
+            Some((folded, idx, units))
+                if (1..=self.played_cards.len()).contains(&folded)
+                    && idx < self.played_cards.len() =>
+            {
+                (folded, (idx, units.clone()))
+            }
+            _ => (1, (0usize, tf.units.to_vec())),
+        };
 
-        for (idx, _pc) in self.played_cards.iter().enumerate().skip(1) {
+        for idx in start..self.played_cards.len() {
             let mapping = self.played_card_mappings.get(idx).and_then(|m| m.as_ref());
             let this_is_bomb = mapping.is_some_and(|m| m.len() == 1 && m[0].is_bomb());
 
@@ -1149,13 +1202,164 @@ impl Trick {
                 }
             }
         }
-        Some(self.played_cards[winner.0].id)
+        Some(winner)
+    }
+
+    /// Reference implementation: the winner computed by folding the WHOLE trick
+    /// from scratch, ignoring any cache. Production code goes through the
+    /// incremental path; this is retained as the oracle the equivalence tests
+    /// check that path against.
+    #[cfg(test)]
+    fn compute_winner(&self, throw_eval_policy: ThrowEvaluationPolicy) -> Option<PlayerID> {
+        let (idx, _) = self.fold_winner(throw_eval_policy, None)?;
+        Some(self.played_cards[idx].id)
+    }
+
+    /// Recompute the winner from scratch and refresh the cached fold. Used
+    /// wherever `played_cards` changed in a way that invalidates the prefix
+    /// (currently only [`Self::take_back`]).
+    fn recompute_winner_and_cache(&mut self, throw_eval_policy: ThrowEvaluationPolicy) {
+        match self.fold_winner(throw_eval_policy, None) {
+            Some((idx, units)) => {
+                self.current_winner = Some(self.played_cards[idx].id);
+                self.winner_fold = Some(WinnerFold {
+                    folded: self.played_cards.len(),
+                    winner_idx: idx,
+                    winner_units: units,
+                    policy: throw_eval_policy,
+                });
+            }
+            None => {
+                self.current_winner = None;
+                self.winner_fold = None;
+            }
+        }
+    }
+
+    /// Fold ONLY the play that was just appended into the cached winner state,
+    /// falling back to a full recompute whenever the cache is not exactly the
+    /// prefix preceding it (cold cache, a different throw-evaluation policy, or
+    /// any mutation that did not go through this path).
+    fn extend_winner_with_last_play(&mut self, throw_eval_policy: ThrowEvaluationPolicy) {
+        let resume = match self.winner_fold.take() {
+            Some(fold)
+                if fold.policy == throw_eval_policy
+                    && fold.folded + 1 == self.played_cards.len() =>
+            {
+                Some(fold)
+            }
+            // Stale or absent: fall back to the authoritative full fold. This is
+            // what makes the cache safe by construction — a wrong or missing
+            // cache costs time, never correctness.
+            _ => None,
+        };
+        match resume {
+            Some(fold) => {
+                let folded = self.fold_winner(
+                    throw_eval_policy,
+                    Some((fold.folded, fold.winner_idx, &fold.winner_units)),
+                );
+                match folded {
+                    Some((idx, units)) => {
+                        self.current_winner = Some(self.played_cards[idx].id);
+                        self.winner_fold = Some(WinnerFold {
+                            folded: self.played_cards.len(),
+                            winner_idx: idx,
+                            winner_units: units,
+                            policy: throw_eval_policy,
+                        });
+                    }
+                    None => {
+                        self.current_winner = None;
+                        self.winner_fold = None;
+                    }
+                }
+            }
+            None => self.recompute_winner_and_cache(throw_eval_policy),
+        }
+    }
+
+    /// The decomposition currently winning this trick — i.e. exactly what a
+    /// further play must defeat. `None` before a format exists.
+    ///
+    /// Computed on demand (and cached) so callers do not have to clone the trick
+    /// and replay it just to ask "would this beat what is on the table?".
+    /// Takes `&self`: when the cached fold is current it is reused, and otherwise
+    /// the fold is simply recomputed. A cold cache therefore costs one extra fold
+    /// rather than requiring interior mutability, and in the bot search the cache
+    /// is essentially always warm because `play_cards` maintains it.
+    pub fn winning_units(&self, throw_eval_policy: ThrowEvaluationPolicy) -> Option<Units> {
+        match &self.winner_fold {
+            Some(fold)
+                if fold.policy == throw_eval_policy && fold.folded == self.played_cards.len() =>
+            {
+                Some(fold.winner_units.clone())
+            }
+            _ => self
+                .fold_winner(throw_eval_policy, None)
+                .map(|(_, units)| units),
+        }
+    }
+
+    /// Would playing `cards` win this trick as it currently stands?
+    ///
+    /// A pure query: it neither mutates the trick nor needs the players' hands,
+    /// and it does NOT re-check legality (the caller is asking a "what if", and
+    /// an illegal or unmatched play simply cannot win). It mirrors what
+    /// [`Self::play_cards`] followed by the winner fold would conclude — a bomb
+    /// is compared as a bomb, and for an ordinary follow every legal
+    /// decomposition is tried, exactly as the fold does.
+    ///
+    /// This replaces "clone the whole trick AND every player's hand, replay the
+    /// candidate, then read the winner", which was ~23% of all bot CPU because
+    /// the scorer asks it once per candidate.
+    pub fn would_win_with(&self, cards: &[Card], throw_eval_policy: ThrowEvaluationPolicy) -> bool {
+        // Leading: there is nothing to beat, so the leader trivially stands as
+        // winner-so-far.
+        if self.played_cards.is_empty() {
+            return true;
+        }
+        let is_bomb_play = self.bomb_policy.bombs_enabled() && is_bomb(cards);
+        let trump = self.trump;
+        let Some(winner_units) = self.winning_units(throw_eval_policy) else {
+            return false;
+        };
+        let Some(tf) = self.trick_format.as_ref() else {
+            return false;
+        };
+        // A rainbow trick is scored by rank combination rather than by the unit
+        // fold, so defer to the same comparison `compute_rainbow_winner` uses.
+        if tf.is_rainbow {
+            let unit_sizes: Vec<usize> = tf.units.iter().map(|u| u.size()).collect();
+            let Some(challenger) = rainbow_play_combo(cards, &unit_sizes) else {
+                return false;
+            };
+            return self
+                .played_cards
+                .iter()
+                .filter_map(|pc| rainbow_play_combo(&pc.cards, &unit_sizes))
+                .all(|best| challenger > best);
+        }
+        if is_bomb_play {
+            let mapping = vec![TrickUnit::Repeated {
+                count: cards.len(),
+                card: OrderedCard {
+                    card: cards[0],
+                    trump,
+                },
+            }];
+            return Self::_defeats(&mapping, &winner_units, throw_eval_policy);
+        }
+        match tf.matches(cards) {
+            Ok(mut mm) => mm.any(|m| Self::_defeats(&m, &winner_units, throw_eval_policy)),
+            Err(_) => false,
+        }
     }
 
     /// Winner of a rainbow trick: whoever played the highest-rank rainbow
     /// The leader always wins unless a follower plays a valid rainbow response
     /// with a strictly better rank combination.
-    fn compute_rainbow_winner(&self) -> Option<PlayerID> {
+    fn compute_rainbow_winner_idx(&self) -> Option<usize> {
         let tf = self.trick_format.as_ref()?;
         let unit_sizes: Vec<usize> = tf.units.iter().map(|u| u.size()).collect();
 
@@ -1171,7 +1375,7 @@ impl Trick {
             }
         }
 
-        Some(self.played_cards[winner_idx].id)
+        Some(winner_idx)
     }
 }
 
@@ -4176,5 +4380,304 @@ mod tests {
                 "forced card {c:?} must be one the leader actually threw"
             );
         }
+    }
+}
+
+/// Equivalence tests for the incremental winner fold and the pure
+/// "would this play win?" query.
+///
+/// The incremental fold is only sound because [`Trick::_defeats`] is a pure
+/// function of `(challenger, incumbent, policy)`, making winner resolution a
+/// deterministic left fold. These tests check that claim empirically against the
+/// from-scratch oracle (`Trick::compute_winner`) after EVERY play.
+#[cfg(test)]
+mod incremental_winner_tests {
+    use crate::hands::Hands;
+    use crate::types::{cards::*, Card, Number, PlayerID, Suit, Trump};
+
+    use super::{
+        BombPolicy, CompoundFormats, PlayCards, ThrowEvaluationPolicy, TractorRequirements, Trick,
+        TrickDrawPolicy,
+    };
+
+    const TRUMP: Trump = Trump::Standard {
+        number: Number::Four,
+        suit: Suit::Spades,
+    };
+    const IDS: [PlayerID; 4] = [PlayerID(1), PlayerID(2), PlayerID(3), PlayerID(4)];
+
+    fn play_args<'a, 'b, 'c>(
+        id: PlayerID,
+        hands: &'a mut Hands,
+        cards: &'b [Card],
+        policy: ThrowEvaluationPolicy,
+        bomb_policy: BombPolicy,
+    ) -> PlayCards<'a, 'b, 'c> {
+        PlayCards {
+            id,
+            hands,
+            cards,
+            trick_draw_policy: TrickDrawPolicy::NoProtections,
+            throw_eval_policy: policy,
+            format_hint: None,
+            hide_throw_halting_player: false,
+            tractor_requirements: TractorRequirements::default(),
+            bomb_policy,
+            compound_formats: CompoundFormats::default(),
+        }
+    }
+
+    /// Play `plays` into a fresh trick, asserting after EVERY play that the
+    /// incrementally-maintained winner equals the from-scratch fold, and that
+    /// `would_win_with` predicted that play's outcome correctly beforehand.
+    fn assert_fold_matches_oracle(
+        plays: &[(PlayerID, Vec<Card>)],
+        policy: ThrowEvaluationPolicy,
+        bomb_policy: BombPolicy,
+        label: &str,
+    ) {
+        let mut hands = Hands::new(IDS.iter().copied());
+        hands.set_trump(TRUMP);
+        for (id, cards) in plays {
+            hands.add(*id, cards.iter().copied()).unwrap();
+        }
+        let mut trick = Trick::new(TRUMP, IDS.iter().copied(), bomb_policy);
+
+        for (step, (id, cards)) in plays.iter().enumerate() {
+            // Predict via the pure query BEFORE mutating anything.
+            let predicted = trick.would_win_with(cards, policy);
+
+            trick
+                .play_cards(play_args(*id, &mut hands, cards, policy, bomb_policy))
+                .unwrap_or_else(|e| panic!("{label}: play {step} rejected: {e:?}"));
+
+            let oracle = trick.compute_winner(policy);
+            assert_eq!(
+                trick.winner_so_far(),
+                oracle,
+                "{label}: incremental winner diverged from the full fold at play {step}"
+            );
+            assert_eq!(
+                predicted,
+                oracle == Some(*id),
+                "{label}: would_win_with mispredicted play {step} by {id:?}"
+            );
+        }
+    }
+
+    /// One trick to play out: a label, the ordered plays, and the bomb policy.
+    type Scenario = (&'static str, Vec<(PlayerID, Vec<Card>)>, BombPolicy);
+
+    fn scenarios() -> Vec<Scenario> {
+        vec![
+            (
+                "singles, later seat wins in suit",
+                vec![
+                    (IDS[0], vec![H_5]),
+                    (IDS[1], vec![H_9]),
+                    (IDS[2], vec![H_2]),
+                    (IDS[3], vec![H_K]),
+                ],
+                BombPolicy::NoBombs,
+            ),
+            (
+                "singles, leader holds",
+                vec![
+                    (IDS[0], vec![H_A]),
+                    (IDS[1], vec![H_9]),
+                    (IDS[2], vec![H_2]),
+                    (IDS[3], vec![H_3]),
+                ],
+                BombPolicy::NoBombs,
+            ),
+            (
+                "trump ruff beats the suit",
+                vec![
+                    (IDS[0], vec![H_A]),
+                    (IDS[1], vec![H_9]),
+                    (IDS[2], vec![S_5]),
+                    (IDS[3], vec![H_K]),
+                ],
+                BombPolicy::NoBombs,
+            ),
+            (
+                "over-ruff: second trump beats the first",
+                vec![
+                    (IDS[0], vec![H_A]),
+                    (IDS[1], vec![S_5]),
+                    (IDS[2], vec![S_K]),
+                    (IDS[3], vec![H_2]),
+                ],
+                BombPolicy::NoBombs,
+            ),
+            (
+                "pairs",
+                vec![
+                    (IDS[0], vec![H_5, H_5]),
+                    (IDS[1], vec![H_9, H_9]),
+                    (IDS[2], vec![H_2, H_3]),
+                    (IDS[3], vec![H_K, H_K]),
+                ],
+                BombPolicy::NoBombs,
+            ),
+            (
+                "tractor led, one seat follows with a tractor",
+                vec![
+                    (IDS[0], vec![H_5, H_5, H_6, H_6]),
+                    (IDS[1], vec![H_9, H_9, H_10, H_10]),
+                    (IDS[2], vec![H_2, H_3, H_7, H_8]),
+                    (IDS[3], vec![H_J, H_Q, H_K, H_A]),
+                ],
+                BombPolicy::NoBombs,
+            ),
+            (
+                // A bomb must still match the format's card count, so this is a
+                // 4-card bomb answering a 4-card tractor lead.
+                "bomb overrides the led suit",
+                vec![
+                    (IDS[0], vec![H_5, H_5, H_6, H_6]),
+                    (IDS[1], vec![C_7, C_7, C_7, C_7]),
+                    (IDS[2], vec![H_2, H_3, H_7, H_8]),
+                    (IDS[3], vec![H_J, H_Q, H_K, H_A]),
+                ],
+                BombPolicy::AllowBombs,
+            ),
+            (
+                "bomb played by the last seat still resolves",
+                vec![
+                    (IDS[0], vec![H_5, H_5, H_6, H_6]),
+                    (IDS[1], vec![H_9, H_9, H_10, H_10]),
+                    (IDS[2], vec![H_2, H_3, H_7, H_8]),
+                    (IDS[3], vec![C_7, C_7, C_7, C_7]),
+                ],
+                BombPolicy::AllowBombs,
+            ),
+        ]
+    }
+
+    #[test]
+    fn incremental_winner_matches_full_recompute_across_policies() {
+        for policy in [
+            ThrowEvaluationPolicy::All,
+            ThrowEvaluationPolicy::Highest,
+            ThrowEvaluationPolicy::TrickUnitLength,
+        ] {
+            for (label, plays, bomb_policy) in scenarios() {
+                assert_fold_matches_oracle(
+                    &plays,
+                    policy,
+                    bomb_policy,
+                    &format!("{label} [{policy:?}]"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn take_back_then_replay_rebuilds_the_fold() {
+        let policy = ThrowEvaluationPolicy::All;
+        let mut hands = Hands::new(IDS.iter().copied());
+        hands.set_trump(TRUMP);
+        hands.add(IDS[0], vec![H_5]).unwrap();
+        hands.add(IDS[1], vec![H_K]).unwrap();
+        hands.add(IDS[2], vec![H_2, H_A]).unwrap();
+        let mut trick = Trick::new(TRUMP, IDS.iter().copied(), BombPolicy::NoBombs);
+
+        for (id, card) in [(IDS[0], H_5), (IDS[1], H_K), (IDS[2], H_2)] {
+            trick
+                .play_cards(play_args(
+                    id,
+                    &mut hands,
+                    &[card],
+                    policy,
+                    BombPolicy::NoBombs,
+                ))
+                .unwrap();
+        }
+        assert_eq!(trick.winner_so_far(), Some(IDS[1]));
+
+        // Popping the last play invalidates the cached prefix.
+        trick.take_back(IDS[2], &mut hands, policy).unwrap();
+        assert_eq!(trick.winner_so_far(), trick.compute_winner(policy));
+        assert_eq!(trick.winner_so_far(), Some(IDS[1]));
+
+        // Replaying a DIFFERENT, winning card must be folded onto the rebuilt state.
+        trick
+            .play_cards(play_args(
+                IDS[2],
+                &mut hands,
+                &[H_A],
+                policy,
+                BombPolicy::NoBombs,
+            ))
+            .unwrap();
+        assert_eq!(trick.winner_so_far(), trick.compute_winner(policy));
+        assert_eq!(trick.winner_so_far(), Some(IDS[2]));
+    }
+
+    #[test]
+    fn a_trick_restored_without_the_cache_still_resolves_correctly() {
+        let policy = ThrowEvaluationPolicy::All;
+        let mut hands = Hands::new(IDS.iter().copied());
+        hands.set_trump(TRUMP);
+        hands.add(IDS[0], vec![H_5]).unwrap();
+        hands.add(IDS[1], vec![H_K]).unwrap();
+        hands.add(IDS[2], vec![H_A]).unwrap();
+        let mut trick = Trick::new(TRUMP, IDS.iter().copied(), BombPolicy::NoBombs);
+        for (id, card) in [(IDS[0], H_5), (IDS[1], H_K)] {
+            trick
+                .play_cards(play_args(
+                    id,
+                    &mut hands,
+                    &[card],
+                    policy,
+                    BombPolicy::NoBombs,
+                ))
+                .unwrap();
+        }
+
+        // The fold cache is `#[serde(skip)]`, so a persisted-and-restored trick
+        // starts cold. Continuing to play into it must still be correct.
+        let json = serde_json::to_string(&trick).unwrap();
+        assert!(!json.contains("winner_fold"));
+        let mut restored: Trick = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.winner_so_far(), Some(IDS[1]));
+
+        let predicted = restored.would_win_with(&[H_A], policy);
+        restored
+            .play_cards(play_args(
+                IDS[2],
+                &mut hands,
+                &[H_A],
+                policy,
+                BombPolicy::NoBombs,
+            ))
+            .unwrap();
+        assert_eq!(restored.winner_so_far(), restored.compute_winner(policy));
+        assert_eq!(restored.winner_so_far(), Some(IDS[2]));
+        assert!(predicted, "cold-cache would_win_with must still be correct");
+    }
+
+    #[test]
+    fn would_win_with_is_true_when_leading_and_false_for_an_unmatchable_play() {
+        let policy = ThrowEvaluationPolicy::All;
+        let mut hands = Hands::new(IDS.iter().copied());
+        hands.set_trump(TRUMP);
+        hands.add(IDS[0], vec![H_5, H_5]).unwrap();
+        let mut trick = Trick::new(TRUMP, IDS.iter().copied(), BombPolicy::NoBombs);
+        // Leading: nothing to beat.
+        assert!(trick.would_win_with(&[H_5, H_5], policy));
+
+        trick
+            .play_cards(play_args(
+                IDS[0],
+                &mut hands,
+                &[H_5, H_5],
+                policy,
+                BombPolicy::NoBombs,
+            ))
+            .unwrap();
+        // Wrong shape for the format: cannot win.
+        assert!(!trick.would_win_with(&[H_A], policy));
     }
 }
