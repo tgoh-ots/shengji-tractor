@@ -169,6 +169,10 @@ fn build_app_with_bot_runtime(
             "/rules",
             get(|| async { Redirect::permanent("/rules.html") }),
         )
+        .route(
+            "/strategy",
+            get(|| async { Redirect::permanent("/strategy.html") }),
+        )
         .route("/public_games.json", get(state_dump::public_games));
 
     #[cfg(feature = "dynamic")]

@@ -1,7 +1,7 @@
 # Shengji Online — Project Progress & Recovery Log
 
 > Durable status doc so work can resume after a crashed/restarted session.
-> **Last updated: 2026-07-24.** This is a historical chronology, not an active
+> **Last updated: 2026-07-25.** This is a historical chronology, not an active
 > bot execution roadmap. The Enoch/Stage 2 exploration is closed with no
 > candidate proven superior; use
 > [`docs/strategy/four-player-bot-exploration-closure-2026-07-11.md`](docs/strategy/four-player-bot-exploration-closure-2026-07-11.md)
@@ -14,7 +14,46 @@
 > **bot-ladder overhaul**, a round of **UI/game-flow polish**, and a
 > **security/reliability audit + hygiene sweep** (all shipped).
 
-## Current state (2026-07-24)
+## Current state (2026-07-25)
+
+### 2026-07-25 — Strategy guide page (Basics + Advanced)
+The site now ships a **strategy guide** alongside the rules, at
+`frontend/static/strategy.html` (served as `/strategy.html`, plus a `/strategy`
+redirect). It is the first player-facing documentation of *how to play well*
+rather than what is legal.
+- **Content source**: the strategy the strongest honest tiers actually play —
+  the transcribed human playbook (`docs/strategy/double-holder.txt`,
+  `trip-holder.txt`) as implemented in the `*_enoch` scorers
+  (`bot/heuristics.rs`), plus how `Grandmaster` layers full-hand rollouts on top.
+  Numbers quoted in the guide (the ~8.3 average trump count, the kitty
+  point-budget ladder, the kitty multiplier) are derived from the engine, not
+  invented — `enoch_point_budget` and the round-result rules are the sources.
+- **Two tabs**: *Basics* (eight numbered fundamentals) and *Advanced* (hand
+  evaluation, a card-by-card kitty burial, the low-trump hand-off, long-suit
+  throws, void reading, point discipline, kitty-multiplier maths, and a
+  per-bot-tier section). The Advanced tab carries five worked example hands
+  rendered as real SVG card faces with explicit right/wrong play calls.
+- **Shared page chrome**: `rules.html`'s formerly-inline `<style>` block moved
+  verbatim to `frontend/static/guide.css`, now loaded by both guide pages, and
+  the duplicated lang / static-card-render logic moved to
+  `guide-common.js` (`window.ShengjiGuide`). A top nav (Play / Rules / Strategy)
+  was added to both pages and carries `?lang=` across hops.
+- **Constraints preserved**: no inline JS or event-handler attributes (the
+  production CSP is `script-src 'self'`), the Basics/Advanced switch is CSS-only
+  (hidden radios + `:checked ~` siblings) so it works with JS disabled, and the
+  bilingual gate is enforced — verified in-browser that zh mode renders **0**
+  visible English spans. That gate now needs `!important` in `guide.css`: the new
+  component rules that set `display` (`.play-call .tag`, `.key-point .key-label`)
+  out-specified it and leaked English into 中文 mode until fixed.
+- **Wiring**: webpack copies the four new static assets; `/strategy` redirect in
+  `backend/src/lib.rs`; links added to the lobby (`JoinRoom.tsx`), the in-game
+  header (`GameMode.tsx`, now `rules` + `strategy`) and the no-JS `index.html`
+  fallback, with new i18n keys (`join.readStrategy`, `gameMode.rules|strategy`).
+- **Verified**: `yarn build` emits every asset; `yarn lint` / `prettier --check` /
+  `yarn test` (28) clean; `cargo build --bin shengji` clean under
+  `#![deny(warnings)]`; `cargo test -p shengji --test e2e_game` 4/4 incl. the
+  honesty gate; both pages rendered and screenshotted at desktop and 390px
+  (no horizontal overflow, 61/61 example cards drawn as SVG, 0 console errors).
 
 ### 2026-07-24 — "Suggest a play" (✨) now returns the Grandmaster move
 The in-game ✨ button now answers **"what is the best play?"** instead of merely

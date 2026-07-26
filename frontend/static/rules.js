@@ -6,8 +6,11 @@
  * 'wasm-unsafe-eval'), which blocks inline scripts. There is intentionally NO
  * inline JS and NO inline event-handler attributes anywhere on the page.
  *
+ * Language handling, the top guide nav, and the static card rendering are
+ * shared with strategy.html and live in guide-common.js (loaded first).
+ *
  * Responsibilities:
- *   1. Language: read ?lang=en|zh and toggle body classes.
+ *   1. Language + top nav, via window.ShengjiGuide.
  *   2. Mode deep-link: ?mode=friends checks the Finding-Friends radio. (The
  *      Tractor/Finding-Friends tab itself is CSS-only and works without JS.)
  *   3. Deck selector: recompute the round-result point-threshold table.
@@ -19,14 +22,13 @@
 (function () {
   "use strict";
 
+  var guide = window.ShengjiGuide;
+
   // --- 1. Language: read ?lang=en|zh (default en) and toggle body classes. ---
-  var params = new URLSearchParams(window.location.search);
-  var lang = (params.get("lang") || "en").toLowerCase();
-  if (lang !== "zh") lang = "en";
+  var lang = guide.readLang();
+  guide.applyLang(lang);
+  guide.markNav(lang);
   var body = document.getElementById("body");
-  body.classList.remove("lang-en", "lang-zh");
-  body.classList.add(lang === "zh" ? "lang-zh" : "lang-en");
-  document.documentElement.setAttribute("lang", lang === "zh" ? "zh" : "en");
 
   // --- 2. Round-result deck selector: recompute the point-threshold table. ---
   (function () {
@@ -86,24 +88,6 @@
       // display_value is the UNCOLORED small-joker glyph (🃟), so using it would
       // render both jokers identically. `value` (🃏) yields its colored art.
       el.appendChild(makeCardEl(c.value, c.typ, svgMap));
-    });
-  }
-
-  // Replace the STATIC card examples embedded in the prose:
-  //   <span class="card ♤">🂢</span>  ->  same span, innerHTML = real SVG.
-  // The glyph in the span's text is the lookup key.
-  function renderStaticCards(svgMap) {
-    var spans = document.querySelectorAll(".card");
-    spans.forEach(function (span) {
-      // Skip spans we already rendered (dynamic ones contain an <svg>).
-      if (span.querySelector("svg")) return;
-      var glyph = (span.textContent || "").trim();
-      if (!glyph) return;
-      var entry = svgMap[glyph];
-      if (entry) {
-        span.innerHTML = fourColor ? entry.fourColor : entry.normal;
-        span.setAttribute("role", "img");
-      }
     });
   }
 
@@ -234,15 +218,13 @@
     fetch("cards.json").then(function (r) {
       return r.json();
     }),
-    fetch("rules-cards.json").then(function (r) {
-      return r.json();
-    }),
+    guide.loadCardArt(),
   ])
     .then(function (results) {
       var cardsJson = results[0];
       var svgMap = results[1];
       renderDynamicCards(cardsJson, svgMap);
-      renderStaticCards(svgMap);
+      guide.renderStaticCards(svgMap, fourColor);
     })
     .catch(function (err) {
       // If the data can't be fetched, the dynamic examples stay empty and the

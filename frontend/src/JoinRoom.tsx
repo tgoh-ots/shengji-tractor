@@ -140,6 +140,15 @@ const JoinRoom = (props: IProps): JSX.Element => {
           >
             {t("join.readRules")}
           </a>
+          {" · "}
+          <a
+            href={`strategy.html?lang=${lang}`}
+            target="_blank"
+            rel="noreferrer"
+            className="text-[var(--accent)] underline"
+          >
+            {t("join.readStrategy")}
+          </a>
         </p>
         <p>{t("join.shareIntro")}</p>
       </div>
