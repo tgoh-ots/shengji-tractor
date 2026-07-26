@@ -156,11 +156,13 @@ class Exchange extends React.Component<IExchangeProps, IExchangeState> {
       }
     });
 
-    const isLandlord =
-      this.props.state.propagated.players[landlordIdx].name === this.props.name;
-    const isExchanger =
-      this.props.state.propagated.players[exchangerIdx].name ===
-      this.props.name;
+    // `landlordIdx`/`exchangerIdx` stay -1 when no player matches (a transient
+    // state, e.g. mid-reconnect). Indexing with -1 yields `undefined` and used to
+    // throw on `.name` during render, blanking the game UI — so read defensively
+    // and simply report "not me" when the seat can't be resolved.
+    const players = this.props.state.propagated.players;
+    const isLandlord = players[landlordIdx]?.name === this.props.name;
+    const isExchanger = players[exchangerIdx]?.name === this.props.name;
     const kittyTheftEnabled =
       this.props.state.propagated.kitty_theft_policy === "AllowKittyTheft";
 

@@ -186,8 +186,10 @@ const Points = (props: IProps): JSX.Element => {
 
   const playerPointElements = props.players.map((player) => {
     const onLandlordTeam = props.landlordTeam.includes(player.id);
-    const cards =
-      props.points[player.id].length > 0 ? props.points[player.id] : ["🂠"];
+    // A player id missing from `points` used to throw on `.length` during render.
+    // An absent entry means "no points taken", which renders as face-down anyway.
+    const playerPoints = props.points[player.id] ?? [];
+    const cards = playerPoints.length > 0 ? playerPoints : ["🂠"];
     const penalty =
       player.id in props.penalties ? props.penalties[player.id] : 0;
 

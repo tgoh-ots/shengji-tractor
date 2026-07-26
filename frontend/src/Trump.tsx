@@ -14,9 +14,19 @@ const TrumpE = (props: IProps): JSX.Element => {
   const { t } = useTranslation();
   if ("Standard" in trump) {
     const { suit, number: rank } = trump.Standard;
-    const card = preloadedCards.filter(
+    // `.find` + guard: an unrecognised suit/rank pair used to index `[0]` on an
+    // empty array and throw during render, blanking the game UI. Fall back to
+    // naming the rank alone, which is still useful to the player.
+    const card = preloadedCards.find(
       (v) => v.typ === suit && v.number === rank,
-    )[0].value;
+    )?.value;
+    if (card === undefined) {
+      return (
+        <div className="trump">
+          {t("trump.suitIs")} {suit} ({t("trump.rank")} {rank})
+        </div>
+      );
+    }
     return (
       <div className="trump">
         {t("trump.suitIs")} <InlineCard card={card} /> ({t("trump.rank")} {rank}

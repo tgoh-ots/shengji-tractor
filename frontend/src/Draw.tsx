@@ -266,17 +266,17 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
                     !(
                       landlord !== null &&
                       landlord !== undefined &&
-                      players[landlord].level === "NT"
+                      players[landlord]?.level === "NT"
                     )) ||
                   (landlord !== null && landlord !== playerId) ||
                   (landlord === null &&
                     ((this.props.state.propagated
                       .first_landlord_selection_policy === "ByWinningBid" &&
                       this.props.state.bids[this.props.state.bids.length - 1]
-                        .id !== playerId) ||
+                        ?.id !== playerId) ||
                       (this.props.state.propagated
                         .first_landlord_selection_policy === "ByFirstBid" &&
-                        this.props.state.bids[0].id !== playerId)))
+                        this.props.state.bids[0]?.id !== playerId)))
                 }
                 className="sj-btn"
               >
@@ -294,7 +294,7 @@ class Draw extends React.Component<IDrawProps, IDrawState> {
                     this.props.state.kitty.length ||
                   (landlord !== null &&
                     landlord !== undefined &&
-                    players[landlord].level === "NT")
+                    players[landlord]?.level === "NT")
                 }
                 className="sj-btn"
               >

@@ -76,6 +76,24 @@ export const unicodeToCard = (unicode: string): Card => {
   }
 };
 
+/**
+ * Non-throwing counterpart of `unicodeToCard`, returning `null` for anything it
+ * cannot parse.
+ *
+ * Prefer this ANYWHERE the result is used during render. Card glyphs arrive from
+ * the server, and `unicodeToCard` throws on an unrecognised one; a throw during
+ * render escapes to the error boundary and blanks the entire game UI for that
+ * client. Degrading one card to a face-down placeholder is always the better
+ * failure mode.
+ */
+export const tryUnicodeToCard = (unicode: string): Card | null => {
+  try {
+    return unicodeToCard(unicode);
+  } catch {
+    return null;
+  }
+};
+
 export const cardToUnicodeSuit = (
   card: ISuitCard,
   fill: boolean = true,
@@ -113,13 +131,9 @@ export const cardAriaLabel = (
   } else if (unicode === "🃏") {
     base = "big joker";
   } else {
-    try {
-      const card = unicodeToCard(unicode);
-      if (card.type === "suit_card") {
-        base = `${card.rank} of ${suitToName[card.suit]}`;
-      }
-    } catch {
-      // fall through
+    const card = tryUnicodeToCard(unicode);
+    if (card !== null && card.type === "suit_card") {
+      base = `${card.rank} of ${suitToName[card.suit]}`;
     }
   }
 

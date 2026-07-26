@@ -3,7 +3,7 @@ import styled from "styled-components";
 import {
   cardToUnicodeSuit,
   ISuitCard,
-  unicodeToCard,
+  tryUnicodeToCard,
 } from "./util/cardHelpers";
 import { SettingsContext } from "./AppStateProvider";
 import { ISuitOverrides } from "./state/Settings";
@@ -61,7 +61,13 @@ interface IProps {
 }
 
 const InlineCard = (props: IProps): JSX.Element => {
-  const card = unicodeToCard(props.card);
+  // Card glyphs come off the wire, so an unrecognised one is possible. Render it
+  // as face-down rather than throwing: this component is used all over the app,
+  // and a throw here would escape to the error boundary and blank the whole game.
+  const card = tryUnicodeToCard(props.card);
+  if (card === null) {
+    return <Unknown>🂠</Unknown>;
+  }
   switch (card.type) {
     case "unknown":
       return <Unknown>🂠</Unknown>;
