@@ -1038,9 +1038,12 @@ pub fn candidate_features_v2(
         f[39] = (step as f32 / 80.0).clamp(0.0, 1.0);
     }
 
+    // Cached, hand-constant (see `play_phase::DeckInvariants`) — this encoder runs
+    // per scored candidate, so materializing the configured deck here would be a
+    // per-candidate allocation for a number that never changes.
     let deck_cards = p
-        .configured_cards_for_determinization()
-        .map(|cards| cards.len())
+        .deck_invariants()
+        .map(|invariants| invariants.total_cards)
         .unwrap_or_else(|| 54 * p.num_decks().max(1));
     let completed_cards: usize = p.played_this_hand().values().copied().sum();
     let table_cards: usize = p

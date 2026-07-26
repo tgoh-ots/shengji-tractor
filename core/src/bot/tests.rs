@@ -5250,7 +5250,9 @@ fn test_full_memory_guaranteed_top_after_higher_cards_played_across_tricks() {
     // Before the King is seen, the Queen is NOT guaranteed top.
     let mut seen: std::collections::HashMap<Card, usize> = std::collections::HashMap::new();
     let mk = |seen: std::collections::HashMap<Card, usize>| Knowledge {
-        configured_counts: Card::count(shengji_mechanics::deck::Deck::default().cards()),
+        configured_counts: std::sync::Arc::new(Card::count(
+            shengji_mechanics::deck::Deck::default().cards(),
+        )),
         seen,
         voids: std::collections::HashMap::new(),
         hidden_counts: std::collections::HashMap::new(),

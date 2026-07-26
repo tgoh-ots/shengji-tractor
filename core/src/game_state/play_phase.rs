@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Error};
 use schemars::JsonSchema;
@@ -156,6 +156,32 @@ pub struct PlayerGameFinishedResult {
     pub rank: Rank,
 }
 
+/// Deck-derived facts that are CONSTANT for an entire hand.
+///
+/// Every field here is a pure function of `PlayPhase::decks` (or the propagated
+/// fallback) and `PlayPhase::trump`, neither of which is ever reassigned after
+/// the play phase is constructed. They used to be recomputed from scratch inside
+/// [`crate::bot::determinize::Knowledge::from_play_view_with_features`], which
+/// runs once per ply of every rollout in every sampled world — a full 108-card
+/// `Vec` materialization, a `HashMap` build, and three more full passes, per ply.
+/// Profiling put that recompute at ~25% of all bot CPU.
+///
+/// Derived lazily and shared behind an `Arc` so the cache SURVIVES the
+/// per-candidate `PlayPhase::clone` in the search (`OnceLock<T>: Clone` clones
+/// the initialized value, and cloning an `Arc` is a refcount bump).
+#[derive(Debug)]
+pub(crate) struct DeckInvariants {
+    /// The exact configured physical deck, one entry per copy.
+    pub cards: Vec<Card>,
+    /// Per-card configured copy counts. Behind an `Arc` so `Knowledge` can share
+    /// it rather than rebuilding a `HashMap` per ply.
+    pub counts: Arc<HashMap<Card, usize>>,
+    pub total_cards: usize,
+    pub total_points: usize,
+    /// Trump-dependent, but trump is fixed for the hand (see the type docs).
+    pub total_trumps: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PlayPhase {
     num_decks: usize,
@@ -215,6 +241,12 @@ pub struct PlayPhase {
     #[serde(default)]
     decks: Vec<Deck>,
     player_requested_reset: Option<PlayerID>,
+    /// Lazily-derived cache of the hand-constant deck facts (see
+    /// [`DeckInvariants`]). `#[serde(skip)]` — it is pure derived data, so an old
+    /// or freshly-deserialized snapshot simply re-derives it on first use. Never
+    /// participates in equality, serialization, or the JSON schema.
+    #[serde(skip)]
+    deck_invariants: OnceLock<Option<Arc<DeckInvariants>>>,
 }
 
 impl PlayPhase {
@@ -269,6 +301,7 @@ impl PlayPhase {
             public_bids,
             voids_this_hand: HashMap::new(),
             player_requested_reset: None,
+            deck_invariants: OnceLock::new(),
         })
     }
 
@@ -424,14 +457,40 @@ impl PlayPhase {
     /// still receive a per-player redacted [`PlayPhase`]; the central observation
     /// boundary is what prevents access to hidden hands and the hidden kitty.
     pub(crate) fn configured_cards_for_determinization(&self) -> Option<Vec<Card>> {
-        let decks = if self.decks.is_empty() {
-            // Backwards compatibility for a room serialized before `decks` was
-            // persisted on PlayPhase. Re-materialize the public configuration.
-            self.propagated.decks().ok()?
-        } else {
-            self.decks.clone()
-        };
-        Some(decks.iter().flat_map(Deck::cards).collect())
+        Some(self.deck_invariants()?.cards.clone())
+    }
+
+    /// The hand-constant deck facts, derived at most once per `PlayPhase` (see
+    /// [`DeckInvariants`]). Returns `None` only when the deck configuration itself
+    /// is unrecoverable, and that verdict is cached too, so a broken configuration
+    /// is not re-derived on every ply either.
+    pub(crate) fn deck_invariants(&self) -> Option<&Arc<DeckInvariants>> {
+        self.deck_invariants
+            .get_or_init(|| {
+                let decks = if self.decks.is_empty() {
+                    // Backwards compatibility for a room serialized before `decks`
+                    // was persisted on PlayPhase. Re-materialize the public
+                    // configuration.
+                    self.propagated.decks().ok()?
+                } else {
+                    self.decks.clone()
+                };
+                let cards: Vec<Card> = decks.iter().flat_map(Deck::cards).collect();
+                let counts = Card::count(cards.iter().copied());
+                let total_points = cards.iter().map(|card| card.points().unwrap_or(0)).sum();
+                let total_trumps = cards
+                    .iter()
+                    .filter(|card| self.trump.effective_suit(**card) == EffectiveSuit::Trump)
+                    .count();
+                Some(Arc::new(DeckInvariants {
+                    total_cards: cards.len(),
+                    cards,
+                    counts: Arc::new(counts),
+                    total_points,
+                    total_trumps,
+                }))
+            })
+            .as_ref()
     }
 
     /// The (possibly redacted) physical piles that are outside players' hands.
@@ -1212,6 +1271,114 @@ mod observation_regression_tests {
         )
         .unwrap();
         (play, ids)
+    }
+
+    /// Recompute the deck invariants the way the code did before they were
+    /// cached, so the cache can be checked against an independent derivation.
+    fn recompute_invariants(play: &PlayPhase) -> (Vec<Card>, usize, usize, usize) {
+        let decks = if play.decks.is_empty() {
+            play.propagated.decks().unwrap()
+        } else {
+            play.decks.clone()
+        };
+        let cards: Vec<Card> = decks.iter().flat_map(Deck::cards).collect();
+        let total_points = cards.iter().map(|c| c.points().unwrap_or(0)).sum();
+        let total_trumps = cards
+            .iter()
+            .filter(|c| {
+                play.trump.effective_suit(**c) == shengji_mechanics::types::EffectiveSuit::Trump
+            })
+            .count();
+        (cards.clone(), cards.len(), total_points, total_trumps)
+    }
+
+    fn assert_invariants_match(play: &PlayPhase, context: &str) {
+        let (cards, total_cards, total_points, total_trumps) = recompute_invariants(play);
+        let cached = play.deck_invariants().expect(context);
+        assert_eq!(cached.cards, cards, "cards mismatch ({context})");
+        assert_eq!(
+            cached.total_cards, total_cards,
+            "count mismatch ({context})"
+        );
+        assert_eq!(
+            cached.total_points, total_points,
+            "points mismatch ({context})"
+        );
+        assert_eq!(
+            cached.total_trumps, total_trumps,
+            "trumps mismatch ({context})"
+        );
+        assert_eq!(
+            *cached.counts,
+            Card::count(cards.iter().copied()),
+            "counts mismatch ({context})"
+        );
+    }
+
+    #[test]
+    fn cached_deck_invariants_match_a_fresh_derivation() {
+        let (play, _) = play_phase(
+            [
+                vec![card(Suit::Clubs, Number::Three)],
+                vec![card(Suit::Clubs, Number::Four)],
+                vec![card(Suit::Clubs, Number::Five)],
+                vec![card(Suit::Clubs, Number::Six)],
+            ],
+            false,
+        );
+        // First call derives, second call must serve the identical cached value.
+        assert_invariants_match(&play, "first derivation");
+        assert_invariants_match(&play, "cached second read");
+        // The legacy owned accessor must keep agreeing with the cache.
+        assert_eq!(
+            play.configured_cards_for_determinization().unwrap(),
+            play.deck_invariants().unwrap().cards
+        );
+    }
+
+    #[test]
+    fn deck_invariant_cache_survives_clone_and_is_shared() {
+        let (play, _) = play_phase(
+            [
+                vec![card(Suit::Clubs, Number::Three)],
+                vec![card(Suit::Clubs, Number::Four)],
+                vec![card(Suit::Clubs, Number::Five)],
+                vec![card(Suit::Clubs, Number::Six)],
+            ],
+            false,
+        );
+        // Warm the cache, then clone — the search clones a PlayPhase per candidate
+        // per world, so a cache that reset on clone would lose most of the win.
+        let warm = play.deck_invariants().unwrap().clone();
+        let cloned = play.clone();
+        assert_invariants_match(&cloned, "after clone");
+        assert!(
+            std::sync::Arc::ptr_eq(&warm, cloned.deck_invariants().unwrap()),
+            "clone must share the derived invariants, not re-derive them"
+        );
+    }
+
+    #[test]
+    fn deck_invariants_rederive_after_a_serde_round_trip() {
+        let (play, _) = play_phase(
+            [
+                vec![card(Suit::Clubs, Number::Three)],
+                vec![card(Suit::Clubs, Number::Four)],
+                vec![card(Suit::Clubs, Number::Five)],
+                vec![card(Suit::Clubs, Number::Six)],
+            ],
+            false,
+        );
+        let _ = play.deck_invariants();
+        // The cache is `#[serde(skip)]`, so a round-tripped snapshot starts cold
+        // and must re-derive the same values on demand.
+        let json = serde_json::to_string(&play).unwrap();
+        assert!(
+            !json.contains("deck_invariants"),
+            "the derived cache must not be serialized"
+        );
+        let restored: PlayPhase = serde_json::from_str(&json).unwrap();
+        assert_invariants_match(&restored, "after serde round trip");
     }
 
     #[test]

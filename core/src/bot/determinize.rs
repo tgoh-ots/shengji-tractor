@@ -17,6 +17,7 @@
 //! retains the earlier conservation/void/failed-card constraints.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use rand::seq::{index, SliceRandom};
 use rand::Rng;
@@ -56,8 +57,11 @@ pub struct Knowledge {
     /// existing heuristic features.
     pub num_decks: usize,
     /// Exact configured physical-copy counts, including short/joker-less and
-    /// heterogeneous special decks.
-    pub configured_counts: HashMap<Card, usize>,
+    /// heterogeneous special decks. Shared behind an `Arc` with the owning
+    /// `PlayPhase`'s cached deck invariants: this map is identical for every
+    /// `Knowledge` built from the same hand, and rebuilding it per ply was a
+    /// measurable share of bot CPU.
+    pub configured_counts: Arc<HashMap<Card, usize>>,
     pub total_cards: usize,
     pub total_points: usize,
     pub total_trumps: usize,
@@ -67,12 +71,25 @@ fn observe_revealed_holding(
     holdings: &mut HashMap<PlayerID, HashMap<Card, usize>>,
     played: &PlayedCards,
 ) {
+    // Fast path. This function is called for EVERY entry in the whole play
+    // history on every rollout ply (see `Knowledge::infer_revealed_holdings`), so
+    // at trick 20 it runs ~80 times per ply. Its only two effects are to subtract
+    // from an ALREADY-EXISTING entry for this seat, and to record cards revealed
+    // by a FAILED THROW. When neither applies there is provably nothing to do —
+    // and that is the overwhelmingly common case, since failed throws are rare.
+    // Returning here avoids two `HashMap` allocations per call.
+    if played.bad_throw_cards.is_empty() && !holdings.contains_key(&played.id) {
+        return;
+    }
     let holding = holdings.entry(played.id).or_default();
     // Cards actually played leave the hand, including copies revealed by an
-    // earlier failed throw.
-    for (card, count) in Card::count(played.cards.iter().copied()) {
-        if let Some(known) = holding.get_mut(&card) {
-            *known = known.saturating_sub(count);
+    // earlier failed throw. Counted in place rather than via `Card::count` so the
+    // common path does not allocate a temporary map.
+    if !holding.is_empty() {
+        for card in played.cards.iter() {
+            if let Some(known) = holding.get_mut(card) {
+                *known = known.saturating_sub(1);
+            }
         }
     }
     holding.retain(|_, count| *count > 0);
@@ -106,17 +123,17 @@ impl Knowledge {
         features: EnochFeatures,
     ) -> Self {
         let trump = p.trick().trump();
-        let configured_cards = p.configured_cards_for_determinization().unwrap_or_default();
-        let configured_counts = Card::count(configured_cards.iter().copied());
-        let total_cards = configured_cards.len();
-        let total_points = configured_cards
-            .iter()
-            .map(|card| card.points().unwrap_or(0))
-            .sum();
-        let total_trumps = configured_cards
-            .iter()
-            .filter(|card| trump.effective_suit(**card) == EffectiveSuit::Trump)
-            .count();
+        // These five facts are constant for the whole hand, so they are derived
+        // once per `PlayPhase` and shared (see `play_phase::DeckInvariants`).
+        // Rebuilding them here used to cost ~25% of all bot CPU, because this
+        // function runs once per ply of every rollout in every sampled world.
+        let invariants = p.deck_invariants();
+        let configured_counts = invariants
+            .map(|i| Arc::clone(&i.counts))
+            .unwrap_or_default();
+        let total_cards = invariants.map(|i| i.total_cards).unwrap_or(0);
+        let total_points = invariants.map(|i| i.total_points).unwrap_or(0);
+        let total_trumps = invariants.map(|i| i.total_trumps).unwrap_or(0);
         let hands = p.hands();
         let mut seen: HashMap<Card, usize> = HashMap::new();
         let mut hidden_counts: HashMap<PlayerID, usize> = HashMap::new();
@@ -843,7 +860,7 @@ impl HiddenParticle {
         for &card in self.kitty.iter().chain(&self.removed) {
             *accounted.entry(card).or_default() += 1;
         }
-        accounted == knowledge.configured_counts
+        accounted == *knowledge.configured_counts
     }
 
     fn materialize(&self, view: &PlayPhase, knowledge: &Knowledge) -> Option<DeterminizedWorld> {
@@ -1533,6 +1550,81 @@ mod sampler_calibration_tests {
         );
         assert_eq!(holdings[&player].get(&three), Some(&1));
         assert!(!holdings[&player].contains_key(&four));
+    }
+
+    #[test]
+    fn ordinary_plays_do_not_create_revealed_holdings() {
+        // The hot path: a seat with no recorded revelation playing an ordinary
+        // (non-failed-throw) card must be a pure no-op. This is the fast path that
+        // skips two per-call HashMap allocations, and it runs for every entry in
+        // the whole play history on every rollout ply.
+        let player = PlayerID(3);
+        let three = Card::Suited {
+            suit: Suit::Clubs,
+            number: Number::Three,
+        };
+        let mut holdings: HashMap<PlayerID, HashMap<Card, usize>> = HashMap::new();
+        observe_revealed_holding(
+            &mut holdings,
+            &PlayedCards {
+                id: player,
+                cards: vec![three, three],
+                bad_throw_cards: vec![],
+                better_player: None,
+                attempted_format: None,
+            },
+        );
+        assert!(
+            holdings.is_empty(),
+            "an ordinary play must not record (or even allocate) a holding entry"
+        );
+    }
+
+    #[test]
+    fn repeated_copies_are_decremented_once_per_physical_card() {
+        // Guards the switch from `Card::count` + a single saturating_sub to an
+        // in-place per-copy decrement: both must consume exactly one revealed copy
+        // per physical card played, and must saturate rather than wrap.
+        let player = PlayerID(5);
+        let three = Card::Suited {
+            suit: Suit::Clubs,
+            number: Number::Three,
+        };
+        let mut holdings = HashMap::new();
+        observe_revealed_holding(
+            &mut holdings,
+            &PlayedCards {
+                id: player,
+                cards: vec![],
+                bad_throw_cards: vec![three, three, three],
+                better_player: None,
+                attempted_format: None,
+            },
+        );
+        assert_eq!(holdings[&player].get(&three), Some(&3));
+        observe_revealed_holding(
+            &mut holdings,
+            &PlayedCards {
+                id: player,
+                cards: vec![three, three],
+                bad_throw_cards: vec![],
+                better_player: None,
+                attempted_format: None,
+            },
+        );
+        assert_eq!(holdings[&player].get(&three), Some(&1));
+        // Over-playing the revealed count saturates at zero and drops the entry.
+        observe_revealed_holding(
+            &mut holdings,
+            &PlayedCards {
+                id: player,
+                cards: vec![three, three, three],
+                bad_throw_cards: vec![],
+                better_player: None,
+                attempted_format: None,
+            },
+        );
+        assert!(holdings[&player].is_empty());
     }
 
     #[test]

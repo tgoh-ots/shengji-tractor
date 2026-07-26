@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use shengji_mechanics::ordered_card::OrderedCard;
-use shengji_mechanics::trick::{PlayCards, TrickUnit, UnitLike};
+use shengji_mechanics::trick::{TrickUnit, UnitLike};
 use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Rank, Suit, Trump};
 
 use crate::bot::determinize::Knowledge;
@@ -2246,27 +2246,24 @@ pub fn score_follow_legacy(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> f64 {
 /// only the candidates' highest cards, is correct for pairs, tractors, throws,
 /// bombs, and trump-led tricks.
 pub(crate) fn candidate_wins_current_trick(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> bool {
-    let mut trick = p.trick().clone();
-    let mut hands = p.hands().clone();
-    let rules = p.propagated();
-    if trick
-        .play_cards(PlayCards {
-            id: me,
-            hands: &mut hands,
-            cards,
-            trick_draw_policy: rules.trick_draw_policy,
-            throw_eval_policy: rules.throw_evaluation_policy,
-            format_hint: None,
-            hide_throw_halting_player: rules.hide_throw_halting_player,
-            tractor_requirements: rules.tractor_requirements,
-            bomb_policy: rules.bomb_policy,
-            compound_formats: rules.compound_formats.clone(),
-        })
-        .is_err()
-    {
+    // This used to CLONE the trick AND every player's hand and then replay the
+    // candidate, just to read back the winner — once per scored candidate, which
+    // profiling put at ~23% of all bot CPU. It is now a pure query against the
+    // trick's maintained winner fold.
+    //
+    // The two guards below preserve the old behavior exactly: the replayed
+    // `Trick::play_cards` would have rejected an out-of-turn actor and any
+    // illegal play, and a rejected play reported "does not win". This feature is
+    // consumed by the Expert net (`expert::candidate_features_v2`, f[48]), so its
+    // semantics must not drift.
+    if p.trick().next_player() != Some(me) {
         return false;
     }
-    trick.winner_so_far() == Some(me)
+    if p.can_play_cards(me, cards).is_err() {
+        return false;
+    }
+    p.trick()
+        .would_win_with(cards, p.propagated().throw_evaluation_policy)
 }
 
 /// Score a candidate follow (the NEW boss-/partner-aware scorer used by all real
@@ -5922,7 +5919,7 @@ mod tests {
     fn test_only_big_joker_is_unconditionally_boss() {
         let trump = std_trump(Suit::Hearts);
         let make_knowledge = |seen: HashMap<Card, usize>| Knowledge {
-            configured_counts: Card::count(Deck::default().cards()),
+            configured_counts: std::sync::Arc::new(Card::count(Deck::default().cards())),
             seen,
             voids: HashMap::new(),
             hidden_counts: HashMap::new(),
@@ -5960,7 +5957,7 @@ mod tests {
         };
         let cards: Vec<Card> = deck.cards().collect();
         let knowledge = Knowledge {
-            configured_counts: Card::count(cards.iter().copied()),
+            configured_counts: std::sync::Arc::new(Card::count(cards.iter().copied())),
             total_cards: cards.len(),
             total_points: cards.iter().map(|card| card.points().unwrap_or(0)).sum(),
             total_trumps: cards
@@ -5978,6 +5975,185 @@ mod tests {
         assert!(
             is_boss_card(&knowledge, trump, Card::SmallJoker),
             "an excluded big joker must not remain a phantom dominator"
+        );
+    }
+
+    /// The pre-optimization implementation, kept as a test oracle: clone the
+    /// trick AND every player's hand, replay the candidate, read back the winner.
+    /// `candidate_wins_current_trick` must agree with this in every position,
+    /// because it feeds the Expert net's trained feature `f[48]`.
+    fn legacy_candidate_wins_current_trick(p: &PlayPhase, me: PlayerID, cards: &[Card]) -> bool {
+        use shengji_mechanics::trick::PlayCards;
+        let mut trick = p.trick().clone();
+        let mut hands = p.hands().clone();
+        let rules = p.propagated();
+        if trick
+            .play_cards(PlayCards {
+                id: me,
+                hands: &mut hands,
+                cards,
+                trick_draw_policy: rules.trick_draw_policy,
+                throw_eval_policy: rules.throw_evaluation_policy,
+                format_hint: None,
+                hide_throw_halting_player: rules.hide_throw_halting_player,
+                tractor_requirements: rules.tractor_requirements,
+                bomb_policy: rules.bomb_policy,
+                compound_formats: rules.compound_formats.clone(),
+            })
+            .is_err()
+        {
+            return false;
+        }
+        trick.winner_so_far() == Some(me)
+    }
+
+    /// Exhaustive agreement check between the fast query and the legacy oracle.
+    ///
+    /// For a spread of trick states, every seat is asked about every subset of
+    /// its hand up to the format size — legal AND illegal plays, winning and
+    /// losing — and the two implementations must return the same verdict.
+    #[test]
+    fn candidate_wins_current_trick_matches_the_legacy_replay_oracle() {
+        fn subsets(cards: &[Card], max_len: usize) -> Vec<Vec<Card>> {
+            let mut out = vec![];
+            for mask in 1u32..(1 << cards.len()) {
+                let pick: Vec<Card> = (0..cards.len())
+                    .filter(|i| mask & (1 << i) != 0)
+                    .map(|i| cards[i])
+                    .collect();
+                if pick.len() <= max_len {
+                    out.push(pick);
+                }
+            }
+            out
+        }
+
+        let h = |n, s| card(n, s);
+        let layouts: Vec<[Vec<Card>; 4]> = vec![
+            // Plain side suit with a trump ruff available.
+            [
+                vec![h(Number::Five, Suit::Spades), h(Number::Six, Suit::Spades)],
+                vec![
+                    h(Number::King, Suit::Spades),
+                    h(Number::Three, Suit::Hearts),
+                ],
+                vec![h(Number::Seven, Suit::Spades), h(Number::Ace, Suit::Spades)],
+                vec![
+                    h(Number::Four, Suit::Hearts),
+                    h(Number::Eight, Suit::Spades),
+                ],
+            ],
+            // Three-card hands: many more subsets, mixing suits and trumps so
+            // both legal and illegal candidates are exercised.
+            [
+                vec![
+                    h(Number::Five, Suit::Spades),
+                    h(Number::Nine, Suit::Spades),
+                    h(Number::Three, Suit::Hearts),
+                ],
+                vec![
+                    h(Number::King, Suit::Spades),
+                    h(Number::Four, Suit::Hearts),
+                    h(Number::Ten, Suit::Clubs),
+                ],
+                vec![
+                    h(Number::Seven, Suit::Spades),
+                    h(Number::Ace, Suit::Spades),
+                    h(Number::Six, Suit::Clubs),
+                ],
+                vec![
+                    h(Number::Eight, Suit::Spades),
+                    h(Number::Ace, Suit::Hearts),
+                    h(Number::Two, Suit::Clubs),
+                ],
+            ],
+            // Mixed ranks in a single side suit, no trumps at all.
+            [
+                vec![
+                    h(Number::Three, Suit::Clubs),
+                    h(Number::Ten, Suit::Clubs),
+                    h(Number::Queen, Suit::Clubs),
+                ],
+                vec![
+                    h(Number::Four, Suit::Clubs),
+                    h(Number::Jack, Suit::Clubs),
+                    h(Number::King, Suit::Clubs),
+                ],
+                vec![
+                    h(Number::Five, Suit::Clubs),
+                    h(Number::Six, Suit::Clubs),
+                    h(Number::Ace, Suit::Clubs),
+                ],
+                vec![
+                    h(Number::Seven, Suit::Clubs),
+                    h(Number::Eight, Suit::Clubs),
+                    h(Number::Nine, Suit::Clubs),
+                ],
+            ],
+            // Pairs, so the format is a pair and shape matters.
+            [
+                vec![h(Number::Five, Suit::Spades), h(Number::Five, Suit::Spades)],
+                vec![h(Number::King, Suit::Spades), h(Number::King, Suit::Spades)],
+                vec![h(Number::Seven, Suit::Spades), h(Number::Ace, Suit::Spades)],
+                vec![
+                    h(Number::Three, Suit::Hearts),
+                    h(Number::Three, Suit::Hearts),
+                ],
+            ],
+            // Trump-led trick.
+            [
+                vec![
+                    h(Number::Three, Suit::Hearts),
+                    h(Number::Nine, Suit::Hearts),
+                ],
+                vec![h(Number::Ace, Suit::Hearts), h(Number::Five, Suit::Spades)],
+                vec![h(Number::Four, Suit::Hearts), h(Number::Six, Suit::Spades)],
+                vec![
+                    h(Number::King, Suit::Hearts),
+                    h(Number::Seven, Suit::Spades),
+                ],
+            ],
+        ];
+
+        let mut checked = 0usize;
+        for layout in layouts {
+            // Vary how many cards are already on the table, including the empty
+            // (leading) state.
+            for prefix in 0..4usize {
+                let (mut pp, ids) = make_play_phase(layout.clone());
+                let mut ok = true;
+                for seat in 0..prefix {
+                    let lead = layout[seat][0];
+                    let size = pp.trick().trick_format().map(|tf| tf.size()).unwrap_or(1);
+                    let cards = &layout[seat][..size.min(layout[seat].len())];
+                    if pp.play_cards(ids[seat], cards).is_err() {
+                        let _ = lead;
+                        ok = false;
+                        break;
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+                let format_size = pp.trick().trick_format().map(|tf| tf.size()).unwrap_or(2);
+                for (seat, hand) in layout.iter().enumerate() {
+                    for candidate in subsets(hand, format_size.max(1)) {
+                        let fast = candidate_wins_current_trick(&pp, ids[seat], &candidate);
+                        let legacy =
+                            legacy_candidate_wins_current_trick(&pp, ids[seat], &candidate);
+                        assert_eq!(
+                            fast, legacy,
+                            "disagreement: prefix={prefix} seat={seat} candidate={candidate:?}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 200,
+            "expected broad coverage, only checked {} candidates",
+            checked
         );
     }
 
