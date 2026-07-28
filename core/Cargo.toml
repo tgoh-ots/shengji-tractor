@@ -21,6 +21,7 @@ thiserror = "1.0"
 # image used for deploys.
 tract-onnx = "0.21"
 url = "2.1"
+rustc-hash = "2"
 
 [dev-dependencies]
 rand_distr = "0.4.3"

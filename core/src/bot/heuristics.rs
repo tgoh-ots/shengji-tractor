@@ -10,13 +10,20 @@
 //! ranked. Callers (the difficulty tiers) then pick from the ranking with
 //! tier-specific randomness.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use shengji_mechanics::ordered_card::OrderedCard;
 use shengji_mechanics::trick::{TrickUnit, UnitLike};
 use shengji_mechanics::types::{Card, EffectiveSuit, Number, PlayerID, Rank, Suit, Trump};
 
 use crate::bot::determinize::Knowledge;
+// Candidate de-duplication keys are `Vec<char>` (a canonical play spelling), which
+// SipHash is a poor fit for, and the set is probed once per generated candidate in
+// the search's innermost loop. These sets are only ever probed and inserted into —
+// NEVER iterated — so the hasher cannot influence which candidates are produced or
+// their order; it is a pure speed change.
+use rustc_hash::FxHashSet as CandidateKeySet;
+
 use crate::bot::enoch::EnochFeatures;
 use crate::game_state::play_phase::PlayPhase;
 use crate::settings::{FriendSelection, KittyPenalty};
@@ -477,7 +484,7 @@ fn push_legal_candidate(
     trump: Trump,
     mut cards: Vec<Card>,
     candidates: &mut Vec<Vec<Card>>,
-    seen: &mut HashSet<Vec<char>>,
+    seen: &mut CandidateKeySet<Vec<char>>,
     cap: usize,
 ) {
     if cards.is_empty() || candidates.len() >= cap {
@@ -516,7 +523,7 @@ fn merge_candidate_families(
         canonical_candidate_order(trump, family);
     }
     let mut result = Vec::with_capacity(cap);
-    let mut seen = HashSet::new();
+    let mut seen = CandidateKeySet::default();
     let mut index = 0usize;
     while result.len() < cap {
         let mut added = false;
@@ -622,7 +629,7 @@ fn compose_unit_throws(
     units_left: usize,
     current: &mut Vec<Card>,
     candidates: &mut Vec<Vec<Card>>,
-    seen: &mut HashSet<Vec<char>>,
+    seen: &mut CandidateKeySet<Vec<char>>,
     cap: usize,
     attempts: &mut usize,
     attempt_cap: usize,
@@ -669,7 +676,7 @@ fn enumerate_rainbow_counts(
     min_cards: usize,
     current: &mut Vec<Card>,
     candidates: &mut Vec<Vec<Card>>,
-    seen: &mut HashSet<Vec<char>>,
+    seen: &mut CandidateKeySet<Vec<char>>,
     cap: usize,
 ) {
     if candidates.len() >= cap {
@@ -742,13 +749,13 @@ fn lead_candidates_with_limits(
     let trump = p.trick().trump();
     let cap = cap.max(1);
     let mut atomic_candidates: Vec<Vec<Card>> = vec![];
-    let mut atomic_seen = HashSet::new();
+    let mut atomic_seen = CandidateKeySet::default();
     let mut rainbow_candidates: Vec<Vec<Card>> = vec![];
-    let mut rainbow_seen = HashSet::new();
+    let mut rainbow_seen = CandidateKeySet::default();
     let mut throw_candidates: Vec<Vec<Card>> = vec![];
-    let mut throw_seen = HashSet::new();
+    let mut throw_seen = CandidateKeySet::default();
     let mut exhaustive_candidates: Vec<Vec<Card>> = vec![];
-    let mut exhaustive_seen = HashSet::new();
+    let mut exhaustive_seen = CandidateKeySet::default();
 
     // Build atomic units deterministically by effective suit. Explicit repeated
     // units ensure a single card from a held pair remains available as a lead;
@@ -940,7 +947,7 @@ fn follow_candidates_with_cap(p: &PlayPhase, me: PlayerID, cap: usize) -> Vec<Ve
 
     let cap = cap.max(1);
     let mut structural_candidates: Vec<Vec<Card>> = vec![];
-    let mut structural_seen = HashSet::new();
+    let mut structural_seen = CandidateKeySet::default();
 
     // Format-matching plays. `check_play` can yield many distinct mappings; the
     // previous generator kept only `.next()`, hiding legal pairs/tractors that
@@ -1150,7 +1157,7 @@ fn follow_candidates_with_cap(p: &PlayPhase, me: PlayerID, cap: usize) -> Vec<Ve
     // Explicit bomb proposals. Bomb policies can permit a follow of a different
     // length/suit, so a `num_required`-only generator would never discover them.
     let mut bomb_candidates = Vec::new();
-    let mut bomb_seen = HashSet::new();
+    let mut bomb_seen = CandidateKeySet::default();
     if p.propagated().bomb_policy.bombs_enabled() {
         let entries = hand_entries(&hand, trump, |_| true);
         for (card, count) in entries {
@@ -1175,7 +1182,7 @@ fn follow_candidates_with_cap(p: &PlayPhase, me: PlayerID, cap: usize) -> Vec<Ve
     let entries = hand_entries(&hand, trump, |_| true);
     let combinations = count_multiset_combinations(&entries, num_required, cap);
     let mut exhaustive_candidates = Vec::new();
-    let mut exhaustive_seen = HashSet::new();
+    let mut exhaustive_seen = CandidateKeySet::default();
     if combinations <= cap {
         for play in enumerate_multiset_combinations(&entries, num_required, combinations.max(1)) {
             push_legal_candidate(
@@ -1207,7 +1214,7 @@ fn follow_candidates_with_cap(p: &PlayPhase, me: PlayerID, cap: usize) -> Vec<Ve
             trick_format.suit(),
             num_required,
         );
-        let mut fallback_seen = HashSet::new();
+        let mut fallback_seen = CandidateKeySet::default();
         push_legal_candidate(
             p,
             me,
@@ -3779,6 +3786,7 @@ mod tests {
     use shengji_mechanics::hands::Hands;
     use shengji_mechanics::player::Player;
     use shengji_mechanics::types::Suit;
+    use std::collections::HashSet;
 
     use crate::settings::{GameMode, PropagatedState};
 

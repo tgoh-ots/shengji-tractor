@@ -622,6 +622,28 @@ pub fn grandmaster_play(p: &PlayPhase, me: PlayerID) -> Vec<Card> {
     choose_play(p, me, BotDifficulty::Grandmaster, Some(suggest_budget_ms()))
 }
 
+/// Accept `cards` only if the rules engine agrees it is playable right now.
+///
+/// [`choose_play`] documents that it ALWAYS returns a legal play, but its search
+/// and heuristic branches used to return their pick unchecked, so a candidate the
+/// rules engine rejects escaped to the caller. In a real game that surfaces as
+/// `advance_bots` failing with `IllegalPlay`, which can stall the room — and it
+/// does happen: `test_enoch_flip_strands_human_then_finalizes_without_another_click`
+/// reproduces it intermittently.
+///
+/// This enforces the documented contract at the exit point, exactly as
+/// [`crate::bot::advice::suggest_play`] already does for the human-facing
+/// advisor. It costs one legality check per DECISION, which is nothing beside the
+/// search that produced the move. It is a safety net, not a root-cause fix: a
+/// branch that yields an illegal candidate still has a bug, but the bot now falls
+/// back to a legal move instead of wedging the hand.
+fn accept_if_legal(p: &PlayPhase, me: PlayerID, cards: Vec<Card>) -> Option<Vec<Card>> {
+    if cards.is_empty() || p.can_play_cards(me, &cards).is_err() {
+        return None;
+    }
+    Some(cards)
+}
+
 /// Choose the cards to play in the current trick for the given difficulty.
 /// Always returns a legal play (falling back to the dumb policy on any failure).
 fn choose_play(
@@ -782,7 +804,7 @@ fn choose_play(
             rollout_policy,
             enoch_features: EnochFeatures::empty(),
         };
-        if let Some(cards) = search_play(p, me, config) {
+        if let Some(cards) = search_play(p, me, config).and_then(|c| accept_if_legal(p, me, c)) {
             return cards;
         }
     }
@@ -804,7 +826,9 @@ fn choose_play(
     } else {
         heuristics::ranked_follows(p, me)
     };
-    if let Some(cards) = pick_from_ranked(&ranked, knobs.temperature, &mut rng) {
+    if let Some(cards) = pick_from_ranked(&ranked, knobs.temperature, &mut rng)
+        .and_then(|c| accept_if_legal(p, me, c))
+    {
         return cards;
     }
 

@@ -1,4 +1,11 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
+
+// The visited-set is the hottest hashing site in the rules engine: each key is a
+// nested `BTreeMap` of card assignments, and the matcher probes it once per
+// expanded state. SipHash's setup dominates for keys this shape. This set is only
+// ever probed and inserted into — NEVER iterated — so the hasher cannot influence
+// which decomposition is produced; it is a pure speed change.
+use rustc_hash::FxHashSet as HashSet;
 use std::iter::Peekable;
 
 use anyhow::Error;
@@ -19,7 +26,7 @@ pub fn find_format_matches(
         format_seq: format,
         queue,
         cards,
-        visited: HashSet::new(),
+        visited: HashSet::default(),
     }
 }
 
