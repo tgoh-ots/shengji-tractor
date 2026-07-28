@@ -2,7 +2,7 @@
 name = "wasm-rpc-impl"
 version = "0.1.0"
 authors = ["Shengji Online contributors"]
-edition = "2018"
+edition = "2021"
 publish = false
 
 [dependencies]

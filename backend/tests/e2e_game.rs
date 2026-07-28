@@ -539,8 +539,7 @@ async fn e2e_suggest_play_returns_legal_play_from_own_hand() {
             );
             assert!(
                 cards.iter().all(|c| *c != Card::Unknown),
-                "a suggestion must never contain a redacted card: {:?}",
-                cards
+                "a suggestion must never contain a redacted card: {cards:?}"
             );
             // Independently confirm, against our OWN redacted view of the
             // position we asked about, that the advice is (a) drawn entirely
@@ -560,10 +559,7 @@ async fn e2e_suggest_play_returns_legal_play_from_own_hand() {
                     p.can_play_cards(me, &cards)
                         .expect("the suggested play must be legal in the position we asked about");
                 }
-                other => panic!(
-                    "expected to have asked during the Play phase, got {:?}",
-                    other
-                ),
+                other => panic!("expected to have asked during the Play phase, got {other:?}"),
             }
             suggested = Some(cards.clone());
             send_action(&mut socket, &Action::PlayCards(cards)).await;
@@ -574,8 +570,7 @@ async fn e2e_suggest_play_returns_legal_play_from_own_hand() {
         if let Some(err) = msg.get("Error") {
             assert!(
                 !submitted,
-                "the server rejected the play it suggested to us: {}",
-                err
+                "the server rejected the play it suggested to us: {err}"
             );
             eprintln!("server error message: {err}");
             continue;
@@ -642,8 +637,7 @@ async fn e2e_suggest_play_returns_legal_play_from_own_hand() {
     let cards = suggested.expect("never received a PlaySuggestion reply from the server");
     assert!(
         accepted,
-        "the suggested play {:?} was never applied by the server",
-        cards
+        "the suggested play {cards:?} was never applied by the server"
     );
 
     let _ = socket.close(None).await;

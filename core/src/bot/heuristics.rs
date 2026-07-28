@@ -6152,8 +6152,7 @@ mod tests {
         }
         assert!(
             checked > 200,
-            "expected broad coverage, only checked {} candidates",
-            checked
+            "expected broad coverage, only checked {checked} candidates"
         );
     }
 

@@ -212,6 +212,7 @@ impl<S: State> Storage<S, RedisStorageError> for RedisStorage<S> {
             Self::game_key(&key),
             self.connection_manager.clone(),
             async move {
+                let _ = &__self;
                 let old_s = Self::get(key.clone(), &mut connection_manager).await?;
                 let old_v = old_s.version();
                 let (new_state, messages) = operation(old_s)?;
