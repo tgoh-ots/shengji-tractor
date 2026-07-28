@@ -2169,9 +2169,19 @@ fn rollout(
                     ranked.remove(0)
                 };
                 let mut cards = pick;
-                // Defensive: if the chosen play is somehow illegal in this
-                // determinized world, fall back to any legal candidate.
-                if sim.play_cards(actor, &cards).is_err() {
+                // `rollout_ranked` generated this candidate against `sim` itself,
+                // and every follow it produces was admitted by
+                // `heuristics::push_legal_candidate`, which validates against that
+                // same position; a lead's cheap suit-count check still runs inside
+                // `play_cards_prevalidated`. So re-running the combinatorial
+                // follow-legality matcher here is provably redundant, and this is
+                // the hottest play site in the engine (a rollout plays out most of
+                // a hand for every candidate in every sampled world).
+                //
+                // Everything protective still runs — turn order, hand containment,
+                // format construction — so a mistaken candidate cannot corrupt the
+                // trick or the hands, and the fallback below still catches it.
+                if sim.play_cards_prevalidated(actor, &cards).is_err() {
                     // Try other candidates.
                     let mut alts = if leading {
                         let ctx = if policy == Policy::EnochHeuristic {

@@ -546,17 +546,41 @@ impl PlayPhase {
         self.play_cards_with_hint(id, cards, None)
     }
 
+    /// [`Self::play_cards`] for a caller that has ALREADY validated this exact
+    /// play in this exact position — i.e. the bot search applying a move that
+    /// came straight from a legal-candidate generator run against this same
+    /// state. Skips only the expensive follow-legality matcher; see
+    /// [`Trick::play_cards_prevalidated`] for exactly what is and is not still
+    /// checked.
+    pub(crate) fn play_cards_prevalidated(
+        &mut self,
+        id: PlayerID,
+        cards: &[Card],
+    ) -> Result<Vec<MessageVariant>, Error> {
+        self.play_cards_impl(id, cards, None, false)
+    }
+
     pub fn play_cards_with_hint(
         &mut self,
         id: PlayerID,
         cards: &[Card],
         format_hint: Option<&'_ [TrickUnit]>,
     ) -> Result<Vec<MessageVariant>, Error> {
+        self.play_cards_impl(id, cards, format_hint, true)
+    }
+
+    fn play_cards_impl(
+        &mut self,
+        id: PlayerID,
+        cards: &[Card],
+        format_hint: Option<&'_ [TrickUnit]>,
+        verify_format_legality: bool,
+    ) -> Result<Vec<MessageVariant>, Error> {
         if self.game_ended_early {
             bail!("Game has already ended; cards can't be played");
         }
 
-        let mut msgs = self.trick.play_cards(PlayCards {
+        let args = PlayCards {
             id,
             hands: &mut self.hands,
             cards,
@@ -567,7 +591,12 @@ impl PlayPhase {
             tractor_requirements: self.propagated.tractor_requirements,
             bomb_policy: self.propagated.bomb_policy,
             compound_formats: self.propagated.compound_formats.clone(),
-        })?;
+        };
+        let mut msgs = if verify_format_legality {
+            self.trick.play_cards(args)?
+        } else {
+            self.trick.play_cards_prevalidated(args)?
+        };
         if self.propagated.hide_played_cards {
             for msg in &mut msgs {
                 match msg {
