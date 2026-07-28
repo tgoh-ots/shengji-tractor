@@ -674,7 +674,7 @@ fn test_difficulty_ladder_mixed_tier_self_play_quick() {
     // A tiny per-decision budget keeps the search tiers fast in a debug test
     // build (the assertion below is completion-only, so a starved search is
     // fine here).
-    std::env::set_var("SHENGJI_BOT_BUDGET_MS", "5");
+    let _budget = crate::bot::policy::scoped_search_budget_ms(5);
 
     // Drive a couple of mixed-tier all-bot hands across every tier pairing and
     // assert each one runs to completion and attributes a winner. A small game
@@ -719,7 +719,7 @@ fn test_difficulty_ladder_mixed_tier_self_play_quick() {
 #[test]
 #[ignore]
 fn test_difficulty_ladder_monotonic() {
-    std::env::set_var("SHENGJI_BOT_BUDGET_MS", "60");
+    let _budget = crate::bot::policy::scoped_search_budget_ms(60);
     let games = 60;
 
     // Perfect-information ceiling: Omniscient (cheating, full search over the
@@ -1479,7 +1479,7 @@ fn test_suggest_play_ignores_other_seats_real_cards() {
 fn test_omniscient_self_play_runs_to_finished_hand() {
     let logger = null_logger();
     // Keep the perfect-info search fast in a debug build.
-    std::env::set_var("SHENGJI_BOT_BUDGET_MS", "10");
+    let _budget = crate::bot::policy::scoped_search_budget_ms(10);
 
     for trial in 0..3 {
         let (mut game, bot_ids) = setup_all_bot_game_with(&logger, BotDifficulty::Omniscient);
@@ -1670,7 +1670,7 @@ fn test_reset_with_bots_returns_to_lobby() {
 /// proving `advance_bots` never spins when a reset is pending.
 #[test]
 fn test_reset_with_bots_terminates_for_search_tier() {
-    std::env::set_var("SHENGJI_BOT_BUDGET_MS", "5");
+    let _budget = crate::bot::policy::scoped_search_budget_ms(5);
     let logger = null_logger();
     let (mut game, host, _all_ids) = human_plus_bots_in_play(&logger, BotDifficulty::Expert);
 

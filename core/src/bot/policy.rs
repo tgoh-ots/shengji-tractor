@@ -236,10 +236,51 @@ fn select_action_impl(
     }
 }
 
+std::thread_local! {
+    /// Per-THREAD search-budget override, in milliseconds.
+    ///
+    /// This exists so tests and benchmarks can shrink the budget without
+    /// mutating a process-global. `SHENGJI_BOT_BUDGET_MS` is read by every bot
+    /// decision, and `cargo test` runs tests in parallel *in one process*, so a
+    /// test that set the environment variable silently changed the budget of
+    /// every other bot test running at that moment — which made timing-sensitive
+    /// tests flaky in a way that was very hard to attribute. A thread-local
+    /// cannot leak across concurrently running tests.
+    ///
+    /// A single search is single-threaded (it never spawns), so an override set
+    /// on the calling thread applies to the whole decision. The production
+    /// server never sets it, so serving falls through to the environment/default
+    /// exactly as before.
+    static THREAD_SEARCH_BUDGET_MS: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Restores the previous thread-local budget when dropped, so an override can
+/// never outlive the scope that established it (libtest may reuse a thread, e.g.
+/// under `--test-threads=1`).
+#[must_use = "the budget override is reverted as soon as this guard is dropped"]
+pub struct SearchBudgetGuard(Option<u64>);
+
+impl Drop for SearchBudgetGuard {
+    fn drop(&mut self) {
+        THREAD_SEARCH_BUDGET_MS.with(|slot| slot.set(self.0));
+    }
+}
+
+/// Override the per-decision search budget for the CURRENT THREAD until the
+/// returned guard is dropped. Prefer this over setting `SHENGJI_BOT_BUDGET_MS`
+/// from a test: the environment is process-global and leaks across parallel
+/// tests, while this does not.
+pub fn scoped_search_budget_ms(budget_ms: u64) -> SearchBudgetGuard {
+    let previous = THREAD_SEARCH_BUDGET_MS.with(|slot| slot.replace(Some(budget_ms)));
+    SearchBudgetGuard(previous)
+}
+
 /// The search-tier wall-clock budget in milliseconds. Defaults to 2200ms;
-/// overridable via the `SHENGJI_BOT_BUDGET_MS` environment variable so the
-/// self-play eval harness (and the test suite) can trade strength for speed in
-/// bulk runs.
+/// overridable per-thread via [`scoped_search_budget_ms`] (preferred — this is
+/// what tests use) or process-wide via the `SHENGJI_BOT_BUDGET_MS` environment
+/// variable, so the self-play eval harness can trade strength for speed in bulk
+/// runs. The environment value is read once and cached.
 ///
 /// # Why 2200ms is safe in production
 ///
@@ -253,11 +294,20 @@ fn select_action_impl(
 /// giving the determinized search markedly more worlds/depth than the old 1000ms.
 /// Tests override this to a few ms, so the suite stays fast.
 fn search_budget_ms() -> u64 {
-    std::env::var("SHENGJI_BOT_BUDGET_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(2200)
+    if let Some(budget) = THREAD_SEARCH_BUDGET_MS.with(|slot| slot.get()) {
+        return budget;
+    }
+    // Cached: this is read on every bot decision, and the environment cannot
+    // change meaningfully at runtime now that overrides are thread-scoped. The
+    // benchmarks that set this variable all do so once, before any search runs.
+    static ENV_BUDGET_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *ENV_BUDGET_MS.get_or_init(|| {
+        std::env::var("SHENGJI_BOT_BUDGET_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(2200)
+    })
 }
 
 /// Read a `usize` tuning knob from the environment, falling back to `default`
