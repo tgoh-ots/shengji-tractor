@@ -297,17 +297,19 @@ fn search_budget_ms() -> u64 {
     if let Some(budget) = THREAD_SEARCH_BUDGET_MS.with(|slot| slot.get()) {
         return budget;
     }
-    // Cached: this is read on every bot decision, and the environment cannot
-    // change meaningfully at runtime now that overrides are thread-scoped. The
-    // benchmarks that set this variable all do so once, before any search runs.
-    static ENV_BUDGET_MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *ENV_BUDGET_MS.get_or_init(|| {
-        std::env::var("SHENGJI_BOT_BUDGET_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .filter(|&v| v > 0)
-            .unwrap_or(2200)
-    })
+    // Deliberately NOT cached. This is read once per bot DECISION (not per ply),
+    // so against a budget measured in hundreds of milliseconds the lookup is
+    // free — while caching it would break a legitimate use: the backend e2e
+    // tests drive a real server across threads, where a thread-local override
+    // cannot reach the server's `spawn_blocking` workers, so setting this
+    // variable at runtime is their only way to make one test's bot think slowly
+    // and another's think fast. A first-read-wins cache silently gives them the
+    // wrong budget.
+    std::env::var("SHENGJI_BOT_BUDGET_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(2200)
 }
 
 /// Read a `usize` tuning knob from the environment, falling back to `default`
