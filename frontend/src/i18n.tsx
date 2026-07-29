@@ -37,6 +37,8 @@ const en: Dict = {
   "brand.home": "Leave room and return to the home screen",
   "brand.tractor": "Tractor",
   "brand.findingFriends": "Finding Friends",
+  "gameMode.rules": "rules",
+  "gameMode.strategy": "strategy",
 
   // Language / settings toggles
   "toolbar.language": "中文",
@@ -53,6 +55,7 @@ const en: Dict = {
   "join.intro":
     "Welcome to the game! Enter your name above to create a new game, or (re-)join the game if it already exists.",
   "join.readRules": "read the rules",
+  "join.readStrategy": "read the strategy guide",
   "join.shareIntro":
     "Once you are in the game, share the room link with at least three friends to start playing!",
   "lobby.shareLink":
@@ -222,6 +225,8 @@ const zh: Dict = {
   "brand.home": "离开房间并返回主页",
   "brand.tractor": "Tractor",
   "brand.findingFriends": "Finding Friends",
+  "gameMode.rules": "规则",
+  "gameMode.strategy": "策略",
 
   "toolbar.language": "English",
   "toolbar.settings": "设置",
@@ -236,6 +241,7 @@ const zh: Dict = {
   "join.intro":
     "欢迎！在上方输入你的名字来创建新游戏，或重新加入已存在的游戏。",
   "join.readRules": "阅读规则",
+  "join.readStrategy": "阅读策略指南",
   "join.shareIntro": "进入游戏后，把房间链接分享给至少三位朋友即可开始！",
   "lobby.shareLink": "把链接发送给其他玩家，邀请他们加入游戏：",
   "lobby.start": "开始游戏",

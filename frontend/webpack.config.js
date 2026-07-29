@@ -68,7 +68,7 @@ module.exports = {
     minimizer: [
       (compiler) => () => {
         new TerserJsPlugin({ terserOptions: { sourceMap: true } }).apply(
-          compiler
+          compiler,
         );
       },
       new CssMinimizerPlugin({}),
@@ -104,6 +104,23 @@ module.exports = {
         {
           from: "static/rules.js",
           to: "rules.js",
+        },
+        {
+          from: "static/strategy.html",
+          to: "strategy.html",
+        },
+        {
+          from: "static/strategy.js",
+          to: "strategy.js",
+        },
+        // Shared by rules.html + strategy.html (see static/guide.css).
+        {
+          from: "static/guide.css",
+          to: "guide.css",
+        },
+        {
+          from: "static/guide-common.js",
+          to: "guide-common.js",
         },
         {
           from: "static/rules-cards.json",

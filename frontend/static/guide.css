@@ -1,0 +1,632 @@
+/*
+ * Shared chrome for the standalone guide pages (rules.html, strategy.html).
+ *
+ * Extracted verbatim from rules.html's former inline <style> block so both
+ * pages render identically; the strategy page appends its own components
+ * (top nav, CSS-only tab switch, scenario cards) at the bottom of this file.
+ *
+ * Loaded as an external, same-origin stylesheet, so it works under the
+ * production CSP with no inline <style> needed.
+ */
+
+/*
+ * Standalone rules page styling — DARK theme to match the app.
+ *
+ * Design goals (see the rules-v2 redesign):
+ *   - Dark felt-ish background with light, legible body text.
+ *   - A single, centered, comfortably-wide reading COLUMN. Everything
+ *     (prose, headings, tables, card examples) shares the same column so
+ *     there is no giant left gap with right-shifted text.
+ *   - Card examples render as REAL card faces (inline SVG injected by
+ *     rules.js) sitting on crisp WHITE card faces, directly above their
+ *     explanatory label — clearly visible against the dark page.
+ *   - The Tractor / Finding-Friends switch is CSS-ONLY (hidden radio
+ *     inputs + :checked sibling selectors) so it cannot break under the
+ *     production CSP, with no inline JS and no event-handler attributes.
+ */
+:root {
+  color-scheme: dark;
+  --rules-bg: #0f2a27;
+  --rules-bg-2: #0b201d;
+  --rules-surface: #14322e;
+  --rules-surface-2: #1b3d38;
+  --rules-ink: #eef3f1;
+  --rules-ink-soft: #b6c6c1;
+  --rules-ink-faint: #8aa19b;
+  --rules-line: #2c504a;
+  --rules-line-strong: #3a635c;
+  --rules-accent: #f2b66d;
+  --rules-accent-strong: #e89a3c;
+  --rules-accent-ink: #1c1206;
+  --rules-accent-soft: rgba(242, 182, 109, 0.12);
+  --rules-card-face: #ffffff;
+  --rules-maxw: 70ch;
+}
+
+html,
+body.rules {
+  background:
+    radial-gradient(
+      120% 70% at 50% 0%,
+      var(--rules-bg) 0%,
+      var(--rules-bg-2) 70%
+    ),
+    var(--rules-bg-2);
+  background-attachment: fixed;
+}
+
+body.rules {
+  margin: 0;
+  /* generous bottom padding so the page never ends flush with content */
+  padding: 2.5rem 1.25rem 7rem;
+  color: var(--rules-ink);
+  line-height: 1.7;
+  font-size: 1.0625rem;
+  font-family:
+    "Inter",
+    "Noto Sans SC",
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+  /* Center inline card-example boxes (grouped examples flow in a row,
+   * centered); prose blocks are re-aligned left below so text reads
+   * normally. */
+  text-align: center;
+}
+
+/* One readable column: center every direct child to the same width. */
+body.rules > * {
+  max-width: var(--rules-maxw);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Prose + headings read left-aligned; only the card examples center. */
+body.rules p,
+body.rules ul,
+body.rules ol,
+body.rules li,
+body.rules h2,
+body.rules h3,
+body.rules h4,
+body.rules h5,
+body.rules table,
+body.rules > label,
+body.rules > select,
+body.rules .labeled-play .label {
+  text-align: left;
+}
+
+body.rules h1 {
+  max-width: var(--rules-maxw);
+  margin: 0 auto 0.75rem;
+  font-size: clamp(1.9rem, 4vw, 2.6rem);
+  font-weight: 800;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  text-align: center;
+  color: #fff;
+}
+
+body.rules h2 {
+  margin: 2.75rem auto 0.85rem;
+  padding-bottom: 0.4rem;
+  font-size: 1.6rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: #fff;
+  border-bottom: 2px solid var(--rules-line-strong);
+  scroll-margin-top: 1rem;
+}
+
+body.rules h3 {
+  margin: 2rem auto 0.65rem;
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--rules-accent);
+}
+
+body.rules h4 {
+  margin: 1.6rem auto 0.5rem;
+  font-size: 1.12rem;
+  font-weight: 700;
+  color: #fff;
+}
+
+body.rules h5 {
+  margin: 1.4rem auto 0.4rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--rules-ink-soft);
+}
+
+body.rules p {
+  margin: 0 auto 1.1rem;
+  color: var(--rules-ink);
+}
+
+body.rules a {
+  color: var(--rules-accent);
+  text-underline-offset: 2px;
+}
+body.rules a:hover {
+  text-decoration: none;
+}
+
+body.rules ul,
+body.rules ol {
+  margin: 0 auto 1.25rem;
+  padding-left: 1.5rem;
+  color: var(--rules-ink);
+}
+body.rules li {
+  margin-bottom: 0.4rem;
+}
+body.rules li::marker {
+  color: var(--rules-accent);
+}
+
+/* Lead paragraph below the title. */
+body.rules .lede {
+  text-align: center;
+  color: var(--rules-ink-soft);
+  font-size: 1.05rem;
+  margin-bottom: 1.5rem;
+}
+
+/* ---------------------------------------------------------------
+ * Finding-Friends-only content.
+ *
+ * The page is a single continuous read: the base (Tractor) rules are
+ * always shown, and the Finding-Friends-specific material lives inline in
+ * a distinct, always-visible callout (.ff-section) so it is obvious that
+ * those instructions apply only to the Finding Friends variant. There is
+ * no mode toggle.
+ * --------------------------------------------------------------- */
+.ff-only {
+  display: block;
+}
+.ff-section {
+  margin: 2rem auto;
+  padding: 1.25rem 1.5rem 0.4rem;
+  border: 1px solid var(--rules-line-strong);
+  border-left: 5px solid var(--rules-accent);
+  border-radius: 0.75rem;
+  background: var(--rules-accent-soft);
+}
+.ff-section h3,
+.ff-section h4 {
+  margin-top: 0.4rem;
+  color: var(--rules-accent);
+}
+.ff-section .ff-badge {
+  display: inline-block;
+  margin-bottom: 0.5rem;
+  padding: 0.15rem 0.7rem;
+  border-radius: 999px;
+  background: var(--rules-accent);
+  color: var(--rules-accent-ink);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* The round-result deck selector. */
+body.rules select {
+  display: block;
+  margin: 0 auto 1rem;
+  padding: 0.45rem 0.7rem;
+  border-radius: 0.6rem;
+  background: var(--rules-surface-2);
+  color: var(--rules-ink);
+  border: 1px solid var(--rules-line-strong);
+  font-size: 1rem;
+  font-family: inherit;
+}
+
+/* Readable tables. */
+body.rules table {
+  width: 100%;
+  max-width: var(--rules-maxw);
+  margin: 0 auto 1.5rem;
+  border-collapse: collapse;
+  background: var(--rules-surface);
+  border: 1px solid var(--rules-line-strong) !important;
+  border-radius: 0.6rem;
+  overflow: hidden;
+  font-size: 0.98rem;
+  color: var(--rules-ink);
+}
+body.rules table thead td {
+  background: var(--rules-surface-2);
+  font-weight: 700;
+  color: #fff;
+}
+body.rules table td {
+  padding: 0.55rem 0.85rem;
+  border: 1px solid var(--rules-line) !important;
+  text-align: left;
+  vertical-align: top;
+}
+body.rules table tbody tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+/* ---------------------------------------------------------------
+ * Card-example panels. Each labelled play is a tidy panel; the card
+ * faces inside are real SVG (injected by rules.js) on white card faces.
+ * Panels flow inline and wrap, so examples sit in the reading column
+ * directly above their label rather than floating far left.
+ * --------------------------------------------------------------- */
+body.rules .labeled-play {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  vertical-align: top;
+  margin: 0 0.35rem 1rem;
+  padding: 0.6rem 0.7rem 0.6rem;
+  background: var(--rules-surface);
+  border: 1px solid var(--rules-line);
+  border-radius: 0.75rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  max-width: min(100%, 60rem);
+}
+body.rules .labeled-play .play {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: flex-end;
+  min-height: 1em;
+}
+body.rules .labeled-play .label {
+  margin-top: 0.55rem;
+  color: var(--rules-ink-soft);
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+/*
+ * Rendered card faces: rules.js replaces each `.card` example with an
+ * inline <svg> card. We give it a fixed display size + a white rounded
+ * face so the suit + rank always read crisply on the dark page.
+ */
+body.rules .card {
+  display: inline-flex;
+  line-height: 0;
+}
+body.rules .card svg {
+  display: block;
+  height: 84px;
+  width: auto;
+  background: var(--rules-card-face);
+  border-radius: 7px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+@media (max-width: 520px) {
+  body.rules .card svg {
+    height: 64px;
+  }
+}
+
+/*
+ * Inline TEXT references to suits/jokers in running prose
+ * (e.g. "diamonds (♢)", "4♤", "big joker") keep the four-color hue for
+ * the suit symbol while staying legible against the dark background.
+ */
+body.rules p .♢,
+body.rules p .♡,
+body.rules p .♤,
+body.rules p .♧,
+body.rules p .🃟,
+body.rules p .🃏,
+body.rules li .♢,
+body.rules li .♡,
+body.rules li .♤,
+body.rules li .♧,
+body.rules li .🃟,
+body.rules li .🃏,
+body.rules .label .♢,
+body.rules .label .♡,
+body.rules .label .♤,
+body.rules .label .♧,
+body.rules .label .🃟,
+body.rules .label .🃏 {
+  font-weight: 700;
+  white-space: nowrap;
+}
+/* Four-color hues for inline suit/term references (tuned for dark bg). */
+body.rules p .♢,
+body.rules li .♢,
+body.rules .label .♢ {
+  color: #6f9bff;
+}
+body.rules p .♡,
+body.rules li .♡,
+body.rules .label .♡,
+body.rules p .🃏,
+body.rules li .🃏,
+body.rules .label .🃏 {
+  color: #ff6b6b;
+}
+body.rules p .♧,
+body.rules li .♧,
+body.rules .label .♧ {
+  color: #5fcf7a;
+}
+body.rules p .♤,
+body.rules li .♤,
+body.rules .label .♤,
+body.rules p .🃟,
+body.rules li .🃟,
+body.rules .label .🃟 {
+  color: var(--rules-ink);
+}
+
+/* --- Language switching (?lang=en|zh) ---
+ *
+ * `!important` is load-bearing, not laziness: these two selectors are only
+ * (0,2,1), so ANY component rule that sets `display` on an element through a
+ * deeper selector — e.g. `body.rules .play-call .tag { display: inline-block }`
+ * at (0,3,1) — silently wins and leaks the hidden language onto the page.
+ * English mode must show no Chinese and vice versa, so the gate outranks every
+ * component. Keep it that way when adding new components below. */
+body.lang-en .lang-zh {
+  display: none !important;
+}
+body.lang-zh .lang-en {
+  display: none !important;
+}
+
+/* ===================================================================
+ * Guide-page top navigation (rules.html <-> strategy.html <-> app).
+ * Sits above the <h1> on both pages; the active link is highlighted via
+ * a `data-guide` attribute the page's script matches against its own name.
+ * =================================================================== */
+body.rules .guide-nav {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.4rem;
+  margin: 0 auto 1.75rem;
+  padding: 0.35rem;
+  background: var(--rules-surface);
+  border: 1px solid var(--rules-line);
+  border-radius: 999px;
+  text-align: center;
+}
+body.rules .guide-nav a {
+  padding: 0.35rem 0.95rem;
+  border-radius: 999px;
+  color: var(--rules-ink-soft);
+  font-size: 0.92rem;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+body.rules .guide-nav a:hover {
+  background: var(--rules-surface-2);
+  color: var(--rules-ink);
+}
+body.rules .guide-nav a[aria-current="page"] {
+  background: var(--rules-accent);
+  color: var(--rules-accent-ink);
+}
+
+/* ===================================================================
+ * CSS-only tab switch (Basics / Advanced).
+ *
+ * Hidden radio inputs + :checked sibling selectors, exactly like the rules
+ * page's mode switch: it must work under the production CSP with no inline
+ * JS and no event-handler attributes. The panels are siblings of the inputs
+ * so `#tab-basics:checked ~ .tab-panels #panel-basics` can reach them.
+ * =================================================================== */
+body.rules .tab-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+body.rules .tab-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.4rem;
+  margin: 0 auto 2rem;
+  padding: 0.35rem;
+  background: var(--rules-surface);
+  border: 1px solid var(--rules-line-strong);
+  border-radius: 999px;
+}
+body.rules .tab-bar label {
+  display: inline-block;
+  padding: 0.45rem 1.2rem;
+  border-radius: 999px;
+  color: var(--rules-ink-soft);
+  font-weight: 700;
+  font-size: 0.98rem;
+  cursor: pointer;
+  user-select: none;
+  text-align: center;
+}
+body.rules .tab-bar label:hover {
+  background: var(--rules-surface-2);
+  color: var(--rules-ink);
+}
+#tab-basics:checked ~ .tab-bar label[for="tab-basics"],
+#tab-advanced:checked ~ .tab-bar label[for="tab-advanced"] {
+  background: var(--rules-accent);
+  color: var(--rules-accent-ink);
+}
+/* Keyboard focus must stay visible even though the input itself is clipped. */
+#tab-basics:focus-visible ~ .tab-bar label[for="tab-basics"],
+#tab-advanced:focus-visible ~ .tab-bar label[for="tab-advanced"] {
+  outline: 2px solid var(--rules-accent);
+  outline-offset: 2px;
+}
+body.rules .tab-panels > .tab-panel {
+  display: none;
+}
+#tab-basics:checked ~ .tab-panels > #panel-basics,
+#tab-advanced:checked ~ .tab-panels > #panel-advanced {
+  display: block;
+}
+/* The panels are a wrapper element, so re-apply the single reading column to
+ * their children (body.rules > * only reaches direct children of <body>). */
+body.rules .tab-panel > * {
+  max-width: var(--rules-maxw);
+  margin-left: auto;
+  margin-right: auto;
+}
+body.rules .tab-panel > h2:first-child {
+  margin-top: 0;
+}
+
+/* ===================================================================
+ * Strategy-page content blocks.
+ * =================================================================== */
+
+/* A short, scannable "do this" rule of thumb. */
+body.rules .key-point {
+  margin: 1.25rem auto;
+  padding: 0.9rem 1.1rem;
+  background: var(--rules-accent-soft);
+  border: 1px solid var(--rules-accent-strong);
+  border-left-width: 4px;
+  border-radius: 0.7rem;
+  color: var(--rules-ink);
+  text-align: left;
+}
+body.rules .key-point p {
+  margin: 0;
+}
+body.rules .key-point .key-label {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: var(--rules-accent);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* A worked example hand / scenario. */
+body.rules .scenario {
+  margin: 1.5rem auto 2rem;
+  padding: 1.1rem 1.2rem 1.2rem;
+  background: var(--rules-surface);
+  border: 1px solid var(--rules-line-strong);
+  border-radius: 0.9rem;
+  text-align: left;
+}
+body.rules .scenario > h4 {
+  margin-top: 0;
+}
+body.rules .scenario .setup {
+  margin: 0 0 0.85rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px dashed var(--rules-line-strong);
+  color: var(--rules-ink-soft);
+  font-size: 0.95rem;
+}
+body.rules .scenario .verdict {
+  margin-top: 0.9rem;
+  padding-top: 0.75rem;
+  border-top: 1px dashed var(--rules-line-strong);
+}
+body.rules .scenario .verdict strong {
+  color: var(--rules-accent);
+}
+
+/* Inline card row inside a scenario — smaller faces than the big rules-page
+ * examples so a whole 25-card hand still fits the reading column. */
+body.rules .hand-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: flex-end;
+  margin: 0.35rem 0 0.9rem;
+}
+body.rules .hand-row .card svg {
+  height: 58px;
+}
+@media (max-width: 520px) {
+  body.rules .hand-row .card svg {
+    height: 42px;
+  }
+}
+/* A visual gap between suit groups within one hand. */
+body.rules .hand-row .suit-gap {
+  width: 0.9rem;
+}
+
+/* Good/bad play call-outs inside a scenario. */
+body.rules .play-call {
+  margin: 0.6rem 0;
+  padding: 0.5rem 0.8rem;
+  border-radius: 0.55rem;
+  border-left: 4px solid var(--rules-line-strong);
+  background: rgba(255, 255, 255, 0.03);
+}
+body.rules .play-call.good {
+  border-left-color: #5fcf7a;
+}
+body.rules .play-call.bad {
+  border-left-color: #ff6b6b;
+}
+body.rules .play-call .tag {
+  display: inline-block;
+  margin-right: 0.45rem;
+  font-weight: 700;
+}
+body.rules .play-call.good .tag {
+  color: #5fcf7a;
+}
+body.rules .play-call.bad .tag {
+  color: #ff6b6b;
+}
+
+/* Table-of-contents list at the top of a tab panel. */
+body.rules .toc {
+  margin: 0 auto 2rem;
+  padding: 0.9rem 1.1rem 0.9rem 2.2rem;
+  background: var(--rules-surface);
+  border: 1px solid var(--rules-line);
+  border-radius: 0.75rem;
+}
+body.rules .toc li {
+  margin: 0.2rem 0;
+}
+
+/* The app's stylesheet (a Tailwind preflight) strips list markers globally.
+ * The strategy page's ordered lists are read as steps in priority order, so
+ * restore real markers — scoped to the strategy panels so the rules page keeps
+ * its existing unmarked look. */
+body.rules .tab-panel ol {
+  list-style: decimal outside;
+}
+body.rules .tab-panel ul {
+  list-style: disc outside;
+}
+body.rules .tab-panel li {
+  margin: 0.35rem 0;
+  padding-left: 0.2rem;
+}
+body.rules .tab-panel li::marker {
+  color: var(--rules-accent);
+  font-weight: 700;
+}

@@ -1,0 +1,1645 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <title>Tractor / Finding Friends Strategy</title>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" type="text/css" href="style.css" />
+    <link rel="stylesheet" type="text/css" href="guide.css" />
+  </head>
+  <!--
+    Standalone strategy guide. Same shape as rules.html: dark reading column,
+    bilingual via body.lang-en / body.lang-zh, real SVG card faces injected by
+    guide-common.js, and NO inline JS or event-handler attributes so the page
+    works under the production CSP (script-src 'self').
+
+    The Basics / Advanced switch is CSS-ONLY (hidden radio inputs + :checked
+    sibling selectors), exactly like the rules page's mode switch, so it works
+    with JavaScript disabled. strategy.js only adds the ?tab= deep-link.
+
+    The content is the strategy the site's strongest honest bots actually play:
+    the Enoch playbook (docs/strategy/*.txt, implemented in the *_enoch scorers
+    in core/src/bot/heuristics.rs) and the Grandmaster search on top of it. If
+    you change the bots' strategy in a user-visible way, update this page too.
+  -->
+  <body id="body" class="rules lang-en four-color">
+    <nav class="guide-nav" id="guide-nav" data-guide="strategy">
+      <a href="../" data-nav="app"
+        ><span class="lang-en">Play</span
+        ><span class="lang-zh">开始游戏</span></a
+      >
+      <a href="rules.html" data-nav="rules"
+        ><span class="lang-en">Rules</span><span class="lang-zh">规则</span></a
+      >
+      <a href="strategy.html" data-nav="strategy"
+        ><span class="lang-en">Strategy</span
+        ><span class="lang-zh">策略</span></a
+      >
+    </nav>
+
+    <h1>
+      <span class="lang-zh">升级 与 找朋友 策略指南</span>
+      <span class="lang-en">Tractor &amp; Finding Friends Strategy</span>
+    </h1>
+
+    <p class="lede">
+      <span class="lang-en"
+        >How to actually play well — not the rules, but the decisions. This
+        guide assumes you already know how a trick works; if not,
+        <a href="rules.html">read the rules first</a>. Everything here is the
+        strategy the site's strongest honest bots (<strong>Enoch</strong> and
+        <strong>Grandmaster</strong>) really use: a playbook transcribed from a
+        strong human player, then tested over millions of self-play hands.</span
+      >
+      <span class="lang-zh"
+        >这不是规则，而是如何打得更好——即每一步该怎么决策。本指南假定你已经了解一轮牌是怎么进行的；如果还不了解，请先<a
+          href="rules.html"
+          >阅读规则</a
+        >。这里的内容正是本站最强的诚实机器人（<strong>Enoch</strong> 与
+        <strong>Grandmaster</strong
+        >）实际使用的策略：先由一位高水平玩家口述成打法手册，再经过数百万局自我对弈验证。</span
+      >
+    </p>
+
+    <!-- CSS-only tab switch. The inputs must precede .tab-bar and .tab-panels
+         so the `:checked ~` sibling selectors in guide.css can reach them. -->
+    <input
+      class="tab-input"
+      type="radio"
+      name="strategy-tab"
+      id="tab-basics"
+      checked
+    />
+    <input
+      class="tab-input"
+      type="radio"
+      name="strategy-tab"
+      id="tab-advanced"
+    />
+    <div class="tab-bar" role="tablist">
+      <label for="tab-basics"
+        ><span class="lang-en">Basics</span
+        ><span class="lang-zh">基础策略</span></label
+      >
+      <label for="tab-advanced"
+        ><span class="lang-en">Advanced</span
+        ><span class="lang-zh">进阶策略</span></label
+      >
+    </div>
+
+    <div class="tab-panels">
+      <!-- ============================================================== -->
+      <!-- BASICS                                                          -->
+      <!-- ============================================================== -->
+      <div class="tab-panel" id="panel-basics">
+        <h2>
+          <span class="lang-en">Strategy basics</span
+          ><span class="lang-zh">基础策略</span>
+        </h2>
+
+        <p>
+          <span class="lang-en"
+            >Eight ideas separate a beginner from a solid player. Learn them in
+            order — each one is worth more than every fancy trick in the
+            Advanced tab.</span
+          >
+          <span class="lang-zh"
+            >从新手到稳健玩家，只差八件事。请按顺序掌握它们——每一条的价值都超过“进阶策略”里的任何花招。</span
+          >
+        </p>
+
+        <ol class="toc">
+          <li>
+            <span class="lang-en">Know which side you are on</span
+            ><span class="lang-zh">先弄清楚你在哪一边</span>
+          </li>
+          <li>
+            <span class="lang-en">Count your hand before you do anything</span
+            ><span class="lang-zh">出牌之前先数牌</span>
+          </li>
+          <li>
+            <span class="lang-en">Declare trump on pairs, not just length</span
+            ><span class="lang-zh">亮主看对子，不只看张数</span>
+          </li>
+          <li>
+            <span class="lang-en">Bury the kitty to create a void</span
+            ><span class="lang-zh">扣底的首要目标是缺门</span>
+          </li>
+          <li>
+            <span class="lang-en">Lead aces, then pairs and tractors</span
+            ><span class="lang-zh">先出 A，再出对子和拖拉机</span>
+          </li>
+          <li>
+            <span class="lang-en">Feed your partner, starve your opponents</span
+            ><span class="lang-zh">给队友喂分，绝不给对手送分</span>
+          </li>
+          <li>
+            <span class="lang-en">Remember what has been played</span
+            ><span class="lang-zh">记牌</span>
+          </li>
+          <li>
+            <span class="lang-en">Plan for the last trick</span
+            ><span class="lang-zh">为最后一轮做打算</span>
+          </li>
+        </ol>
+
+        <h3>
+          <span class="lang-en">1. Know which side you are on</span
+          ><span class="lang-zh">1. 先弄清楚你在哪一边</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >The two teams are not playing the same game. The
+            <strong>defending team</strong> (the declarer and their partner)
+            wins by <em>denying</em> points. The
+            <strong>attacking team</strong> wins only by
+            <em>collecting</em> them. Every decision you make should follow from
+            which of those two jobs is yours.</span
+          >
+          <span class="lang-zh"
+            >两队打的其实不是同一个游戏。<strong>防守方</strong>（庄家及其对家）靠<em>拦截</em>分数取胜，<strong>进攻方</strong>只能靠<em>收集</em>分数取胜。你的每一个决定，都应当从“我这一方的任务是什么”出发。</span
+          >
+        </p>
+        <p>
+          <span class="lang-en"
+            >Only <span class="♡">5</span>s (5 points),
+            <span class="♡">10</span>s (10 points) and <span class="♡">K</span>s
+            (10 points) are worth anything. In the standard four-player,
+            two-deck game that is 200 points on the table, and the attackers
+            take over the declaring seat at 80.</span
+          >
+          <span class="lang-zh"
+            >只有 <span class="♡">5</span>（5 分）、<span class="♡">10</span
+            >（10 分）和 <span class="♡">K</span>（10
+            分）算分。在标准的四人两副牌局中，全场共 200 分，进攻方拿到 80
+            分即可夺庄。</span
+          >
+        </p>
+        <div class="key-point">
+          <span class="key-label lang-en">Rule of thumb</span>
+          <span class="key-label lang-zh">要点</span>
+          <p>
+            <span class="lang-en"
+              >Attackers: a trick with no points in it barely matters — chase
+              the tricks that hold <span class="♡">5</span>s,
+              <span class="♡">10</span>s and <span class="♡">K</span>s.
+              Defenders: your goal is not to win tricks, it is to make sure the
+              tricks the attackers win are empty.</span
+            >
+            <span class="lang-zh"
+              >进攻方：没有分的一轮几乎无关紧要——要去抢带
+              <span class="♡">5</span>、<span class="♡">10</span>、<span
+                class="♡"
+                >K</span
+              >
+              的那些轮。防守方：你的目标不是多赢轮次，而是让对手赢到的每一轮都是空的。</span
+            >
+          </p>
+        </div>
+
+        <h3>
+          <span class="lang-en">2. Count your hand before you do anything</span
+          ><span class="lang-zh">2. 出牌之前先数牌</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >Three numbers decide how your whole hand should be played:</span
+          >
+          <span class="lang-zh">三个数字决定你这一手该怎么打：</span>
+        </p>
+        <ul>
+          <li>
+            <span class="lang-en"
+              ><strong>Trump count.</strong> In the four-player, two-deck game
+              an average hand holds about <strong>8–10 trump</strong>. Twelve or
+              more and you can control the hand; six or fewer and you should be
+              playing defensively and dumping points.</span
+            >
+            <span class="lang-zh"
+              ><strong>主牌张数。</strong>在四人两副牌的牌局里，平均一手大约有
+              <strong>8–10 张主牌</strong>。12 张以上，你可以主导这一局；6
+              张以下，就该转为防守、专心处理分牌。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              ><strong>Tops.</strong> Jokers and rank cards. These are your
+              last-trick insurance — count them and do not spend them
+              casually.</span
+            >
+            <span class="lang-zh"
+              ><strong>大牌。</strong
+              >王和级牌。它们是你保最后一轮的保险——先数清楚，别随手打掉。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              ><strong>Boss cards.</strong> Cards nothing left in the deck can
+              beat: side-suit aces, and any card whose superiors have all been
+              played. These are free tricks — but only while they last.</span
+            >
+            <span class="lang-zh"
+              ><strong>最大牌。</strong>场上已无牌能压过它的牌：副牌的
+              A，以及所有比它大的牌都已出完的牌。这些是白拿的轮次——但只在它们还“最大”的时候有效。</span
+            >
+          </li>
+        </ul>
+
+        <h3>
+          <span class="lang-en">3. Declare trump on pairs, not just length</span
+          ><span class="lang-zh">3. 亮主看对子，不只看张数</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >Everyone knows to declare the suit they hold the most of. The part
+            most players get wrong is that a <strong>pair</strong> in the trump
+            suit is worth roughly
+            <strong>three to four loose trump cards</strong>. Two consecutive
+            trump pairs — a tractor in trump — is better still. Pairs win tricks
+            that singles cannot, and they are what lets you beat an opponent's
+            pair-led trick.</span
+          >
+          <span class="lang-zh"
+            >谁都知道要亮自己张数最多的那门花色。多数人搞错的是：主牌花色里的一个<strong>对子</strong>，价值大约相当于
+            <strong>三到四张散主牌</strong
+            >；两个连续的主牌对子（主牌里的拖拉机）更强。对子能赢下散牌赢不了的轮次，也是你压住对手对牌的唯一手段。</span
+          >
+        </p>
+        <div class="key-point">
+          <span class="key-label lang-en">Rule of thumb</span>
+          <span class="key-label lang-zh">要点</span>
+          <p>
+            <span class="lang-en"
+              >Do not declare the moment you legally can. Early in the deal you
+              have seen only a fraction of your cards, and a trump suit you
+              commit to at card six can easily finish short. Also: aces and
+              kings play <em>better</em> as side-suit cards than as trump — a
+              side-suit ace is a free trick, while the same ace inside trump is
+              just another trump.</span
+            >
+            <span class="lang-zh"
+              >不要一能亮就亮。发牌早期你只看到自己一小部分牌，第六张就定下的主牌，很可能最后张数很少。另外：A
+              和 K 当<em>副牌</em>比当主牌更好用——副牌的 A 是白赢一轮，而同一张
+              A 放在主牌里只是又一张主牌而已。</span
+            >
+          </p>
+        </div>
+
+        <h3>
+          <span class="lang-en">4. Bury the kitty to create a void</span
+          ><span class="lang-zh">4. 扣底的首要目标是缺门</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >If you win the declaration you pick up the kitty and bury the same
+            number of cards. The single best thing you can do with it is
+            <strong>void an entire side suit</strong> — once you hold none of a
+            suit, you can ruff it with trump every time it is led, all hand
+            long.</span
+          >
+          <span class="lang-zh"
+            >赢得亮主后你会拿到底牌，并扣回同样张数。扣底能做的最有价值的一件事，就是<strong>把某一门副牌彻底扣光（缺门）</strong>——一旦你这门牌一张不剩，此后每次别人打这门，你都可以用主牌毙掉。</span
+          >
+        </p>
+        <p>
+          <span class="lang-en">Never bury:</span>
+          <span class="lang-zh">绝对不要扣：</span>
+        </p>
+        <ul>
+          <li>
+            <span class="lang-en"
+              ><strong>Aces.</strong> An ace is a trick you can simply
+              take.</span
+            ><span class="lang-zh"
+              ><strong>A。</strong>A 是你随手就能赢下的一轮。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              ><strong>Trump, jokers, or the rank card.</strong> They are your
+              control.</span
+            ><span class="lang-zh"
+              ><strong>主牌、王、级牌。</strong>它们是你的控制力。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              ><strong>Pairs.</strong> The one sanctioned exception is a pair
+              sitting in a short suit you are voiding completely — then the void
+              is worth more than the pair.</span
+            ><span class="lang-zh"
+              ><strong>对子。</strong
+              >唯一被认可的例外，是这个对子正好在你要彻底扣光的那门短花色里——此时缺门的价值高于对子。</span
+            >
+          </li>
+        </ul>
+        <p>
+          <span class="lang-en"
+            >Points in the kitty are a bet. Whoever wins the
+            <strong>last trick</strong> takes the kitty at
+            <strong>double</strong> value, so burying <span class="♡">10</span>s
+            and <span class="♡">K</span>s is profitable only when you expect to
+            win that last trick. Strong hand: bury points. Weak hand: bury
+            none.</span
+          >
+          <span class="lang-zh"
+            >往底牌里扣分是一场赌博。谁赢下<strong>最后一轮</strong>，谁就以<strong>双倍</strong>拿走底牌，所以只有当你有把握赢下最后一轮时，扣
+            <span class="♡">10</span>、<span class="♡">K</span>
+            才划算。手牌强就扣分，手牌弱就一分不扣。</span
+          >
+        </p>
+
+        <h3>
+          <span class="lang-en">5. Lead aces, then pairs and tractors</span
+          ><span class="lang-zh">5. 先出 A，再出对子和拖拉机</span>
+        </h3>
+        <p>
+          <span class="lang-en">When you have the lead, in order:</span>
+          <span class="lang-zh">当你领出时，优先顺序是：</span>
+        </p>
+        <ol>
+          <li>
+            <span class="lang-en"
+              ><strong>Side-suit aces</strong> and any other single that cannot
+              be beaten. Free tricks that also pull out opponents' high
+              cards.</span
+            ><span class="lang-zh"
+              ><strong>副牌的 A</strong
+              >，以及任何已经无人能压的单张。白赢一轮，还能逼出对手的大牌。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              ><strong>Boss pairs and tractors.</strong> Lead them
+              <em>early</em>, before the cards that make them get played
+              separately and the structure falls apart.</span
+            ><span class="lang-zh"
+              ><strong>最大的对子和拖拉机。</strong
+              >要<em>趁早</em>打出去，否则组成它们的牌被拆开打掉，牌型就散了。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              ><strong>A long side suit you control.</strong> Running it drains
+              the opponents' trump.</span
+            ><span class="lang-zh"
+              ><strong>你能控住的长套副牌。</strong
+              >一路走下去可以消耗对手的主牌。</span
+            >
+          </li>
+        </ol>
+        <div class="key-point">
+          <span class="key-label lang-en">Never do this</span>
+          <span class="key-label lang-zh">绝对不要这样做</span>
+          <p>
+            <span class="lang-en"
+              >Do not open a trick with a naked joker or with the rank card. It
+              wins a trick you did not need to win, tells everyone how strong
+              you are, and burns the card that was going to take your last
+              trick. The only exception is a monster trump holding (roughly 15+)
+              where you are deliberately bleeding everyone else dry of
+              trump.</span
+            >
+            <span class="lang-zh"
+              >不要用光杆的王或级牌来领出。它赢下的是一轮你本来不需要赢的牌，还暴露了你的实力，更烧掉了本该给你保最后一轮的那张牌。唯一的例外是你手上主牌极多（大约
+              15 张以上），此时你是在有意把所有人的主牌都抽干。</span
+            >
+          </p>
+        </div>
+
+        <h3>
+          <span class="lang-en"
+            >6. Feed your partner, starve your opponents</span
+          ><span class="lang-zh">6. 给队友喂分，绝不给对手送分</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >When you are not leading, the question is never "what is my best
+            card?" — it is "who is winning this trick?"</span
+          >
+          <span class="lang-zh"
+            >当你不是领出方时，要问的从来不是“我最大的牌是哪张”，而是“这一轮现在是谁赢”。</span
+          >
+        </p>
+        <ul>
+          <li>
+            <span class="lang-en"
+              ><strong>Partner is winning →</strong> dump points. Throw the
+              <span class="♡">10</span>, the <span class="♡">K</span>, the
+              <span class="♡">5</span>. Do not save them — saving points is how
+              they end up in the opponents' pile later.</span
+            >
+            <span class="lang-zh"
+              ><strong>队友赢着 →</strong> 垫分。把
+              <span class="♡">10</span>、<span class="♡">K</span>、<span
+                class="♡"
+                >5</span
+              >
+              都甩出去。别攒着——攒下来的分，最后往往落进对手手里。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              ><strong>Opponent is winning →</strong> give nothing. Play a
+              worthless card, and break up a pair if that is what it takes to
+              avoid handing over a point card.</span
+            >
+            <span class="lang-zh"
+              ><strong>对手赢着 →</strong>
+              一分不给。打无用的牌；如果只有拆对子才能避免送出分牌，那就拆。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              ><strong>You cannot win the trick →</strong> play your
+              <em>smallest</em> card. Never burn a high trump or a joker on a
+              trick you were never going to take.</span
+            >
+            <span class="lang-zh"
+              ><strong>这轮你赢不了 →</strong>
+              打你<em>最小</em>的牌。绝不要在一轮本就赢不了的牌上浪费大主牌或王。</span
+            >
+          </li>
+        </ul>
+
+        <h3>
+          <span class="lang-en">7. Remember what has been played</span
+          ><span class="lang-zh">7. 记牌</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >This is the biggest single gap between an average player and a
+            strong one, and it needs no talent — only attention. You do not have
+            to remember all 108 cards. Track the <strong>top</strong> of each
+            suit and you will know exactly when your own cards become
+            unbeatable.</span
+          >
+          <span class="lang-zh"
+            >这是普通玩家与高手之间最大的差距，而且它不需要天赋，只需要专注。你不必记住全部
+            108
+            张牌，只要盯住每门花色的<strong>顶端</strong>，你就能准确知道自己手里的牌什么时候变成了无人能压的牌。</span
+          >
+        </p>
+        <p>
+          <span class="lang-en"
+            >Say you hold <span class="♡">10♡ 10♡</span> and a
+            <span class="♡">K♡</span>, and hearts is not trump. Both
+            <span class="♡">A♡</span>s have been played? Your
+            <span class="♡">K♡</span> is now boss. Both
+            <span class="♡">A♡</span>s, both <span class="♡">K♡</span>s, and the
+            <span class="♡">Q♡</span>s and <span class="♡">J♡</span>s are gone?
+            Your <span class="♡">10♡</span> pair is boss — and worth 20
+            points.</span
+          >
+          <span class="lang-zh"
+            >比如你手上有一对 <span class="♡">10♡</span> 和一张
+            <span class="♡">K♡</span>，而红桃不是主。两张
+            <span class="♡">A♡</span> 都出过了？你的
+            <span class="♡">K♡</span> 现在就是最大牌。两张
+            <span class="♡">A♡</span>、两张 <span class="♡">K♡</span>，以及
+            <span class="♡">Q♡</span>、<span class="♡">J♡</span>
+            也都走完了？那你这对 <span class="♡">10♡</span> 就是最大对子——而且值
+            20 分。</span
+          >
+        </p>
+
+        <h3>
+          <span class="lang-en">8. Plan for the last trick</span
+          ><span class="lang-zh">8. 为最后一轮做打算</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >The last trick pays out the kitty, doubled. That single trick is
+            often worth more than the previous ten combined, and it is decided
+            by what you kept, not by what you played.</span
+          >
+          <span class="lang-zh"
+            >最后一轮结算底牌，而且是双倍。这一轮的价值常常超过前面十轮的总和，而它的胜负取决于你<em>留下了什么</em>，而不是你打出了什么。</span
+          >
+        </p>
+        <ul>
+          <li>
+            <span class="lang-en"
+              >Buried points in the kitty? Save a winner — a joker or a high
+              trump — for the very end.</span
+            ><span class="lang-zh"
+              >底牌里扣了分？那就留一张能赢的牌（王或大主牌）到最后。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              >Kitty is empty? Stop protecting it. Spend your high cards freely
+              and get your points out early.</span
+            ><span class="lang-zh"
+              >底牌是空的？那就别再守它。放手用你的大牌，早点把分处理掉。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              >Attacking, and you suspect the declarer buried points? Try to be
+              the one holding the last winner.</span
+            ><span class="lang-zh"
+              >你是进攻方，并且怀疑庄家扣了分？那就设法让最后那张能赢的牌握在自己手里。</span
+            >
+          </li>
+        </ul>
+
+        <div class="key-point">
+          <span class="key-label lang-en">Ready for more?</span>
+          <span class="key-label lang-zh">想学更多？</span>
+          <p>
+            <span class="lang-en"
+              >The <strong>Advanced</strong> tab above covers hand evaluation
+              with real numbers, kitty burial worked through card by card, the
+              low-trump hand-off, long-suit throws, kitty-multiplier maths, and
+              how to play against each bot tier.</span
+            >
+            <span class="lang-zh"
+              >上方的<strong>进阶策略</strong>标签页会讲到：用具体数字评估手牌、逐张演示扣底、小主牌过渡、长套甩牌、底牌倍数的算法，以及如何针对各个难度的机器人。</span
+            >
+          </p>
+        </div>
+      </div>
+
+      <!-- ============================================================== -->
+      <!-- ADVANCED                                                        -->
+      <!-- ============================================================== -->
+      <div class="tab-panel" id="panel-advanced">
+        <h2>
+          <span class="lang-en">Advanced strategy</span
+          ><span class="lang-zh">进阶策略</span>
+        </h2>
+
+        <p>
+          <span class="lang-en"
+            >Every example below uses the standard table: four players, two
+            decks, 25 cards each and an 8-card kitty. Unless stated otherwise
+            the <strong>trump rank is 2</strong> and the
+            <strong>trump suit is <span class="♤">spades</span></strong
+            >, so trump runs <span class="🃏">big joker</span> &gt;
+            <span class="🃟">small joker</span> &gt;
+            <span class="♤">2♤</span> &gt; [<span class="♡">2♡</span> =
+            <span class="♢">2♢</span> = <span class="♧">2♧</span>] &gt;
+            <span class="♤">A♤</span> &gt; <span class="♤">K♤</span> &gt; … &gt;
+            <span class="♤">3♤</span>.</span
+          >
+          <span class="lang-zh"
+            >下面所有示例都用标准牌局：四人、两副牌、每人 25 张、底牌 8
+            张。除非特别说明，<strong>级牌为 2</strong>，<strong
+              >主牌花色为<span class="♤">黑桃</span></strong
+            >，因此主牌大小依次为 <span class="🃏">大王</span> &gt;
+            <span class="🃟">小王</span> &gt; <span class="♤">2♤</span> &gt;
+            [<span class="♡">2♡</span> = <span class="♢">2♢</span> =
+            <span class="♧">2♧</span>] &gt; <span class="♤">A♤</span> &gt;
+            <span class="♤">K♤</span> &gt; … &gt;
+            <span class="♤">3♤</span>。</span
+          >
+        </p>
+
+        <h3>
+          <span class="lang-en">Hand evaluation, with numbers</span
+          ><span class="lang-zh">用数字评估手牌</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >Count the trump in a two-deck pack: 26 cards of the trump suit, 6
+            off-suit rank cards, and 4 jokers — <strong>36 trump</strong> out of
+            108. You are dealt 25, so your expected trump count is 36 × 25 ÷ 108
+            ≈ <strong>8.3</strong>. That single number anchors every judgement
+            you will make:</span
+          >
+          <span class="lang-zh"
+            >数一数两副牌里的主牌：主牌花色 26 张、其他花色的级牌 6 张、王 4
+            张——共 <strong>36 张主牌</strong>，总牌数 108。你拿到 25
+            张，因此主牌张数的期望值是 36 × 25 ÷ 108 ≈
+            <strong>8.3</strong>。这个数字是你一切判断的基准：</span
+          >
+        </p>
+        <table border="1">
+          <thead>
+            <tr>
+              <td>
+                <span class="lang-en">Trump count</span
+                ><span class="lang-zh">主牌张数</span>
+              </td>
+              <td>
+                <span class="lang-en">What it means</span
+                ><span class="lang-zh">含义</span>
+              </td>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>12+</td>
+              <td>
+                <span class="lang-en"
+                  >Controlling. You can ruff freely, bleed trump, and bury
+                  points confidently.</span
+                ><span class="lang-zh"
+                  >掌控局面。可以放心毙牌、抽主，也可以放心往底牌扣分。</span
+                >
+              </td>
+            </tr>
+            <tr>
+              <td>8–11</td>
+              <td>
+                <span class="lang-en"
+                  >Normal. Play the standard plan; bury a moderate number of
+                  points at most.</span
+                ><span class="lang-zh"
+                  >正常。按常规打法走；扣底最多扣中等数量的分。</span
+                >
+              </td>
+            </tr>
+            <tr>
+              <td>6–7</td>
+              <td>
+                <span class="lang-en"
+                  >Short. Stop planning to win the last trick; get points out
+                  early instead.</span
+                ><span class="lang-zh"
+                  >偏少。别再指望赢下最后一轮，改为尽早把分处理掉。</span
+                >
+              </td>
+            </tr>
+            <tr>
+              <td>≤5</td>
+              <td>
+                <span class="lang-en"
+                  >Weak. Bury nothing valuable and play a pure denial
+                  game.</span
+                ><span class="lang-zh"
+                  >很弱。有价值的牌一张都别扣，彻底改打拦截。</span
+                >
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          <span class="lang-en"
+            >Now weight it. A trump <strong>pair</strong> is worth about three
+            to four loose trump; a <strong>joker or rank-card pair</strong> is
+            worth more still; and two consecutive trump pairs (a trump tractor)
+            add another premium on top, because breaking a tractor requires a
+            <em>higher</em> tractor. Two hands of nine trump can be a full level
+            apart in strength:</span
+          >
+          <span class="lang-zh"
+            >然后要加权。一个主牌<strong>对子</strong>约值三到四张散主牌；<strong>王或级牌的对子</strong>价值更高；而两个连续的主牌对子（主牌拖拉机）还要再加一层溢价，因为要压住拖拉机就必须用<em>更大的</em>拖拉机。同样是九张主牌，两手牌的强度可能差一整个档次：</span
+          >
+        </p>
+        <div class="scenario">
+          <h4>
+            <span class="lang-en">Same length, very different hands</span
+            ><span class="lang-zh">张数相同，强度天差地别</span>
+          </h4>
+          <p class="setup">
+            <span class="lang-en"
+              >Both hands hold exactly nine trump. Trump is
+              <span class="♤">spades</span>, rank 2.</span
+            >
+            <span class="lang-zh"
+              >两手牌都恰好九张主牌。主牌为<span class="♤">黑桃</span>，级牌
+              2。</span
+            >
+          </p>
+          <p>
+            <span class="lang-en"><strong>Hand A</strong> — all singles:</span>
+            <span class="lang-zh"><strong>甲手</strong>——全是单张：</span>
+          </p>
+          <div class="hand-row">
+            <span class="card 🃏">🃏</span>
+            <span class="card ♧">🃒</span>
+            <span class="card ♤">🂡</span>
+            <span class="card ♤">🂮</span>
+            <span class="card ♤">🂫</span>
+            <span class="card ♤">🂩</span>
+            <span class="card ♤">🂧</span>
+            <span class="card ♤">🂥</span>
+            <span class="card ♤">🂣</span>
+          </div>
+          <p>
+            <span class="lang-en"
+              ><strong>Hand B</strong> — the same nine cards' worth of length,
+              but structured:</span
+            >
+            <span class="lang-zh"
+              ><strong>乙手</strong>——同样是九张，但有结构：</span
+            >
+          </p>
+          <div class="hand-row">
+            <span class="card 🃏">🃏</span>
+            <span class="card ♤">🂡</span>
+            <span class="card ♤">🂪</span>
+            <span class="card ♤">🂪</span>
+            <span class="card ♤">🂩</span>
+            <span class="card ♤">🂩</span>
+            <span class="card ♤">🂥</span>
+            <span class="card ♤">🂥</span>
+            <span class="card ♤">🂣</span>
+          </div>
+          <p class="verdict">
+            <span class="lang-en"
+              ><strong>Verdict:</strong> Hand B is far stronger. It holds three
+              pairs — and <span class="♤">10♤10♤ 9♤9♤</span> is a trump tractor,
+              which nothing short of a higher trump tractor can beat. Hand B can
+              ruff an opponent's pair, punish a pair-led trick and safely run
+              trump; Hand A can only ever win single-card tricks. Faced with a
+              choice between declaring a suit shaped like A and one shaped like
+              B, declare B's — even if A were a card or two longer.</span
+            >
+            <span class="lang-zh"
+              ><strong>结论：</strong>乙手强得多。它有三个对子，而且
+              <span class="♤">10♤10♤ 9♤9♤</span>
+              是一个主牌拖拉机，除非更大的主牌拖拉机，否则压不住。乙手能毙掉对手的对子、能惩罚对手领出的对牌、也能安全地走主；甲手则只能赢单张的轮次。如果要在“甲那样的花色”和“乙那样的花色”之间选一门亮主，就亮乙那门——哪怕甲还多一两张。</span
+            >
+          </p>
+        </div>
+
+        <h3>
+          <span class="lang-en">Burying the kitty, card by card</span
+          ><span class="lang-zh">逐张演示扣底</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >The bots bury with a strict priority order, and it is worth copying
+            exactly: <strong>(1)</strong> complete a full side-suit void if one
+            fits; <strong>(2)</strong> bury the lowest worthless cards from your
+            shortest remaining suit; <strong>(3)</strong> add points only up to
+            a budget set by your hand strength. Aces, trump, the rank card and
+            pairs are off-limits — the sole exception being a pair that sits
+            inside the suit you are voiding.</span
+          >
+          <span class="lang-zh"
+            >机器人扣底遵循严格的优先级，值得照搬：<strong>(1)</strong>
+            如果能扣光一整门副牌，就先扣光它；<strong>(2)</strong>
+            从剩下最短的花色里扣掉最小的废牌；<strong>(3)</strong>
+            只在手牌强度允许的“分数预算”内扣分牌。A、主牌、级牌和对子都不能扣——唯一的例外是这个对子正好落在你要扣光的那门花色里。</span
+          >
+        </p>
+        <p>
+          <span class="lang-en">The point budget the bots use:</span>
+          <span class="lang-zh">机器人使用的分数预算：</span>
+        </p>
+        <table border="1">
+          <thead>
+            <tr>
+              <td>
+                <span class="lang-en">Your hand</span
+                ><span class="lang-zh">你的手牌</span>
+              </td>
+              <td>
+                <span class="lang-en">Points to bury</span
+                ><span class="lang-zh">可扣分数</span>
+              </td>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>
+                <span class="lang-en">4 jokers and 12+ trump</span
+                ><span class="lang-zh">四张王且 12+ 主牌</span>
+              </td>
+              <td>
+                <span class="lang-en">as much as you like</span
+                ><span class="lang-zh">想扣多少扣多少</span>
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <span class="lang-en">2+ jokers, or 12+ trump</span
+                ><span class="lang-zh">2+ 张王，或 12+ 主牌</span>
+              </td>
+              <td>~25</td>
+            </tr>
+            <tr>
+              <td>
+                <span class="lang-en">1 joker, or 10+ trump</span
+                ><span class="lang-zh">1 张王，或 10+ 主牌</span>
+              </td>
+              <td>~20</td>
+            </tr>
+            <tr>
+              <td>
+                <span class="lang-en">8–9 trump, no joker</span
+                ><span class="lang-zh">8–9 张主牌，无王</span>
+              </td>
+              <td>~15</td>
+            </tr>
+            <tr>
+              <td>
+                <span class="lang-en">6–7 trump</span
+                ><span class="lang-zh">6–7 张主牌</span>
+              </td>
+              <td>~10</td>
+            </tr>
+            <tr>
+              <td>
+                <span class="lang-en">5 or fewer trump</span
+                ><span class="lang-zh">5 张及以下主牌</span>
+              </td>
+              <td>
+                <span class="lang-en">none</span
+                ><span class="lang-zh">不扣</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="scenario">
+          <h4>
+            <span class="lang-en">Worked example: burying eight</span
+            ><span class="lang-zh">实例：扣八张底</span>
+          </h4>
+          <p class="setup">
+            <span class="lang-en"
+              >You declared <span class="♤">spades</span> at rank 2 and now hold
+              25 cards. Bury 8.</span
+            >
+            <span class="lang-zh"
+              >你在级牌 2 时亮了<span class="♤">黑桃</span>，现在手上 25
+              张。要扣 8 张。</span
+            >
+          </p>
+          <p>
+            <span class="lang-en"
+              ><strong>Trump (9):</strong> big joker, <span class="♤">2♤</span>,
+              <span class="♡">2♡</span>,
+              <span class="♤">A♤ K♤ 10♤ 7♤ 5♤ 3♤</span></span
+            >
+            <span class="lang-zh"
+              ><strong>主牌（9 张）：</strong>大王、<span class="♤">2♤</span
+              >、<span class="♡">2♡</span>、<span class="♤"
+                >A♤ K♤ 10♤ 7♤ 5♤ 3♤</span
+              ></span
+            >
+          </p>
+          <div class="hand-row">
+            <span class="card 🃏">🃏</span>
+            <span class="card ♤">🂢</span>
+            <span class="card ♡">🂲</span>
+            <span class="card ♤">🂡</span>
+            <span class="card ♤">🂮</span>
+            <span class="card ♤">🂪</span>
+            <span class="card ♤">🂧</span>
+            <span class="card ♤">🂥</span>
+            <span class="card ♤">🂣</span>
+          </div>
+          <p>
+            <span class="lang-en"
+              ><strong>Hearts (5):</strong>
+              <span class="♡">A♡ Q♡ J♡ 8♡ 4♡</span> &nbsp;·&nbsp;
+              <strong>Diamonds (4):</strong>
+              <span class="♢">K♢ K♢ 9♢ 6♢</span> &nbsp;·&nbsp;
+              <strong>Clubs (7):</strong>
+              <span class="♧">Q♧ 10♧ 9♧ 8♧ 7♧ 5♧ 3♧</span></span
+            >
+            <span class="lang-zh"
+              ><strong>红桃（5 张）：</strong>
+              <span class="♡">A♡ Q♡ J♡ 8♡ 4♡</span> &nbsp;·&nbsp;
+              <strong>方块（4 张）：</strong>
+              <span class="♢">K♢ K♢ 9♢ 6♢</span> &nbsp;·&nbsp;
+              <strong>梅花（7 张）：</strong>
+              <span class="♧">Q♧ 10♧ 9♧ 8♧ 7♧ 5♧ 3♧</span></span
+            >
+          </p>
+          <div class="hand-row">
+            <span class="card ♡">🂱</span>
+            <span class="card ♡">🂽</span>
+            <span class="card ♡">🂻</span>
+            <span class="card ♡">🂸</span>
+            <span class="card ♡">🂴</span>
+            <span class="suit-gap"></span>
+            <span class="card ♢">🃎</span>
+            <span class="card ♢">🃎</span>
+            <span class="card ♢">🃉</span>
+            <span class="card ♢">🃆</span>
+            <span class="suit-gap"></span>
+            <span class="card ♧">🃝</span>
+            <span class="card ♧">🃚</span>
+            <span class="card ♧">🃙</span>
+            <span class="card ♧">🃘</span>
+            <span class="card ♧">🃗</span>
+            <span class="card ♧">🃕</span>
+            <span class="card ♧">🃓</span>
+          </div>
+          <div class="play-call bad">
+            <span class="tag lang-en">Wrong</span>
+            <span class="tag lang-zh">错误打法</span>
+            <span class="lang-en"
+              >Bury the eight lowest worthless cards —
+              <span class="♧">3♧ 7♧ 8♧ 9♧</span>, <span class="♡">4♡ 8♡</span>,
+              <span class="♢">6♢ 9♢</span>. It looks tidy and safe, and it
+              achieves nothing: you are still long in every suit, so you can
+              never ruff, and you have kept 20 points of
+              <span class="♢">K♢</span>s in hand where the opponents can take
+              them off you.</span
+            >
+            <span class="lang-zh"
+              >把八张最小的废牌扣掉——<span class="♧">3♧ 7♧ 8♧ 9♧</span>、<span
+                class="♡"
+                >4♡ 8♡</span
+              >、<span class="♢">6♢ 9♢</span
+              >。看起来整齐又安全，实际上什么也没做成：你每门花色仍然有牌，所以永远毙不了牌；而那对值
+              20 分的
+              <span class="♢">K♢</span> 还留在手里，随时会被对手赢走。</span
+            >
+          </div>
+          <div class="play-call good">
+            <span class="tag lang-en">Right</span>
+            <span class="tag lang-zh">正确打法</span>
+            <span class="lang-en"
+              >Bury the <em>whole diamond suit</em> —
+              <span class="♢">K♢ K♢ 9♢ 6♢</span> — then
+              <span class="♡">4♡</span>, <span class="♧">3♧</span>,
+              <span class="♡">8♡</span>, <span class="♧">7♧</span>.</span
+            >
+            <span class="lang-zh"
+              >扣掉<em>整门方块</em>——<span class="♢">K♢ K♢ 9♢ 6♢</span>——再加上
+              <span class="♡">4♡</span>、<span class="♧">3♧</span>、<span
+                class="♡"
+                >8♡</span
+              >、<span class="♧">7♧</span>。</span
+            >
+          </div>
+          <p class="verdict">
+            <span class="lang-en"
+              ><strong>Why:</strong> you are now void in diamonds, so every
+              diamond led for the rest of the hand is a trump trick for you —
+              and with 9 trump you can afford them. The
+              <span class="♢">K♢</span>
+              pair costs 20 points, which is exactly the budget a hand with one
+              joker and nine trump allows, and those points are now
+              <em>safe</em>: they come back to you doubled if you take the last
+              trick, instead of being fought over in the middle game. This is
+              the one sanctioned reason to bury a pair.<br /><br /><strong
+                >The same hand, weaker:</strong
+              >
+              swap the big joker for a low club and drop to six trump, and the
+              budget falls to 10 — the <span class="♢">K♢</span> pair no longer
+              fits, so the void is not worth starting. Bury scattered trash
+              instead and play for denial.</span
+            >
+            <span class="lang-zh"
+              ><strong>理由：</strong
+              >你现在方块缺门，此后每次有人打方块，对你来说都是一轮可以毙的牌——而你有
+              9 张主牌，完全支撑得住。那对 <span class="♢">K♢</span> 花掉 20
+              分，恰好等于“一张王 +
+              九张主牌”这类手牌的预算上限；而且这些分现在是<em>安全</em>的：只要你赢下最后一轮，它们会以双倍回到你手上，而不必在中盘反复争夺。这正是唯一被认可的“可以扣对子”的理由。<br /><br /><strong
+                >同样的牌，若变弱：</strong
+              >把大王换成一张小梅花、主牌降到六张，预算就只剩 10 分——那对
+              <span class="♢">K♢</span>
+              就装不下了，这个缺门也就不值得去做。此时应改为零散地扣废牌，专心打拦截。</span
+            >
+          </p>
+        </div>
+
+        <h3>
+          <span class="lang-en">Tempo: the low-trump hand-off</span
+          ><span class="lang-zh">节奏：小主牌过渡</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >This is the single most under-used play in the game, and it is the
+            defenders' main mid-game weapon. Once you have cashed your winners
+            and have nothing left worth leading, do not lead a big card. Lead a
+            <strong>small, non-point trump</strong> — a
+            <span class="♤">3♤</span> or <span class="♤">4♤</span>.</span
+          >
+          <span class="lang-zh"
+            >这是全局中最被低估的一手，也是防守方中盘的主要武器。当你已经把大牌兑现完、手里没有值得领出的牌时，不要打大牌，而要领出一张<strong>小的、不带分的主牌</strong>——比如
+            <span class="♤">3♤</span> 或 <span class="♤">4♤</span>。</span
+          >
+        </p>
+        <p>
+          <span class="lang-en">It does three things at once:</span>
+          <span class="lang-zh">它同时做到三件事：</span>
+        </p>
+        <ol>
+          <li>
+            <span class="lang-en"
+              >It forces the attackers to spend real trump on a trick worth
+              nothing.</span
+            ><span class="lang-zh"
+              >迫使进攻方在一轮毫无价值的牌上消耗真正的主牌。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              >It hands the lead to your partner, who can then run the suit you
+              are void in.</span
+            ><span class="lang-zh"
+              >把领出权交给队友，队友随后就能走你缺门的那一套。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              >It costs you almost nothing — you were never winning that trick
+              anyway.</span
+            ><span class="lang-zh">对你几乎零成本——那一轮你本来也赢不了。</span>
+          </li>
+        </ol>
+        <div class="scenario">
+          <h4>
+            <span class="lang-en">Passing the lead correctly</span
+            ><span class="lang-zh">正确地把牌权交出去</span>
+          </h4>
+          <p class="setup">
+            <span class="lang-en"
+              >Mid-game. You are defending. Your side-suit aces are spent, and
+              you hold: big joker, <span class="♤">2♤</span>,
+              <span class="♤">9♤</span>, <span class="♤">3♤</span>,
+              <span class="♡">Q♡ J♡</span>, <span class="♧">8♧</span>. Your
+              partner still holds a long club suit.</span
+            >
+            <span class="lang-zh"
+              >中盘，你是防守方。你的副牌 A 已经用完，手上剩：大王、<span
+                class="♤"
+                >2♤</span
+              >、<span class="♤">9♤</span>、<span class="♤">3♤</span>、<span
+                class="♡"
+                >Q♡ J♡</span
+              >、<span class="♧">8♧</span>。你的队友手上还有一长套梅花。</span
+            >
+          </p>
+          <div class="hand-row">
+            <span class="card 🃏">🃏</span>
+            <span class="card ♤">🂢</span>
+            <span class="card ♤">🂩</span>
+            <span class="card ♤">🂣</span>
+            <span class="suit-gap"></span>
+            <span class="card ♡">🂽</span>
+            <span class="card ♡">🂻</span>
+            <span class="suit-gap"></span>
+            <span class="card ♧">🃘</span>
+          </div>
+          <div class="play-call bad">
+            <span class="tag lang-en">Wrong</span>
+            <span class="tag lang-zh">错误打法</span>
+            <span class="lang-en"
+              >Lead the big joker. You win the trick — and then you are still on
+              lead with nothing good to play, you have destroyed your last-trick
+              insurance, and the opponents happily discarded their junk.</span
+            >
+            <span class="lang-zh"
+              >领出大王。你确实赢了这一轮——然后领出权还在你手上，而你没有好牌可打；你毁掉了保最后一轮的那张牌，对手则趁机把废牌垫掉了。</span
+            >
+          </div>
+          <div class="play-call good">
+            <span class="tag lang-en">Right</span>
+            <span class="tag lang-zh">正确打法</span>
+            <span class="lang-en"
+              >Lead the <span class="♤">3♤</span>. An attacker must beat it with
+              a genuine trump; your partner then takes the lead soon after and
+              runs clubs — a suit <em>you</em> are nearly out of, so you ruff
+              the round after that. Meanwhile the joker and
+              <span class="♤">2♤</span> are still in your hand for the
+              finale.</span
+            >
+            <span class="lang-zh"
+              >领出
+              <span class="♤">3♤</span
+              >。进攻方必须用真正的主牌来压它；随后队友很快拿到领出权，开始走梅花——而<em>你</em>这门几乎没有牌了，于是再下一轮你就能毙牌。与此同时，大王和
+              <span class="♤">2♤</span> 依然留在你手里，用来收官。</span
+            >
+          </div>
+          <p class="verdict">
+            <span class="lang-en"
+              ><strong>The rule:</strong> hand off with your
+              <em>smallest</em> trump. Never with a joker, never with the rank
+              card, and never with a trump that carries points — those are
+              exactly the cards the hand-off is designed to preserve.</span
+            >
+            <span class="lang-zh"
+              ><strong>要点：</strong
+              >过渡要用你<em>最小</em>的主牌。绝不要用王，绝不要用级牌，也绝不要用带分的主牌——这几张恰恰是这一手要保住的牌。</span
+            >
+          </p>
+        </div>
+
+        <h3>
+          <span class="lang-en">The long-suit throw</span
+          ><span class="lang-zh">长套甩牌</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >Holding seven of a side suit with no trump support feels like a
+            dead hand. It is not — it is a weapon, if you are patient. Play the
+            suit normally until both opponents are void in it, then
+            <strong>throw the whole remaining holding at once</strong>.</span
+          >
+          <span class="lang-zh"
+            >手握某门副牌七张、又没有主牌支持，感觉像一手废牌。其实不然——只要有耐心，它就是武器。先按常规打这门牌，直到两名对手都缺了这门，然后<strong>把剩下的整套一次性甩出去</strong>。</span
+          >
+        </p>
+        <p>
+          <span class="lang-en"
+            >To beat a throw, an opponent must beat
+            <em>every component of it individually</em>, and only with trump. A
+            throw containing two pairs therefore has to be answered with two
+            trump <em>pairs</em> from a single player — which almost never
+            happens.</span
+          >
+          <span class="lang-zh"
+            >要击败一次甩牌，对手必须<em>逐一压过它的每一个组成部分</em>，而且只能用主牌。因此，一个含有两个对子的甩牌，必须由同一名玩家拿出两个主牌<em>对子</em>才能压住——这几乎不可能发生。</span
+          >
+        </p>
+        <div class="scenario">
+          <h4>
+            <span class="lang-en">Throwing a long suit</span
+            ><span class="lang-zh">甩出长套</span>
+          </h4>
+          <p class="setup">
+            <span class="lang-en"
+              >Trump is <span class="♤">spades</span>. You have the lead. Both
+              <span class="♧">A♧</span>s and both <span class="♧">K♧</span>s
+              have already been played, and both opponents have shown themselves
+              void in clubs by ruffing an earlier club trick. You still hold six
+              clubs:</span
+            >
+            <span class="lang-zh"
+              >主牌是<span class="♤">黑桃</span>。你有领出权。两张
+              <span class="♧">A♧</span> 和两张
+              <span class="♧">K♧</span>
+              都已出完，而两名对手在此前的一轮梅花里都用主牌毙过，说明他们梅花已缺门。你手上还有六张梅花：</span
+            >
+          </p>
+          <div class="hand-row">
+            <span class="card ♧">🃝</span>
+            <span class="card ♧">🃝</span>
+            <span class="card ♧">🃛</span>
+            <span class="card ♧">🃛</span>
+            <span class="card ♧">🃙</span>
+            <span class="card ♧">🃗</span>
+          </div>
+          <div class="play-call good">
+            <span class="tag lang-en">Right</span>
+            <span class="tag lang-zh">正确打法</span>
+            <span class="lang-en"
+              >Throw all six. <span class="♧">Q♧Q♧ J♧J♧</span> is a tractor, and
+              the <span class="♧">9♧</span> and <span class="♧">7♧</span> ride
+              along with it. To take this trick an opponent needs a trump
+              tractor <em>plus</em> two more trump, in one hand. Your partner,
+              who is also void, dumps every point card they own into it.</span
+            >
+            <span class="lang-zh"
+              >六张全甩。<span class="♧">Q♧Q♧ J♧J♧</span> 是一个拖拉机，<span
+                class="♧"
+                >9♧</span
+              >
+              和
+              <span class="♧">7♧</span>
+              一起带走。对手要想赢下这一轮，必须一个人同时拿出一个主牌拖拉机<em>外加</em>两张主牌。而同样缺门的队友，会把手里所有分牌都垫进来。</span
+            >
+          </div>
+          <div class="play-call bad">
+            <span class="tag lang-en">Wrong</span>
+            <span class="tag lang-zh">错误打法</span>
+            <span class="lang-en"
+              >Throwing the same six cards <em>before</em> the
+              <span class="♧">A♧</span>s and <span class="♧">K♧</span>s are
+              gone. The throw is invalid the moment any single opponent can beat
+              one component of it in clubs, and you are forced to lead just that
+              beatable component instead — you lose the whole tempo play and
+              show the table your hand for nothing.</span
+            >
+            <span class="lang-zh"
+              >在 <span class="♧">A♧</span> 和
+              <span class="♧">K♧</span>
+              还没走完时就甩这六张。只要有任何一名对手能用梅花压住其中一个组成部分，这次甩牌就无效，你会被迫改为只领出那个能被压的部分——整个节奏优势全部丢失，还白白暴露了自己的牌。</span
+            >
+          </div>
+          <p class="verdict">
+            <span class="lang-en"
+              ><strong>Timing is everything:</strong> a throw is only as good as
+              your card counting. Wait until the suit's tops are gone
+              <em>and</em> the opponents are void, then take the whole pot at
+              once.</span
+            >
+            <span class="lang-zh"
+              ><strong>时机就是一切：</strong
+              >甩牌的质量完全取决于你的记牌。等到这门花色的大牌都走完、<em>并且</em>对手都缺门，再一次性把整个彩池收走。</span
+            >
+          </p>
+        </div>
+
+        <h3>
+          <span class="lang-en">Reading voids, and using your partner's</span
+          ><span class="lang-zh">读缺门，并利用队友的缺门</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >Every time a player fails to follow suit, that is permanent public
+            information: they are void in it for the rest of the hand. The bots
+            log every one of these, and so should you. Two tactics follow
+            directly:</span
+          >
+          <span class="lang-zh"
+            >每当有人跟不上花色，这就是永久的公开信息：他这一局都缺这门。机器人会把每一次都记录下来，你也应该如此。由此直接引出两个战术：</span
+          >
+        </p>
+        <ul>
+          <li>
+            <span class="lang-en"
+              ><strong>Lead your partner's void</strong> — with a
+              <em>cheap</em> card, and only while at least one opponent still
+              has to follow. Your partner ruffs and takes the trick; you spent
+              nothing. Leading a high card here wastes a winner on a trick your
+              partner was going to win anyway.</span
+            >
+            <span class="lang-zh"
+              ><strong>领出队友缺门的那一套</strong
+              >——用<em>便宜</em>的牌，而且要在至少还有一名对手必须跟牌时才这么做。队友毙牌赢下这轮，而你什么也没花。这时若打大牌，就是把一张能赢的牌浪费在队友本来就会赢的一轮上。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              ><strong>Respect the opponents' voids</strong> — your "boss" ace
+              in a suit both opponents are void in is not boss any more. It is
+              just a card waiting to be ruffed, and if it carries points you are
+              gift-wrapping them.</span
+            >
+            <span class="lang-zh"
+              ><strong>也要尊重对手的缺门</strong
+              >——当两名对手都缺某门时，你在那门里的“最大”A
+              就不再最大了。它只是一张等着被毙的牌；如果它还带分，那等于把分打包送给对方。</span
+            >
+          </li>
+        </ul>
+
+        <h3>
+          <span class="lang-en">Point discipline: when to break a pair</span
+          ><span class="lang-zh">分牌纪律：什么时候该拆对子</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >Pairs are valuable, but not more valuable than 10 points. When you
+            are void in the led suit and can discard anything, the correct
+            discard is the one that gives the winning opponent the fewest points
+            — even if it breaks a pair.</span
+          >
+          <span class="lang-zh"
+            >对子有价值，但没有 10
+            分值钱。当你缺了领出的那门花色、可以随便垫牌时，正确的选择永远是让赢家拿到最少分的那一手——哪怕要拆掉一个对子。</span
+          >
+        </p>
+        <div class="scenario">
+          <h4>
+            <span class="lang-en">A ten-point discard decision</span
+            ><span class="lang-zh">一次值十分的垫牌抉择</span>
+          </h4>
+          <p class="setup">
+            <span class="lang-en"
+              >An opponent has led a pair of clubs and is winning the trick. You
+              are void in clubs, so you may discard any two cards. Your
+              non-trump holdings are <span class="♡">K♡ 4♡</span> and
+              <span class="♢">9♢ 9♢ 6♢</span>.</span
+            >
+            <span class="lang-zh"
+              >对手领出一对梅花并且正赢着这一轮。你梅花缺门，因此可以任意垫两张。你的副牌是
+              <span class="♡">K♡ 4♡</span> 和
+              <span class="♢">9♢ 9♢ 6♢</span>。</span
+            >
+          </p>
+          <div class="hand-row">
+            <span class="card ♡">🂾</span>
+            <span class="card ♡">🂴</span>
+            <span class="suit-gap"></span>
+            <span class="card ♢">🃉</span>
+            <span class="card ♢">🃉</span>
+            <span class="card ♢">🃆</span>
+          </div>
+          <div class="play-call bad">
+            <span class="tag lang-en">Wrong</span>
+            <span class="tag lang-zh">错误打法</span>
+            <span class="lang-en"
+              >Discard <span class="♡">K♡ 4♡</span> to keep the
+              <span class="♢">9♢</span> pair intact. You have just handed the
+              opponents 10 points to preserve a pair of nines that will probably
+              never win a trick.</span
+            >
+            <span class="lang-zh"
+              >为了保住那对 <span class="♢">9♢</span>，垫出
+              <span class="♡">K♡ 4♡</span
+              >。你刚刚为了留住一对大概率永远赢不了牌的 9，白送了对手 10
+              分。</span
+            >
+          </div>
+          <div class="play-call good">
+            <span class="tag lang-en">Right</span>
+            <span class="tag lang-zh">正确打法</span>
+            <span class="lang-en"
+              >Break the pair: discard <span class="♢">9♢ 6♢</span>. The
+              opponents get nothing, and you keep the
+              <span class="♡">K♡</span> to dump on your own partner later —
+              where it is worth a full 10 points to your side.</span
+            >
+            <span class="lang-zh"
+              >拆对子：垫出 <span class="♢">9♢ 6♢</span>。对手一分不得，而你留下
+              <span class="♡">K♡</span>，日后垫给自己的队友——这 10
+              分就完整地记在你们这边。</span
+            >
+          </div>
+          <p class="verdict">
+            <span class="lang-en"
+              ><strong>Flip it around when your partner is winning:</strong>
+              then the <span class="♡">K♡</span> is exactly the right discard.
+              Partner-winning and opponent-winning are mirror images — the same
+              cards, opposite answers.</span
+            >
+            <span class="lang-zh"
+              ><strong>队友赢着时则完全相反：</strong>那时
+              <span class="♡">K♡</span>
+              正是该垫的牌。队友赢与对手赢是一体两面——同样的牌，答案完全相反。</span
+            >
+          </p>
+        </div>
+
+        <h3>
+          <span class="lang-en">The endgame: kitty maths</span
+          ><span class="lang-zh">收官：底牌的算术</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >The kitty is paid to whoever wins the <strong>last trick</strong>,
+            multiplied by
+            <strong>twice the size of the largest component</strong> of that
+            trick's format. That multiplier is a lever most players never
+            touch:</span
+          >
+          <span class="lang-zh"
+            >底牌归赢下<strong>最后一轮</strong>的一方，并按该轮牌型中<strong>最大组成部分张数的两倍</strong>计算倍数。多数玩家从来没想过要去动这个杠杆：</span
+          >
+        </p>
+        <table border="1">
+          <thead>
+            <tr>
+              <td>
+                <span class="lang-en">Last trick was led as…</span
+                ><span class="lang-zh">最后一轮领出的牌型</span>
+              </td>
+              <td>
+                <span class="lang-en">Kitty multiplier</span
+                ><span class="lang-zh">底牌倍数</span>
+              </td>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>
+                <span class="lang-en">a single card</span
+                ><span class="lang-zh">单张</span>
+              </td>
+              <td>×2</td>
+            </tr>
+            <tr>
+              <td>
+                <span class="lang-en">a pair</span
+                ><span class="lang-zh">对子</span>
+              </td>
+              <td>×4</td>
+            </tr>
+            <tr>
+              <td>
+                <span class="lang-en">a tractor of two pairs</span
+                ><span class="lang-zh">两对连的拖拉机</span>
+              </td>
+              <td>×8</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          <span class="lang-en"
+            >So a 20-point kitty is worth 40 to an attacker who wins the last
+            trick with a single — but <strong>160</strong> to one who arranges
+            to win it with a tractor. If you are attacking and you believe the
+            declarer buried heavily, engineer the last trick: keep a trump pair
+            back rather than a lone joker.</span
+          >
+          <span class="lang-zh"
+            >因此，一个 20 分的底牌，对用单张赢下最后一轮的进攻方来说值 40
+            分——而对能用拖拉机赢下最后一轮的人来说值
+            <strong>160 分</strong
+            >。如果你是进攻方，并且判断庄家扣了重底，就要刻意去设计最后一轮：留一个主牌对子，而不是留一张光杆的王。</span
+          >
+        </p>
+        <div class="key-point">
+          <span class="key-label lang-en">The defender's min-max</span>
+          <span class="key-label lang-zh">防守方的取舍算式</span>
+          <p>
+            <span class="lang-en"
+              >If you buried 10 points, the kitty is worth at least 20 to the
+              other side. That sets your budget precisely: you may concede up to
+              about 20 points elsewhere in order to guarantee you take the last
+              trick. Conceding more than the kitty is worth means you have lost
+              the trade — at that point, stop protecting it and fight for the
+              points on the table instead.</span
+            >
+            <span class="lang-zh"
+              >如果你扣了 10 分，那么这个底牌对对方而言至少值 20
+              分。这就精确地定下了你的预算：为了确保拿下最后一轮，你最多可以在别处让出约
+              20
+              分。一旦让出的分超过底牌本身的价值，这笔交易就亏了——那就别再守底，转而去争台面上的分。</span
+            >
+          </p>
+        </div>
+
+        <h3>
+          <span class="lang-en">Playing against the bots</span
+          ><span class="lang-zh">如何对付各难度机器人</span>
+        </h3>
+        <p>
+          <span class="lang-en"
+            >All bots except <strong>Omniscient</strong> are strictly honest —
+            they only ever see their own hand and the public play history,
+            exactly like you. Knowing how each one thinks tells you how to beat
+            it.</span
+          >
+          <span class="lang-zh"
+            >除
+            <strong>Omniscient</strong>
+            之外，所有机器人都是严格诚实的——它们只能看到自己的手牌和公开的出牌记录，和你完全一样。了解它们各自的思路，就知道该怎么打败它们。</span
+          >
+        </p>
+        <table border="1">
+          <thead>
+            <tr>
+              <td>
+                <span class="lang-en">Tier</span
+                ><span class="lang-zh">难度</span>
+              </td>
+              <td>
+                <span class="lang-en">How it plays / how to beat it</span
+                ><span class="lang-zh">打法特点 / 破解思路</span>
+              </td>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Easy</td>
+              <td>
+                <span class="lang-en"
+                  >Plays the basic heuristic noisily, with occasional deliberate
+                  blunders and no card memory. Punish it by running long suits —
+                  it will not track what has gone.</span
+                >
+                <span class="lang-zh"
+                  >按基础启发式打，但带噪声，会偶尔故意失误，且完全不记牌。用长套硬走就能惩罚它——它不会记住哪些牌已经出过。</span
+                >
+              </td>
+            </tr>
+            <tr>
+              <td>Expert</td>
+              <td>
+                <span class="lang-en"
+                  >A neural net trained on the strongest teacher, used as the
+                  prior for a short search. Solid and unexciting; beat it with
+                  the tempo plays above — the hand-off and the long-suit
+                  throw.</span
+                >
+                <span class="lang-zh"
+                  >以最强教师蒸馏出的神经网络作为先验，再配一段短搜索。稳健但缺乏亮点；用上文的节奏打法——小主牌过渡与长套甩牌——来击败它。</span
+                >
+              </td>
+            </tr>
+            <tr>
+              <td>Enoch</td>
+              <td>
+                <span class="lang-en"
+                  >Plays this guide, essentially. Perfect card memory, strict
+                  discipline: it never opens with a joker, always dumps points
+                  to a winning partner, hands off with low trump. That
+                  consistency is also readable — you can predict its next move,
+                  and set traps that its playbook will walk into.</span
+                >
+                <span class="lang-zh"
+                  >基本上就是照着本指南打。记牌完美、纪律严格：从不用王领出，队友赢着就一定垫分，过渡一定用小主牌。这种一致性同时也意味着可读——你可以预判它的下一手，并布下它的手册一定会踩进去的陷阱。</span
+                >
+              </td>
+            </tr>
+            <tr>
+              <td>Grandmaster</td>
+              <td>
+                <span class="lang-en"
+                  >The strongest honest tier. It uses the playbook only to
+                  <em>propose</em> moves, then simulates each one to the end of
+                  the hand and plays whatever the simulations rate highest — so
+                  it will break the playbook's instincts when the calculation
+                  disagrees. Do not expect it to be predictable.</span
+                >
+                <span class="lang-zh"
+                  >最强的诚实难度。它只用手册来<em>提出</em>候选着法，然后把每一手模拟到本局结束，最终选择模拟评价最高的那一手——因此当计算与直觉冲突时，它会毫不犹豫地违背手册。别指望能预判它。</span
+                >
+              </td>
+            </tr>
+            <tr>
+              <td>Omniscient</td>
+              <td>
+                <span class="lang-en"
+                  >Sees every hand. It is a practice target, not a fair opponent
+                  — and it is badged as a cheater in the lobby for exactly that
+                  reason.</span
+                >
+                <span class="lang-zh"
+                  >能看到所有人的手牌。它是练习用的靶子，不是公平的对手——大厅里也正因如此把它明确标注为“作弊”。</span
+                >
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="key-point">
+          <span class="key-label lang-en">Stuck on a play?</span>
+          <span class="key-label lang-zh">拿不准该出什么？</span>
+          <p>
+            <span class="lang-en"
+              >The <strong>✨ button</strong> on your turn asks the server for
+              the move the <strong>Grandmaster</strong> tier would make from
+              <em>your</em> seat. It is computed only from what you are allowed
+              to see, so it never leaks a hidden card — it is a second opinion,
+              not an oracle.</span
+            >
+            <span class="lang-zh"
+              >轮到你时出现的 <strong>✨ 按钮</strong>，会向服务器询问
+              <strong>Grandmaster</strong>
+              难度在<em>你这个位置</em>会怎么打。它只根据你有权看到的信息计算，绝不会泄露任何暗牌——它是第二意见，而不是天机。</span
+            >
+          </p>
+        </div>
+
+        <h3>
+          <span class="lang-en">Advanced checklist</span
+          ><span class="lang-zh">进阶速查表</span>
+        </h3>
+        <ul>
+          <li>
+            <span class="lang-en"
+              >Count trump before the first trick. Above 12, take control; below
+              6, play denial.</span
+            ><span class="lang-zh"
+              >第一轮之前先数主牌。12 张以上就掌控局面，6 张以下就打拦截。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              >Declare on pairs and tractors, not raw length — and never on card
+              six.</span
+            ><span class="lang-zh"
+              >亮主看对子和拖拉机，而不是单纯的张数——也绝不要在第六张牌就亮。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              >Bury for a void first, points second, and only within your
+              strength budget.</span
+            ><span class="lang-zh"
+              >扣底先求缺门，其次才是扣分，而且必须在强度预算之内。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              >Cash boss singles, then boss pairs and tractors, early.</span
+            ><span class="lang-zh"
+              >趁早兑现最大的单张，然后是最大的对子和拖拉机。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              >Hand off with your smallest trump; never with a joker or the rank
+              card.</span
+            ><span class="lang-zh">过渡用最小的主牌；绝不用王或级牌。</span>
+          </li>
+          <li>
+            <span class="lang-en"
+              >Throw a long suit only once its tops are gone and the opponents
+              are void.</span
+            ><span class="lang-zh"
+              >只有当这门花色的大牌走完、且对手缺门时，才甩长套。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              >Break a pair rather than concede a point card to a winning
+              opponent.</span
+            ><span class="lang-zh"
+              >宁可拆对子，也不要把分牌送给赢着的对手。</span
+            >
+          </li>
+          <li>
+            <span class="lang-en"
+              >Keep a trump pair, not a lone joker, if you intend to multiply
+              the kitty.</span
+            ><span class="lang-zh"
+              >若打算放大底牌倍数，要留一个主牌对子，而不是一张光杆王。</span
+            >
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- All page JS lives in EXTERNAL, same-origin scripts so it runs under
+         the production CSP (script-src 'self'). No inline script.
+         guide-common.js must load first — strategy.js reads window.ShengjiGuide. -->
+    <script src="guide-common.js"></script>
+    <script src="strategy.js"></script>
+  </body>
+</html>
