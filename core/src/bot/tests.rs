@@ -4707,6 +4707,18 @@ fn test_enoch_flip_strands_human_then_finalizes_without_another_click() {
         // after each resume so a flip that lands mid-burst is observed in Draw.
         let mut pending = result.pause;
         while pending.is_some() {
+            // Stop driving the moment we leave Draw. This scenario patches the
+            // hands to UNEQUAL sizes (3/7/2/2) to construct the bid-and-flip
+            // situation, which is fine for the Draw phase but is not a playable
+            // deal: once the hand starts, the 2-card seats can be asked to follow
+            // a 3-card lead, and no legal play exists for them. Continuing to
+            // drive bots past finalization therefore failed with `IllegalPlay`
+            // roughly one run in ten — a flaky failure that had nothing to do
+            // with what this test asserts (Draw-phase behavior). The check below
+            // observes the finalized state and returns.
+            if !matches!(game.dump_state().unwrap(), GameState::Draw(_)) {
+                break;
+            }
             let r = finish_deferred_bot_trick(&mut game, &logger).unwrap();
             check_after_step(&game, &mut flipped);
             pending = r.pause;
