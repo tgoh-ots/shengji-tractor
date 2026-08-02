@@ -5,6 +5,15 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+    ignore:
+      # The Rust toolchain is pinned by `rust-toolchain.toml` (1.92.0), which is
+      # what actually selects the compiler in CI and in the deploy image. The
+      # version tag on this action only names a toolchain, so bumping it here
+      # alone either does nothing or silently disagrees with the pin. The pin is
+      # deliberate — `#![deny(warnings)]` makes the build toolchain-sensitive, so
+      # moving it means re-running fmt/clippy/test (see CLAUDE.md). Bump the
+      # toolchain and this action together, by hand.
+      - dependency-name: "dtolnay/rust-toolchain"
 
   # Rust crates (the whole Cargo workspace lives at the repo root).
   - package-ecosystem: "cargo"
@@ -12,6 +21,38 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    groups:
+      # `axum`, `tower-http`, `hyper`, `axum-test` and `http` are one generation:
+      # they all share the `http` types across their public APIs. Bumping any of
+      # them on its own puts two incompatible `http` versions in the graph, so
+      # they must be proposed together rather than piecemeal.
+      axum-http-stack:
+        patterns:
+          - "axum"
+          - "axum-*"
+          - "tower-http"
+          - "hyper"
+          - "http"
+          - "http-body"
+    ignore:
+      # Major bumps of this stack are a code migration, not a version bump, and a
+      # PR that can never compile just keeps CI red. Concretely, the backend is on
+      # the http-0.2 generation (axum 0.6.20 / tower-http 0.4.4 / hyper 0.14 /
+      # axum-test 13.4). Moving to `http` 1.x requires axum 0.7+ — which removed
+      # the `headers` feature this crate uses (it moved to `axum-extra`) and
+      # changed the body types — and axum 0.8 additionally changed wildcard route
+      # syntax (`/*path` -> `/{*path}`), which `build_app` relies on. Do that
+      # upgrade deliberately, then drop these entries.
+      - dependency-name: "http"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "axum"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "axum-test"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "tower-http"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "hyper"
+        update-types: ["version-update:semver-major"]
 
   # Frontend npm packages.
   - package-ecosystem: "npm"
