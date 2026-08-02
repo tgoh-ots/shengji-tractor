@@ -43,7 +43,7 @@ zstd = "0.12"
 
 [dev-dependencies]
 axum-test = "13.0"
-tower = { version = "0.4", features = ["util"] }
+tower = { version = "0.5", features = ["util"] }
 # WebSocket client for the end-to-end integration test (`tests/e2e_game.rs`).
 # axum-test 13 has no WS support, so the test binds a real TcpListener and
 # drives the server over an actual WebSocket. Pinned to the version already in
