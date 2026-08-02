@@ -49,3 +49,4 @@ tower = { version = "0.5", features = ["util"] }
 # drives the server over an actual WebSocket. Pinned to the version already in
 # Cargo.lock (a transitive axum dep) so `cargo test --locked` resolves cleanly.
 tokio-tungstenite = "0.20"
+ruzstd = "0.4"
