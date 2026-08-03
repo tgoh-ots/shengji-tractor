@@ -195,8 +195,53 @@ where
         .expect("send chat");
 }
 
+/// Serializes the end-to-end tests against each other.
+///
+/// These tests boot a REAL server in this process and tune bot behaviour through
+/// `SHENGJI_BOT_BUDGET_MS`, which is process-global — and they deliberately want
+/// different values: the responsiveness test sets 3000ms so the bot genuinely
+/// thinks, while the others set 10ms to stay fast. `cargo test` runs them in
+/// parallel by default, so without this they race, and a test could silently run
+/// under another's budget. That makes failures load-dependent and very hard to
+/// attribute — exactly the kind of confusion you do not want around the
+/// no-hidden-card-leakage assertion.
+///
+/// The core-crate tests solve this with a thread-local override
+/// (`policy::scoped_search_budget_ms`), but that cannot work here: the search
+/// runs on the server's own `spawn_blocking` workers, not the test's thread. So
+/// these tests take a lock instead. They are slow but few, and serializing them
+/// costs far less than a mystery failure.
+async fn e2e_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    // A tokio mutex, not a std one: the guard is deliberately held for the whole
+    // (async) test body, and std guards must not be held across an await.
+    static E2E_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    // tokio's mutex does not poison, so a panicking test cannot cascade into the
+    // rest of the suite.
+    let guard = E2E_LOCK.lock().await;
+
+    // Reset the bot knobs to a known fast baseline on EVERY acquisition.
+    //
+    // Serializing alone is not enough, because these are environment variables:
+    // they persist after the test that set them. `e2e_chat_responsive_while_bot_thinks`
+    // deliberately slows the bots down (3000ms budget, 1500ms pauses) so there is
+    // a window in which one is thinking — and nothing put them back. Whichever
+    // test ran next then drove the game with 1500ms pauses per bot action and
+    // could fail to reach the Play phase inside its bounded loop, which surfaced
+    // as an intermittent failure of the no-hidden-card-leakage test that had
+    // nothing to do with leakage.
+    //
+    // Establishing the baseline here makes each test independent of run order; a
+    // test that wants different values simply sets them after taking the guard.
+    std::env::set_var("SHENGJI_BOT_BUDGET_MS", "10");
+    std::env::set_var("SHENGJI_BOT_ACTION_PAUSE_MS", "0");
+    std::env::set_var("SHENGJI_BOT_TRICK_PAUSE_MS", "0");
+
+    guard
+}
+
 #[tokio::test]
 async fn e2e_game_no_hidden_card_leakage() {
+    let _serialized = e2e_guard().await;
     let addr = spawn_server().await;
     let url = format!("ws://{addr}/api");
     let (mut socket, _resp) = tokio_tungstenite::connect_async(&url)
@@ -272,8 +317,15 @@ async fn e2e_game_no_hidden_card_leakage() {
     // CI (the per-recv timeout already bounds each receive). We also stop early
     // once we've observed several in-Play States with zero leakage.
     let mut plays_made = 0usize;
+    // Wall-clock budget for driving the hand. This is generous on purpose: the
+    // loop is bounded by TIME, not by progress, so on a machine where the whole
+    // workspace's tests are running in parallel the bots simply get through
+    // fewer tricks per second. At 45s that produced an intermittent failure of
+    // the `reached_play_phase` assertion below — which reads alarmingly like a
+    // leak in the repo's flagship honesty test, but never was one.
+    const DRIVE_DEADLINE: Duration = Duration::from_secs(150);
     let drive_started = Instant::now();
-    while drive_started.elapsed() < Duration::from_secs(45) {
+    while drive_started.elapsed() < DRIVE_DEADLINE {
         let msg = match next_json(&mut socket).await {
             Some(v) => v,
             None => break,
@@ -348,9 +400,11 @@ async fn e2e_game_no_hidden_card_leakage() {
     );
     assert!(
         reached_play_phase,
-        "the game never progressed into the Play phase (saw last phase {:?}, \
-         {} states, {} actions sent)",
-        last_phase, states_seen, actions_sent
+        "NOT A LEAK: every one of the {} observed states passed the redaction \
+         check. This is the progress bound — the game never reached the Play \
+         phase within {:?} (last phase {:?}, {} actions sent). Usually means the \
+         machine was too loaded to play enough tricks in time.",
+        states_seen, DRIVE_DEADLINE, last_phase, actions_sent
     );
 
     // Prefer a fully-finished hand, but solid progress + zero leakage is the
@@ -458,6 +512,7 @@ fn next_action_for(view: &GameState, me: PlayerID) -> Option<Action> {
 ///     the server accept it and the hand shrink.
 #[tokio::test]
 async fn e2e_suggest_play_returns_legal_play_from_own_hand() {
+    let _serialized = e2e_guard().await;
     // Keep the per-decision search budget tiny: both the bots' moves and the
     // suggestion itself run the time-boxed search.
     std::env::set_var("SHENGJI_BOT_BUDGET_MS", "10");
@@ -657,6 +712,7 @@ async fn e2e_suggest_play_returns_legal_play_from_own_hand() {
 /// blocking worker without the lock, so the echo returns quickly.
 #[tokio::test]
 async fn e2e_chat_responsive_while_bot_thinks() {
+    let _serialized = e2e_guard().await;
     // Give the Expert-bot search a big budget so a bot's "thinking" window is wide
     // and unmistakable; and stretch the per-action pause so bots act slowly,
     // widening the window in which it is a bot's turn. (Set before the server
@@ -813,6 +869,7 @@ async fn e2e_chat_responsive_while_bot_thinks() {
 /// redaction-safe public lobby listing must still be.
 #[tokio::test]
 async fn full_state_json_route_is_not_exposed() {
+    let _serialized = e2e_guard().await;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
