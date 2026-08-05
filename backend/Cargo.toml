@@ -48,5 +48,5 @@ tower = { version = "0.5", features = ["util"] }
 # axum-test 13 has no WS support, so the test binds a real TcpListener and
 # drives the server over an actual WebSocket. Pinned to the version already in
 # Cargo.lock (a transitive axum dep) so `cargo test --locked` resolves cleanly.
-tokio-tungstenite = "0.20"
+tokio-tungstenite = "0.30"
 ruzstd = "0.4"
